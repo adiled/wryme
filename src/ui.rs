@@ -13,12 +13,13 @@
 //   └──────────────────────────────────────┘
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Position},
+    layout::{Alignment, Constraint, Direction, Layout, Position},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Message, Role};
 use crate::input::Input;
@@ -36,11 +37,11 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         .split(area);
 
     // ---- input bar (top) ----
-    let prompt = "› ";
-    let input_line = Line::from(vec![
-        Span::styled(prompt, Style::default().fg(Color::Cyan)),
-        Span::raw(&input.text),
-    ]);
+    // Right-anchored: text is right-aligned within the box. A trailing space
+    // reserves the rightmost inner column for the terminal cursor when the
+    // caret is at the end. The "now" of the conversation lives at this right
+    // edge: typing happens here, and the assistant reply emerges from here.
+    let display_text = format!("{} ", input.text);
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(if app.in_flight {
@@ -53,18 +54,23 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         } else {
             " write. Enter to send, Ctrl-C to quit "
         });
-    let input_widget = Paragraph::new(input_line).block(input_block);
+    let input_widget = Paragraph::new(display_text)
+        .alignment(Alignment::Right)
+        .block(input_block);
     f.render_widget(input_widget, chunks[0]);
 
-    // Place the terminal cursor inside the input box.
-    let cursor_x = chunks[0].x + 1 + prompt.len() as u16 + input.display_col();
+    // Terminal cursor sits at the column corresponding to the caret's
+    // position within the rendered (right-aligned) string.
+    let text_w = UnicodeWidthStr::width(input.text.as_str()) as u16;
+    let inner_right = chunks[0].x + chunks[0].width.saturating_sub(2);
+    let inner_left = chunks[0].x + 1;
+    let width_after_caret = text_w.saturating_sub(input.display_col());
+    let cursor_x = inner_right.saturating_sub(width_after_caret).max(inner_left);
     let cursor_y = chunks[0].y + 1;
-    if cursor_x < chunks[0].x + chunks[0].width.saturating_sub(1) {
-        f.set_cursor_position(Position {
-            x: cursor_x,
-            y: cursor_y,
-        });
-    }
+    f.set_cursor_position(Position {
+        x: cursor_x,
+        y: cursor_y,
+    });
 
     // ---- messages (middle, newest first) ----
     let mut lines: Vec<Line> = Vec::new();
@@ -124,6 +130,12 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
         Role::User => (Color::Green, "you"),
         Role::Assistant => (Color::Magenta, "assistant"),
     };
+    // Assistant is right-anchored: header and reply align flush right.
+    // User and brain stay flush left.
+    let reply_align = match msg.role {
+        Role::User => Alignment::Left,
+        Role::Assistant => Alignment::Right,
+    };
 
     let mut header = vec![
         Span::styled(
@@ -146,7 +158,7 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
             Style::default().fg(Color::DarkGray),
         ));
     }
-    out.push(Line::from(header));
+    out.push(Line::from(header).alignment(reply_align));
 
     let has_reply = !msg.content.is_empty();
     let has_brain = !msg.brain.is_empty();
@@ -155,28 +167,34 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
     let cursor_orphan = msg.streaming && !has_reply && !has_brain;
 
     if cursor_orphan {
-        out.push(Line::from(Span::styled(
-            "▌",
-            Style::default().fg(Color::DarkGray),
-        )));
+        out.push(
+            Line::from(Span::styled(
+                "▌",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(reply_align),
+        );
     }
 
     // Reply (newest in time, sits at the top of this message's block).
     if has_reply {
         let last_idx = msg.content.split('\n').count().saturating_sub(1);
         for (i, raw) in msg.content.split('\n').enumerate() {
-            if i == last_idx && cursor_in_reply {
-                out.push(Line::from(vec![
+            let line = if i == last_idx && cursor_in_reply {
+                Line::from(vec![
                     Span::raw(raw.to_string()),
                     Span::styled("▌", Style::default().fg(Color::DarkGray)),
-                ]));
+                ])
             } else {
-                out.push(Line::from(raw.to_string()));
-            }
+                Line::from(raw.to_string())
+            };
+            out.push(line.alignment(reply_align));
         }
     }
 
-    // Brain (older in time, sits beneath the reply as a footnote).
+    // Brain (older in time, sits beneath the reply as a footnote). Always
+    // left-aligned regardless of which role owns the message, because the
+    // brain belongs to the reflective margin.
     if has_brain {
         if has_reply {
             out.push(Line::from(""));
@@ -184,20 +202,24 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
         let brain_style = Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC);
-        out.push(Line::from(Span::styled(
-            "brain",
-            brain_style.add_modifier(Modifier::BOLD),
-        )));
+        out.push(
+            Line::from(Span::styled(
+                "brain",
+                brain_style.add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Left),
+        );
         let last_idx = msg.brain.split('\n').count().saturating_sub(1);
         for (i, raw) in msg.brain.split('\n').enumerate() {
-            if i == last_idx && cursor_in_brain {
-                out.push(Line::from(vec![
+            let line = if i == last_idx && cursor_in_brain {
+                Line::from(vec![
                     Span::styled(raw.to_string(), brain_style),
                     Span::styled("▌", Style::default().fg(Color::DarkGray)),
-                ]));
+                ])
             } else {
-                out.push(Line::from(Span::styled(raw.to_string(), brain_style)));
-            }
+                Line::from(Span::styled(raw.to_string(), brain_style))
+            };
+            out.push(line.alignment(Alignment::Left));
         }
     }
 }
