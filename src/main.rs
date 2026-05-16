@@ -117,6 +117,9 @@ async fn run(
                     StreamEvent::Delta { text } => {
                         app.append_to_last_assistant(&text);
                     }
+                    StreamEvent::Brain { text } => {
+                        app.append_to_last_brain(&text);
+                    }
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if let Some(t) = in_flight_task.take() {

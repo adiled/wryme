@@ -6,6 +6,7 @@
 //
 // We emit a stream of `StreamEvent` values the UI can consume:
 //   - Delta { text }            : content delta to append to the current reply
+//   - Brain { text }            : reasoning/thinking delta (DeepSeek, Qwen, etc)
 //   - Done                      : clean end of stream
 //   - Error { message }         : anything we couldn't classify as success
 
@@ -25,6 +26,7 @@ pub struct ApiMessage {
 #[derive(Debug)]
 pub enum StreamEvent {
     Delta { text: String },
+    Brain { text: String },
     Done,
     Error { message: String },
 }
@@ -188,6 +190,11 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                                 let _ = tx.send(StreamEvent::Delta { text: content });
                             }
                         }
+                        if let Some(reasoning) = delta.reasoning_content {
+                            if !reasoning.is_empty() {
+                                let _ = tx.send(StreamEvent::Brain { text: reasoning });
+                            }
+                        }
                     }
                 }
             }
@@ -216,6 +223,11 @@ struct Choice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// Vendor extension shipped by DeepSeek, Qwen, OpenRouter passthroughs,
+    /// and others that surface reasoning models' chain of thought separately
+    /// from the visible answer. We render this as the "brain" block.
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 fn truncate(s: &str, max: usize) -> String {

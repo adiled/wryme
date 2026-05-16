@@ -12,6 +12,10 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Reasoning / chain-of-thought from the model, if it sent any.
+    /// Streamed before `content`, rendered below the reply (older in time)
+    /// as a dimmer "brain" block.
+    pub brain: String,
     /// True while the model is still streaming into this message.
     pub streaming: bool,
 }
@@ -46,6 +50,7 @@ impl App {
         self.messages.push(Message {
             role: Role::User,
             content,
+            brain: String::new(),
             streaming: false,
         });
     }
@@ -54,6 +59,7 @@ impl App {
         self.messages.push(Message {
             role: Role::Assistant,
             content: String::new(),
+            brain: String::new(),
             streaming: true,
         });
     }
@@ -66,6 +72,17 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.streaming)
         {
             m.content.push_str(delta);
+        }
+    }
+
+    pub fn append_to_last_brain(&mut self, delta: &str) {
+        if let Some(m) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::Assistant && m.streaming)
+        {
+            m.brain.push_str(delta);
         }
     }
 

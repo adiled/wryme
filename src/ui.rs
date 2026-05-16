@@ -134,30 +134,70 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
         ),
     ];
     if msg.streaming {
+        let label = if !msg.content.is_empty() {
+            "  writing…"
+        } else if !msg.brain.is_empty() {
+            "  thinking…"
+        } else {
+            "  streaming…"
+        };
         header.push(Span::styled(
-            "  • streaming…",
+            label.to_string(),
             Style::default().fg(Color::DarkGray),
         ));
     }
     out.push(Line::from(header));
 
-    if msg.content.is_empty() && msg.streaming {
+    let has_reply = !msg.content.is_empty();
+    let has_brain = !msg.brain.is_empty();
+    let cursor_in_reply = msg.streaming && has_reply;
+    let cursor_in_brain = msg.streaming && !has_reply && has_brain;
+    let cursor_orphan = msg.streaming && !has_reply && !has_brain;
+
+    if cursor_orphan {
         out.push(Line::from(Span::styled(
             "▌",
             Style::default().fg(Color::DarkGray),
         )));
-        return;
     }
 
-    let last_idx = msg.content.split('\n').count().saturating_sub(1);
-    for (i, raw) in msg.content.split('\n').enumerate() {
-        if i == last_idx && msg.streaming {
-            out.push(Line::from(vec![
-                Span::raw(raw.to_string()),
-                Span::styled("▌", Style::default().fg(Color::DarkGray)),
-            ]));
-        } else {
-            out.push(Line::from(raw.to_string()));
+    // Reply (newest in time, sits at the top of this message's block).
+    if has_reply {
+        let last_idx = msg.content.split('\n').count().saturating_sub(1);
+        for (i, raw) in msg.content.split('\n').enumerate() {
+            if i == last_idx && cursor_in_reply {
+                out.push(Line::from(vec![
+                    Span::raw(raw.to_string()),
+                    Span::styled("▌", Style::default().fg(Color::DarkGray)),
+                ]));
+            } else {
+                out.push(Line::from(raw.to_string()));
+            }
+        }
+    }
+
+    // Brain (older in time, sits beneath the reply as a footnote).
+    if has_brain {
+        if has_reply {
+            out.push(Line::from(""));
+        }
+        let brain_style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
+        out.push(Line::from(Span::styled(
+            "brain",
+            brain_style.add_modifier(Modifier::BOLD),
+        )));
+        let last_idx = msg.brain.split('\n').count().saturating_sub(1);
+        for (i, raw) in msg.brain.split('\n').enumerate() {
+            if i == last_idx && cursor_in_brain {
+                out.push(Line::from(vec![
+                    Span::styled(raw.to_string(), brain_style),
+                    Span::styled("▌", Style::default().fg(Color::DarkGray)),
+                ]));
+            } else {
+                out.push(Line::from(Span::styled(raw.to_string(), brain_style)));
+            }
         }
     }
 }
