@@ -33,12 +33,16 @@ pub struct Client {
     base_url: String,
     api_key: String,
     model: String,
+    /// When true, replies are generated locally from a canned list instead
+    /// of being fetched over the network. Lets a brand-new user without an
+    /// API key see the TUI work end-to-end.
+    pub demo: bool,
 }
 
 impl Client {
-    pub fn new(base_url: String, api_key: String, model: String) -> Result<Self> {
+    pub fn new(base_url: String, api_key: String, model: String, demo: bool) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("writeme/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("building http client")?;
         Ok(Self {
@@ -46,6 +50,7 @@ impl Client {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,
+            demo,
         })
     }
 
@@ -60,6 +65,17 @@ impl Client {
         messages: Vec<ApiMessage>,
         tx: UnboundedSender<StreamEvent>,
     ) {
+        if self.demo {
+            let prompt = messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            crate::demo::stream(prompt, tx.clone()).await;
+            let _ = tx.send(StreamEvent::Done);
+            return;
+        }
         if let Err(e) = self.stream_inner(messages, &tx).await {
             let _ = tx.send(StreamEvent::Error {
                 message: format!("{:#}", e),

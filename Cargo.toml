@@ -1,9 +1,9 @@
 [package]
-name = "writeme"
+name = "wryme"
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-description = "writeme — streaming LLM chat TUI, input on top, newest reply right below it"
+description = "wryme — streaming LLM chat TUI, input on top, newest reply right below it"
 
 [[bin]]
 name = "wme"

@@ -87,7 +87,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, model: &str) {
     // ---- status bar ----
     let dot = " • ";
     let pieces = vec![
-        Span::styled("writeme", Style::default().fg(Color::Cyan)),
+        Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
         Span::raw(model.to_string()),
         Span::raw(dot),

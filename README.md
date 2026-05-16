@@ -1,4 +1,6 @@
-# writeme
+# wryme
+
+(pronounced "write me", said quickly.)
 
 A small, calm window in your terminal where you can chat with an AI.
 
@@ -8,13 +10,13 @@ that, oldest at the bottom. No tabs, no menus, no surprises.
 
 The little command you'll type to open it is `wme`.
 
-## What you need
+## Try it before doing anything
 
-- A terminal (the black-and-white text window on your computer).
-- An "API key" — a long secret password from an AI company that lets the
-  program talk to their AI on your behalf. The most common one is from
-  OpenAI: <https://platform.openai.com/api-keys>.
-- About a minute.
+You don't need a key, a login, or an internet connection to see what this
+thing looks like. Just install it (below) and run `wme`. With nothing set up,
+it answers in canned nonsense so you can poke around the screen and decide
+whether you want it. As soon as you set a real API key, it switches to
+talking to a real model.
 
 ## Installing it
 
@@ -33,16 +35,20 @@ your computer to add it, or add this line to your `~/.zshrc` or `~/.bashrc`:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Telling it your key
+## Hooking it up to a real AI
 
-Once, before you start it, paste your API key into the terminal like this:
+You need an **API key** — a long secret password from an AI company that lets
+the program talk to their AI on your behalf. The most common one is from
+OpenAI: <https://platform.openai.com/api-keys>.
+
+Once, before you start it, paste your key into the terminal like this:
 
 ```sh
 export OPENAI_API_KEY="sk-...your-key-goes-here..."
 ```
 
-If you want this to stick around so you don't retype it every time, add that
-same line to your `~/.zshrc` or `~/.bashrc`.
+To make this stick, add that line to your `~/.zshrc` or `~/.bashrc` so it's
+set every time you open a new terminal.
 
 ## Using it
 
@@ -71,19 +77,19 @@ When you're done, press **Ctrl-C** to close it.
 
 That's the whole thing.
 
-## If you want to use a different AI
+## Using a different AI
 
 `wme` talks to anything that follows the same protocol OpenAI uses — which is
 nearly all of them these days. You point it at a different "base URL":
 
 ```sh
 # Run a model on your own computer with Ollama:
-OPENAI_BASE_URL=http://localhost:11434/v1 WRITEME_MODEL=llama3 wme
+OPENAI_BASE_URL=http://localhost:11434/v1 WRYME_MODEL=llama3 wme
 
 # Use Groq instead of OpenAI:
 OPENAI_BASE_URL=https://api.groq.com/openai/v1 \
   OPENAI_API_KEY=gsk-... \
-  WRITEME_MODEL=llama-3.3-70b-versatile \
+  WRYME_MODEL=llama-3.3-70b-versatile \
   wme
 ```
 
@@ -93,6 +99,8 @@ If you only ever use one, set those once in your `~/.zshrc` and forget them.
 
 - **`wme: command not found`** — your `~/.local/bin` isn't on your PATH. See
   the install section above.
+- **The status bar says `demo (no OPENAI_API_KEY set)`** — that's the canned
+  nonsense mode. Set your key as shown above to talk to a real model.
 - **`upstream 401`** — the API key is wrong, missing, or expired.
 - **`upstream 404`** — the model name is wrong, or the base URL is wrong.
 - **Nothing happens when I press Enter** — make sure you actually typed

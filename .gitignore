@@ -11,4 +11,4 @@ logs/
 # Local-only files (intentionally untracked)
 AGENTS.md
 dev.sh
-.writeme/
+.wryme/

@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 mod api;
 mod app;
+mod demo;
 mod input;
 mod ui;
 
@@ -24,12 +25,12 @@ use input::Input;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "writeme",
+    name = "wryme",
     version,
     about = "streaming LLM chat TUI — input on top, newest reply right below it"
 )]
 struct Args {
-    /// Model name to send upstream. Defaults to $WRITEME_MODEL or gpt-4o-mini.
+    /// Model name to send upstream. Defaults to $WRYME_MODEL or gpt-4o-mini.
     #[arg(long)]
     model: Option<String>,
 
@@ -60,12 +61,21 @@ async fn main() -> Result<()> {
         .api_key
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
         .unwrap_or_default();
-    let model = args
-        .model
-        .or_else(|| std::env::var("WRITEME_MODEL").ok())
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let user_model = args.model.or_else(|| std::env::var("WRYME_MODEL").ok());
 
-    let client = Client::new(base_url, api_key, model).context("building api client")?;
+    // Demo mode = the user has nothing configured. As soon as they set
+    // OPENAI_API_KEY or point us at a local server, we switch to real.
+    let is_default_url = base_url == "https://api.openai.com/v1";
+    let demo = api_key.is_empty() && is_default_url;
+    let model = user_model.unwrap_or_else(|| {
+        if demo {
+            "demo (no OPENAI_API_KEY set)".to_string()
+        } else {
+            "gpt-4o-mini".to_string()
+        }
+    });
+
+    let client = Client::new(base_url, api_key, model, demo).context("building api client")?;
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();

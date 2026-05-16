@@ -1,4 +1,4 @@
-# writeme — a terminal writing surface that doesn't suck
+# wryme — streaming LLM chat TUI (pronounced "write me", said quickly)
 #
 # One artifact: the binary. No daemon, no install dir bullshit.
 
@@ -16,7 +16,7 @@ INSTALL_BIN := $(INSTALL_DIR)/$(BIN_NAME)
 .DEFAULT_GOAL := check
 
 help:
-	@echo "writeme — a terminal writing surface that doesn't suck"
+	@echo "wryme — streaming LLM chat TUI"
 	@echo ""
 	@echo "fast iteration (no link):"
 	@echo "  make check       cargo check"

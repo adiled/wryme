@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# writeme release script
+# wryme release script
 #
 # Usage: ./release.sh [patch|minor|major|version]
 #   patch: 1.0.0 -> 1.0.1 (default)
@@ -39,10 +39,10 @@ increment_version() {
 
 if [[ "$TYPE" =~ ^(patch|minor|major)$ ]]; then
     NEW_VERSION=$(increment_version "$VERSION" "$TYPE")
-    log_info "Releasing writeme v$VERSION -> v$NEW_VERSION ($TYPE bump)"
+    log_info "Releasing wryme v$VERSION -> v$NEW_VERSION ($TYPE bump)"
 else
     NEW_VERSION="$TYPE"
-    log_info "Releasing writeme v$NEW_VERSION (specific)"
+    log_info "Releasing wryme v$NEW_VERSION (specific)"
 fi
 
 echo "$NEW_VERSION" > VERSION
