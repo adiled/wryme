@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target
+
+# Runtime logs / pids
+logs/
+*.log
+
+# OS
+.DS_Store
+
+# Local-only files (intentionally untracked)
+AGENTS.md
+dev.sh
+.writeme/

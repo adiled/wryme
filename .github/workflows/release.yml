@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-macos-
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: Lipo + bundle
+        run: |
+          mkdir -p out
+          lipo -create -output out/wme-macos-universal \
+            target/aarch64-apple-darwin/release/wme \
+            target/x86_64-apple-darwin/release/wme
+          chmod +x out/wme-macos-universal
+          file out/wme-macos-universal
+          cp out/wme-macos-universal out/wme
+          cp LICENSE README.md out/
+          tar -czvf out/wme-macos-universal.tar.gz -C out wme LICENSE README.md
+          rm out/wme
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            out/wme-macos-universal
+            out/wme-macos-universal.tar.gz
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-linux-
+      - name: Build
+        run: cargo build --release
+      - name: Bundle
+        run: |
+          mkdir -p out
+          cp target/release/wme out/wme-linux-x86_64
+          chmod +x out/wme-linux-x86_64
+          cp out/wme-linux-x86_64 out/wme
+          cp LICENSE README.md out/
+          tar -czvf out/wme-linux-x86_64.tar.gz -C out wme LICENSE README.md
+          rm out/wme
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            out/wme-linux-x86_64
+            out/wme-linux-x86_64.tar.gz
+
+  publish:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create release
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/macos/wme-macos-universal \
+            dist/macos/wme-macos-universal.tar.gz \
+            dist/linux/wme-linux-x86_64 \
+            dist/linux/wme-linux-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
