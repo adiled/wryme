@@ -1,5 +1,5 @@
 // A single-line, grapheme-aware input field. Lives at the top of the screen.
-// Multiline submission can come later — for now, Enter submits, Shift-Enter
+// Multiline submission can come later. For now, Enter submits, Shift-Enter
 // (if your terminal sends it) inserts a literal newline character.
 
 use unicode_segmentation::UnicodeSegmentation;

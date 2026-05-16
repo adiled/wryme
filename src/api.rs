@@ -5,9 +5,9 @@
 // LM Studio, and so on. This is the de-facto industry baseline.
 //
 // We emit a stream of `StreamEvent` values the UI can consume:
-//   - Delta { text }            — content delta to append to the current reply
-//   - Done                      — clean end of stream
-//   - Error { message }         — anything we couldn't classify as success
+//   - Delta { text }            : content delta to append to the current reply
+//   - Done                      : clean end of stream
+//   - Error { message }         : anything we couldn't classify as success
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -193,7 +193,7 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
             }
             Err(_) => {
                 // Some providers emit non-JSON keepalive comments or vendor
-                // events. Ignore — only valid JSON matters.
+                // events. Ignore. Only valid JSON matters.
             }
         }
     }

@@ -28,7 +28,7 @@ use input::Input;
 #[command(
     name = "wryme",
     version,
-    about = "streaming LLM chat TUI — input on top, newest reply right below it"
+    about = "streaming LLM chat TUI. Input on top, newest reply right below it."
 )]
 struct Args {
     /// Name of the station to use. Defaults to the env-defined default
@@ -168,7 +168,7 @@ fn handle_key(
         }
         KeyCode::Enter => {
             if app.in_flight {
-                app.note("still streaming — Esc to cancel");
+                app.note("still streaming. Esc to cancel");
                 return;
             }
             let text = input.take().trim().to_string();

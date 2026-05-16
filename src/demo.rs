@@ -23,7 +23,7 @@ you closed without meaning to; the friend you keep meaning to text; the soup, wh
 supposed to be lunch but is now an idea.",
 
     "imagine a town with one traffic light. now imagine the traffic light is bored. it has \
-seen the same six cars for nine years. it considers, briefly, going red and staying red — \
+seen the same six cars for nine years. it considers, briefly, going red and staying red, \
 not out of malice, only curiosity. it does not. it never does.",
 
     "fortune: the next thing you do will be slightly easier than you expect. you will not \

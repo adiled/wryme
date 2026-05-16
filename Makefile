@@ -1,4 +1,4 @@
-# wryme — streaming LLM chat TUI (pronounced "write me", said quickly)
+# wryme. Streaming LLM chat TUI (pronounced "write me", said quickly).
 #
 # One artifact: the binary. No daemon, no install dir bullshit.
 
@@ -16,7 +16,7 @@ INSTALL_BIN := $(INSTALL_DIR)/$(BIN_NAME)
 .DEFAULT_GOAL := check
 
 help:
-	@echo "wryme — streaming LLM chat TUI"
+	@echo "wryme. Streaming LLM chat TUI."
 	@echo ""
 	@echo "fast iteration (no link):"
 	@echo "  make check       cargo check"
@@ -53,7 +53,7 @@ uninstall:
 		rm -f "$(INSTALL_BIN)"; \
 		echo "removed -> $(INSTALL_BIN)"; \
 	else \
-		echo "no $(INSTALL_BIN) — already gone"; \
+		echo "no $(INSTALL_BIN), already gone"; \
 	fi
 
 test:

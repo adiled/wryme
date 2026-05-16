@@ -89,7 +89,7 @@ impl App {
             });
         }
         for m in &self.messages {
-            // Skip an empty streaming placeholder — we send the history
+            // Skip an empty streaming placeholder. We send the history
             // BEFORE the assistant turn we're about to fill.
             if m.streaming && m.content.is_empty() {
                 continue;

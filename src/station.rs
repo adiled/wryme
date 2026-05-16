@@ -2,11 +2,11 @@
 // grandma-layer of provider selection. One dial. No second decision.
 //
 // Sources, in order:
-//   1. Built-in `demo` station — always present, talks to nobody, streams
+//   1. Built-in `demo` station. Always present, talks to nobody, streams
 //      canned replies. The thing a brand-new user lands on.
-//   2. `WME_DEFAULT_STATION_*` env vars — defines a single "default" station.
+//   2. `WME_DEFAULT_STATION_*` env vars. Defines a single "default" station.
 //      If the user only sets a key, we pre-fill OpenAI defaults around it.
-//   3. `~/.config/wryme/stations.toml` — any extra stations the user has
+//   3. `~/.config/wryme/stations.toml`. Any extra stations the user has
 //      written down. Free-form list.
 //
 // Selection: `--station NAME` if given (looked up by exact name), else the
@@ -103,7 +103,7 @@ fn from_env() -> Option<Station> {
         .unwrap_or_default();
     let model = std::env::var("WME_DEFAULT_STATION_MODEL").ok();
 
-    // If the user has set absolutely nothing, there's no env station — we'll
+    // If the user has set absolutely nothing, there's no env station. We'll
     // fall through to demo.
     if name.is_none() && url.is_none() && key.is_empty() && model.is_none() {
         return None;
@@ -137,7 +137,7 @@ pub fn pick<'a>(stations: &'a [Station], requested: Option<&str>) -> Result<&'a 
             .with_context(|| {
                 let known: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
                 format!(
-                    "no station named '{}' — known: {}",
+                    "no station named '{}'. Known: {}",
                     name,
                     known.join(", ")
                 )

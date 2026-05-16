@@ -42,10 +42,10 @@ You pick one and you talk to it. That's all there is to it.
 
 Three ways you can have stations:
 
-1. **`demo`** — always there. Built in. Streams canned nonsense. Zero setup.
-2. **The default station** — one you set up once in your `~/.zshrc` so it's
+1. **`demo`**. Always there. Built in. Streams canned nonsense. Zero setup.
+2. **The default station**. One you set up once in your `~/.zshrc` so it's
    ready every time you launch.
-3. **More stations** — a list in `~/.config/wryme/stations.toml`. Useful if
+3. **More stations**. A list in `~/.config/wryme/stations.toml`. Useful if
    you switch between providers.
 
 ### Set up your default station
@@ -70,7 +70,7 @@ export WME_DEFAULT_STATION_MODEL="llama-3.3-70b-versatile"
 ```
 
 ```sh
-# Ollama on your own computer — no key needed
+# Ollama on your own computer (no key needed)
 export WME_DEFAULT_STATION_NAME="local"
 export WME_DEFAULT_STATION_URL="http://localhost:11434/v1"
 export WME_DEFAULT_STATION_MODEL="llama3"
@@ -105,7 +105,7 @@ key = "sk-..."                     # or paste the key directly
 [[station]]
 name = "local"
 url = "http://localhost:11434/v1"
-model = "llama3"                   # no key field — Ollama doesn't need one
+model = "llama3"                   # no key field, Ollama doesn't need one
 ```
 
 Then to launch with a specific station:
@@ -145,13 +145,13 @@ That's the whole thing.
 
 ## Trouble
 
-- **`wme: command not found`** — your `~/.local/bin` isn't on your PATH. See
+- **`wme: command not found`**. Your `~/.local/bin` isn't on your PATH. See
   the install section above.
-- **The status bar says `station: demo`** — you haven't set up a real one yet.
+- **The status bar says `station: demo`**. You haven't set up a real one yet.
   See "Set up your default station" above.
-- **`upstream 401`** — the key for that station is wrong, missing, or expired.
-- **`upstream 404`** — the model name is wrong, or the URL is wrong.
-- **`no station named '...'`** — the name passed to `--station` doesn't match
+- **`upstream 401`**. The key for that station is wrong, missing, or expired.
+- **`upstream 404`**. The model name is wrong, or the URL is wrong.
+- **`no station named '...'`**. The name passed to `--station` doesn't match
   any of the stations wryme could find. Check `~/.config/wryme/stations.toml`.
 
 ## License

@@ -51,7 +51,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         .title(if app.in_flight {
             " streaming… (Esc cancel) "
         } else {
-            " write — Enter to send, Ctrl-C to quit "
+            " write. Enter to send, Ctrl-C to quit "
         });
     let input_widget = Paragraph::new(input_line).block(input_block);
     f.render_widget(input_widget, chunks[0]);
@@ -74,7 +74,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "no messages yet — type above and hit Enter",
+            "no messages yet. type above and hit Enter",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),

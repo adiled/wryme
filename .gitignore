@@ -10,5 +10,6 @@ logs/
 
 # Local-only files (intentionally untracked)
 AGENTS.md
+CLAUDE.md
 dev.sh
 .wryme/
