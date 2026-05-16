@@ -6,17 +6,6 @@ use crate::api::ApiMessage;
 pub enum Role {
     User,
     Assistant,
-    System,
-}
-
-impl Role {
-    pub fn label(self) -> &'static str {
-        match self {
-            Role::User => "you",
-            Role::Assistant => "assistant",
-            Role::System => "system",
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -109,7 +98,6 @@ impl App {
                 role: match m.role {
                     Role::User => "user",
                     Role::Assistant => "assistant",
-                    Role::System => "system",
                 }
                 .into(),
                 content: m.content.clone(),

@@ -112,7 +112,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
     let (role_color, role_text) = match msg.role {
         Role::User => (Color::Green, "you"),
         Role::Assistant => (Color::Magenta, "assistant"),
-        Role::System => (Color::Yellow, "system"),
     };
 
     let mut header = vec![
