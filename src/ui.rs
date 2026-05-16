@@ -19,6 +19,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Message, Role};
 use crate::input::Input;
@@ -68,8 +69,9 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
 
     // ---- messages (middle, newest first) ----
     let mut lines: Vec<Line> = Vec::new();
+    let msg_width = chunks[1].width;
     for msg in app.messages.iter().rev() {
-        push_message(&mut lines, msg);
+        push_message(&mut lines, msg, msg_width);
         lines.push(Line::from(""));
     }
     if lines.is_empty() {
@@ -119,7 +121,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
     f.render_widget(status, chunks[2]);
 }
 
-fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
+fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     let (role_color, role_text) = match msg.role {
         Role::User => (Color::Green, "you"),
         Role::Assistant => (Color::Magenta, "assistant"),
@@ -163,9 +165,34 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
 
     // Reply (newest in time, sits at the top of this message's block).
     if has_reply {
+        let no_newlines_yet = !msg.content.contains('\n');
         let last_idx = msg.content.split('\n').count().saturating_sub(1);
+
         for (i, raw) in msg.content.split('\n').enumerate() {
-            if i == last_idx && cursor_in_reply {
+            let is_last = i == last_idx;
+            if is_last && cursor_in_reply && no_newlines_yet {
+                // Center-spawn: the most recent delta lives at the right of
+                // the line, and its left edge sits at screen-center. As more
+                // deltas arrive the prev portion grows leftward into the
+                // padding, shoving the spawn point left toward column 0.
+                // Once the prev portion is at least half the screen wide,
+                // padding hits zero and we render flush-left like normal.
+                let split = msg.last_delta_byte.min(raw.len());
+                let prev = &raw[..split];
+                let latest = &raw[split..];
+                let prev_width = UnicodeWidthStr::width(prev);
+                let half = (area_width as usize) / 2;
+                let padding = half.saturating_sub(prev_width);
+
+                let mut spans: Vec<Span> = Vec::with_capacity(4);
+                if padding > 0 {
+                    spans.push(Span::raw(" ".repeat(padding)));
+                }
+                spans.push(Span::raw(prev.to_string()));
+                spans.push(Span::raw(latest.to_string()));
+                spans.push(Span::styled("▌", Style::default().fg(Color::DarkGray)));
+                out.push(Line::from(spans));
+            } else if is_last && cursor_in_reply {
                 out.push(Line::from(vec![
                     Span::raw(raw.to_string()),
                     Span::styled("▌", Style::default().fg(Color::DarkGray)),

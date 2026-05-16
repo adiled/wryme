@@ -18,6 +18,11 @@ pub struct Message {
     pub brain: String,
     /// True while the model is still streaming into this message.
     pub streaming: bool,
+    /// Byte offset in `content` where the most recent delta begins. The
+    /// renderer uses this to center-spawn the latest chunk in the input
+    /// stream while the first line is still building. Updated on every
+    /// append. Only meaningful while `streaming` is true.
+    pub last_delta_byte: usize,
 }
 
 pub struct App {
@@ -52,6 +57,7 @@ impl App {
             content,
             brain: String::new(),
             streaming: false,
+            last_delta_byte: 0,
         });
     }
 
@@ -61,6 +67,7 @@ impl App {
             content: String::new(),
             brain: String::new(),
             streaming: true,
+            last_delta_byte: 0,
         });
     }
 
@@ -71,6 +78,7 @@ impl App {
             .rev()
             .find(|m| m.role == Role::Assistant && m.streaming)
         {
+            m.last_delta_byte = m.content.len();
             m.content.push_str(delta);
         }
     }
