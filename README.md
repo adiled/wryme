@@ -15,8 +15,7 @@ The little command you'll type to open it is `wme`.
 You don't need a key, a login, or an internet connection to see what this
 thing looks like. Just install it (below) and run `wme`. With nothing set up,
 it answers in canned nonsense so you can poke around the screen and decide
-whether you want it. As soon as you set a real API key, it switches to
-talking to a real model.
+whether you want it.
 
 ## Installing it
 
@@ -35,20 +34,89 @@ your computer to add it, or add this line to your `~/.zshrc` or `~/.bashrc`:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Hooking it up to a real AI
+## Stations
 
-You need an **API key** — a long secret password from an AI company that lets
-the program talk to their AI on your behalf. The most common one is from
-OpenAI: <https://platform.openai.com/api-keys>.
+The thing on the other end of the conversation is a **station**. A station is
+just a name plus an internet address, a model, and (usually) a secret key.
+You pick one and you talk to it. That's all there is to it.
 
-Once, before you start it, paste your key into the terminal like this:
+Three ways you can have stations:
+
+1. **`demo`** — always there. Built in. Streams canned nonsense. Zero setup.
+2. **The default station** — one you set up once in your `~/.zshrc` so it's
+   ready every time you launch.
+3. **More stations** — a list in `~/.config/wryme/stations.toml`. Useful if
+   you switch between providers.
+
+### Set up your default station
+
+Pick whichever AI service you have an account with and paste the matching
+block into your `~/.zshrc` or `~/.bashrc`:
 
 ```sh
-export OPENAI_API_KEY="sk-...your-key-goes-here..."
+# OpenAI
+export WME_DEFAULT_STATION_NAME="openai"
+export WME_DEFAULT_STATION_URL="https://api.openai.com/v1"
+export WME_DEFAULT_STATION_KEY="sk-...your-key-goes-here..."
+export WME_DEFAULT_STATION_MODEL="gpt-4o-mini"
 ```
 
-To make this stick, add that line to your `~/.zshrc` or `~/.bashrc` so it's
-set every time you open a new terminal.
+```sh
+# Groq
+export WME_DEFAULT_STATION_NAME="groq"
+export WME_DEFAULT_STATION_URL="https://api.groq.com/openai/v1"
+export WME_DEFAULT_STATION_KEY="gsk-...your-key..."
+export WME_DEFAULT_STATION_MODEL="llama-3.3-70b-versatile"
+```
+
+```sh
+# Ollama on your own computer — no key needed
+export WME_DEFAULT_STATION_NAME="local"
+export WME_DEFAULT_STATION_URL="http://localhost:11434/v1"
+export WME_DEFAULT_STATION_MODEL="llama3"
+```
+
+Where do you get a key? OpenAI: <https://platform.openai.com/api-keys>. Groq:
+<https://console.groq.com/keys>. Each service has its own page.
+
+(Shortcut: if you already have `OPENAI_API_KEY` in your environment, wryme
+will use that as the key for the default station automatically. You still
+need to set the URL and model if you want anything other than OpenAI's
+defaults.)
+
+### Adding more stations
+
+Make the file `~/.config/wryme/stations.toml` and write each station as a
+block:
+
+```toml
+[[station]]
+name = "groq fast"
+url = "https://api.groq.com/openai/v1"
+model = "llama-3.3-70b-versatile"
+key_env = "GROQ_API_KEY"           # reads $GROQ_API_KEY from your shell
+
+[[station]]
+name = "openai mini"
+url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+key = "sk-..."                     # or paste the key directly
+
+[[station]]
+name = "local"
+url = "http://localhost:11434/v1"
+model = "llama3"                   # no key field — Ollama doesn't need one
+```
+
+Then to launch with a specific station:
+
+```sh
+wme --station "groq fast"
+```
+
+Without `--station`, wryme uses your default (the env one), or the first one
+in the config file if you don't have a default, or `demo` if you have
+nothing at all.
 
 ## Using it
 
@@ -60,8 +128,6 @@ wme
 
 The window opens. The blinking cursor is in a box at the top. Type whatever
 you want to ask. Press **Enter**. The answer streams in below.
-
-Type another thing. Press Enter. And so on.
 
 When you're done, press **Ctrl-C** to close it.
 
@@ -77,34 +143,16 @@ When you're done, press **Ctrl-C** to close it.
 
 That's the whole thing.
 
-## Using a different AI
-
-`wme` talks to anything that follows the same protocol OpenAI uses — which is
-nearly all of them these days. You point it at a different "base URL":
-
-```sh
-# Run a model on your own computer with Ollama:
-OPENAI_BASE_URL=http://localhost:11434/v1 WRYME_MODEL=llama3 wme
-
-# Use Groq instead of OpenAI:
-OPENAI_BASE_URL=https://api.groq.com/openai/v1 \
-  OPENAI_API_KEY=gsk-... \
-  WRYME_MODEL=llama-3.3-70b-versatile \
-  wme
-```
-
-If you only ever use one, set those once in your `~/.zshrc` and forget them.
-
 ## Trouble
 
 - **`wme: command not found`** — your `~/.local/bin` isn't on your PATH. See
   the install section above.
-- **The status bar says `demo (no OPENAI_API_KEY set)`** — that's the canned
-  nonsense mode. Set your key as shown above to talk to a real model.
-- **`upstream 401`** — the API key is wrong, missing, or expired.
-- **`upstream 404`** — the model name is wrong, or the base URL is wrong.
-- **Nothing happens when I press Enter** — make sure you actually typed
-  something; an empty message is ignored on purpose.
+- **The status bar says `station: demo`** — you haven't set up a real one yet.
+  See "Set up your default station" above.
+- **`upstream 401`** — the key for that station is wrong, missing, or expired.
+- **`upstream 404`** — the model name is wrong, or the URL is wrong.
+- **`no station named '...'`** — the name passed to `--station` doesn't match
+  any of the stations wryme could find. Check `~/.config/wryme/stations.toml`.
 
 ## License
 

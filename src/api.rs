@@ -14,6 +14,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::station::Station;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiMessage {
     pub role: String,
@@ -30,32 +32,20 @@ pub enum StreamEvent {
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    base_url: String,
-    api_key: String,
-    model: String,
-    /// When true, replies are generated locally from a canned list instead
-    /// of being fetched over the network. Lets a brand-new user without an
-    /// API key see the TUI work end-to-end.
-    pub demo: bool,
+    station: Station,
 }
 
 impl Client {
-    pub fn new(base_url: String, api_key: String, model: String, demo: bool) -> Result<Self> {
+    pub fn new(station: Station) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("building http client")?;
-        Ok(Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
-            model,
-            demo,
-        })
+        Ok(Self { http, station })
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
+    pub fn station(&self) -> &Station {
+        &self.station
     }
 
     /// Open a streaming completion. Each delta is sent over `tx` as it arrives.
@@ -65,7 +55,7 @@ impl Client {
         messages: Vec<ApiMessage>,
         tx: UnboundedSender<StreamEvent>,
     ) {
-        if self.demo {
+        if self.station.is_demo {
             let prompt = messages
                 .iter()
                 .rev()
@@ -96,16 +86,17 @@ impl Client {
             stream: bool,
         }
 
-        let url = format!("{}/chat/completions", self.base_url);
+        let base = self.station.url.trim_end_matches('/');
+        let url = format!("{}/chat/completions", base);
         let body = Req {
-            model: &self.model,
+            model: &self.station.model,
             messages: &messages,
             stream: true,
         };
 
         let mut req = self.http.post(&url).json(&body);
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
+        if !self.station.key.is_empty() {
+            req = req.bearer_auth(&self.station.key);
         }
         let resp = req.send().await.context("posting chat/completions")?;
 

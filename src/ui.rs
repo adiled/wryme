@@ -22,8 +22,9 @@ use ratatui::{
 
 use crate::app::{App, Message, Role};
 use crate::input::Input;
+use crate::station::Station;
 
-pub fn draw(f: &mut Frame, app: &App, input: &Input, model: &str) {
+pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -86,10 +87,20 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, model: &str) {
 
     // ---- status bar ----
     let dot = " • ";
+    let station_color = if station.is_demo {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
     let pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
-        Span::raw(model.to_string()),
+        Span::styled(
+            format!("station: {}", station.name),
+            Style::default().fg(station_color),
+        ),
+        Span::raw(dot),
+        Span::raw(station.model.clone()),
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
         Span::raw(dot),

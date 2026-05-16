@@ -17,6 +17,7 @@ mod api;
 mod app;
 mod demo;
 mod input;
+mod station;
 mod ui;
 
 use api::{Client, StreamEvent};
@@ -30,19 +31,11 @@ use input::Input;
     about = "streaming LLM chat TUI — input on top, newest reply right below it"
 )]
 struct Args {
-    /// Model name to send upstream. Defaults to $WRYME_MODEL or gpt-4o-mini.
+    /// Name of the station to use. Defaults to the env-defined default
+    /// station, then the first station in ~/.config/wryme/stations.toml,
+    /// then the built-in demo.
     #[arg(long)]
-    model: Option<String>,
-
-    /// Base URL of an OpenAI-compatible /chat/completions endpoint.
-    /// Defaults to $OPENAI_BASE_URL or https://api.openai.com/v1.
-    #[arg(long)]
-    base_url: Option<String>,
-
-    /// API key. Defaults to $OPENAI_API_KEY. May be empty for local servers
-    /// (Ollama, LM Studio) that don't authenticate.
-    #[arg(long)]
-    api_key: Option<String>,
+    station: Option<String>,
 
     /// Optional system prompt prepended to every request.
     #[arg(long)]
@@ -53,29 +46,10 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let base_url = args
-        .base_url
-        .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    let api_key = args
-        .api_key
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .unwrap_or_default();
-    let user_model = args.model.or_else(|| std::env::var("WRYME_MODEL").ok());
+    let stations = station::load_all().context("loading stations")?;
+    let active = station::pick(&stations, args.station.as_deref())?.clone();
 
-    // Demo mode = the user has nothing configured. As soon as they set
-    // OPENAI_API_KEY or point us at a local server, we switch to real.
-    let is_default_url = base_url == "https://api.openai.com/v1";
-    let demo = api_key.is_empty() && is_default_url;
-    let model = user_model.unwrap_or_else(|| {
-        if demo {
-            "demo (no OPENAI_API_KEY set)".to_string()
-        } else {
-            "gpt-4o-mini".to_string()
-        }
-    });
-
-    let client = Client::new(base_url, api_key, model, demo).context("building api client")?;
+    let client = Client::new(active).context("building api client")?;
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
@@ -122,7 +96,7 @@ async fn run(
     let mut in_flight_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &app, &input, client.model()))?;
+        terminal.draw(|f| ui::draw(f, &app, &input, client.station()))?;
         if app.should_quit {
             break;
         }
@@ -146,7 +120,6 @@ async fn run(
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if let Some(t) = in_flight_task.take() {
-                            // The task closed the channel on its own; just drop the handle.
                             drop(t);
                         }
                     }
