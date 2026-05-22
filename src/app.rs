@@ -8,6 +8,17 @@ pub enum Role {
     Assistant,
 }
 
+/// How the message area handles overflow.
+///
+/// Page is the default. Content is shown in discrete viewport-sized chunks
+/// and navigation snaps between them. Scroll is the alternative: a smooth
+/// row-by-row offset, more like a traditional terminal pager.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    Page,
+    Scroll,
+}
+
 #[derive(Debug)]
 pub struct Message {
     pub role: Role,
@@ -32,12 +43,22 @@ pub struct App {
     /// Which page of the message stack the user is currently viewing.
     /// 0 = the live page (newest content at top). Higher = further back
     /// in the conversation. The renderer clamps this to the number of
-    /// pages actually available given the current viewport.
+    /// pages actually available given the current viewport. Only meaningful
+    /// in `ViewMode::Page`.
     pub current_page: usize,
+    /// Row-level scroll offset, used only in `ViewMode::Scroll`. 0 = newest
+    /// content visible at the top, higher = scrolled into older content.
+    pub scroll_row: usize,
     /// Mouse wheel accumulator. Ticks add up here; once the magnitude
     /// crosses a threshold we move a page and subtract the threshold.
     /// Keeps trackpad scrolling from blowing through pages instantly.
     pub wheel_accum: i32,
+    /// Current view mode. Page is the default; Scroll is the alternative.
+    pub view_mode: ViewMode,
+    /// Last rendered viewport height (rows). Recorded by the renderer so
+    /// the key handlers can step by viewport when the user hits PgUp/PgDn
+    /// in scroll mode.
+    pub last_viewport_h: usize,
 }
 
 impl App {
@@ -49,7 +70,10 @@ impl App {
             status: String::new(),
             should_quit: false,
             current_page: 0,
+            scroll_row: 0,
             wheel_accum: 0,
+            view_mode: ViewMode::Page,
+            last_viewport_h: 0,
         }
     }
 

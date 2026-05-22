@@ -24,7 +24,7 @@ mod station;
 mod ui;
 
 use api::{Client, StreamEvent};
-use app::App;
+use app::{App, ViewMode};
 use input::Input;
 
 #[derive(Parser, Debug)]
@@ -101,7 +101,7 @@ async fn run(
     let mut in_flight_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &app, &input, client.station()))?;
+        terminal.draw(|f| ui::draw(f, &mut app, &input, client.station()))?;
         if app.should_quit {
             break;
         }
@@ -149,22 +149,54 @@ async fn run(
 }
 
 fn handle_mouse(m: MouseEvent, app: &mut App) {
-    // Three wheel ticks per page flip. Keeps trackpad scrolling from
-    // blowing through the conversation in one swipe.
-    const TICKS_PER_PAGE: i32 = 3;
-    match m.kind {
-        MouseEventKind::ScrollUp => app.wheel_accum += 1,
-        MouseEventKind::ScrollDown => app.wheel_accum -= 1,
-        _ => return,
+    match app.view_mode {
+        ViewMode::Page => {
+            // Three wheel ticks per page flip. Keeps trackpad scrolling
+            // from blowing through the conversation in one swipe.
+            const TICKS_PER_PAGE: i32 = 3;
+            match m.kind {
+                MouseEventKind::ScrollUp => app.wheel_accum += 1,
+                MouseEventKind::ScrollDown => app.wheel_accum -= 1,
+                _ => return,
+            }
+            while app.wheel_accum >= TICKS_PER_PAGE {
+                app.current_page = app.current_page.saturating_add(1);
+                app.wheel_accum -= TICKS_PER_PAGE;
+            }
+            while app.wheel_accum <= -TICKS_PER_PAGE {
+                app.current_page = app.current_page.saturating_sub(1);
+                app.wheel_accum += TICKS_PER_PAGE;
+            }
+        }
+        ViewMode::Scroll => {
+            // Smooth row-level scroll. Two rows per wheel tick feels close
+            // to traditional terminal pagers without being twitchy.
+            const ROWS_PER_TICK: usize = 2;
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    app.scroll_row = app.scroll_row.saturating_add(ROWS_PER_TICK);
+                }
+                MouseEventKind::ScrollDown => {
+                    app.scroll_row = app.scroll_row.saturating_sub(ROWS_PER_TICK);
+                }
+                _ => {}
+            }
+        }
     }
-    while app.wheel_accum >= TICKS_PER_PAGE {
-        app.current_page = app.current_page.saturating_add(1);
-        app.wheel_accum -= TICKS_PER_PAGE;
-    }
-    while app.wheel_accum <= -TICKS_PER_PAGE {
-        app.current_page = app.current_page.saturating_sub(1);
-        app.wheel_accum += TICKS_PER_PAGE;
-    }
+}
+
+fn toggle_view_mode(app: &mut App) {
+    app.view_mode = match app.view_mode {
+        ViewMode::Page => ViewMode::Scroll,
+        ViewMode::Scroll => ViewMode::Page,
+    };
+    app.current_page = 0;
+    app.scroll_row = 0;
+    app.wheel_accum = 0;
+    app.note(match app.view_mode {
+        ViewMode::Page => "view: page",
+        ViewMode::Scroll => "view: scroll",
+    });
 }
 
 fn handle_key(
@@ -209,6 +241,8 @@ fn handle_key(
             app.begin_assistant();
             app.in_flight = true;
             app.current_page = 0;
+            app.scroll_row = 0;
+            app.wheel_accum = 0;
             app.note("");
 
             let msgs = app.api_messages();
@@ -218,12 +252,24 @@ fn handle_key(
                 client.stream_completion(msgs, tx).await;
             }));
         }
-        KeyCode::PageUp => {
-            app.current_page = app.current_page.saturating_add(1);
-        }
-        KeyCode::PageDown => {
-            app.current_page = app.current_page.saturating_sub(1);
-        }
+        KeyCode::PageUp => match app.view_mode {
+            ViewMode::Page => {
+                app.current_page = app.current_page.saturating_add(1);
+            }
+            ViewMode::Scroll => {
+                let step = app.last_viewport_h.saturating_sub(1).max(1);
+                app.scroll_row = app.scroll_row.saturating_add(step);
+            }
+        },
+        KeyCode::PageDown => match app.view_mode {
+            ViewMode::Page => {
+                app.current_page = app.current_page.saturating_sub(1);
+            }
+            ViewMode::Scroll => {
+                let step = app.last_viewport_h.saturating_sub(1).max(1);
+                app.scroll_row = app.scroll_row.saturating_sub(step);
+            }
+        },
         KeyCode::Left => input.move_left(),
         KeyCode::Right => input.move_right(),
         KeyCode::Home => input.home(),
@@ -238,6 +284,7 @@ fn handle_key(
                     'a' => input.home(),
                     'e' => input.end(),
                     'w' => input.kill_prev_word(),
+                    't' => toggle_view_mode(app),
                     _ => {}
                 }
             } else {

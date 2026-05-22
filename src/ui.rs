@@ -21,11 +21,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Message, Role};
+use crate::app::{App, Message, Role, ViewMode};
 use crate::input::Input;
 use crate::station::Station;
 
-pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
+pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -86,6 +86,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         .block(Block::default().borders(Borders::NONE));
 
     let viewport_h = chunks[1].height as usize;
+    app.last_viewport_h = viewport_h;
     let total_rows = wrapped_row_count(&lines, chunks[1].width);
     let n_pages = if total_rows == 0 || viewport_h == 0 {
         1
@@ -93,7 +94,15 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         total_rows.div_ceil(viewport_h)
     };
     let page = app.current_page.min(n_pages.saturating_sub(1));
-    let scroll_y = (page * viewport_h).min(u16::MAX as usize) as u16;
+
+    // Clamp the scroll offset to the last legal row so the user can't page
+    // off into the empty void beyond the oldest line.
+    let max_scroll = total_rows.saturating_sub(1);
+    let scroll_offset = match app.view_mode {
+        ViewMode::Page => page * viewport_h,
+        ViewMode::Scroll => app.scroll_row.min(max_scroll),
+    };
+    let scroll_y = scroll_offset.min(u16::MAX as usize) as u16;
 
     f.render_widget(messages_para.scroll((scroll_y, 0)), chunks[1]);
 
@@ -118,14 +127,28 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
     ];
     if !app.messages.is_empty() {
         pieces.push(Span::raw(dot));
-        pieces.push(Span::styled(
-            format!("page {}/{}  ({} rows)", page + 1, n_pages, total_rows),
-            Style::default().fg(if n_pages > 1 {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            }),
-        ));
+        match app.view_mode {
+            ViewMode::Page => {
+                pieces.push(Span::styled(
+                    format!("page {}/{}", page + 1, n_pages),
+                    Style::default().fg(if n_pages > 1 {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    }),
+                ));
+            }
+            ViewMode::Scroll => {
+                pieces.push(Span::styled(
+                    if scroll_offset == 0 {
+                        "scroll (top)".to_string()
+                    } else {
+                        format!("scroll +{}", scroll_offset)
+                    },
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+        }
     }
     pieces.push(Span::raw(dot));
     pieces.push(Span::styled(
