@@ -116,11 +116,15 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
     ];
-    if n_pages > 1 {
+    if !app.messages.is_empty() {
         pieces.push(Span::raw(dot));
         pieces.push(Span::styled(
-            format!("page {}/{}  (PgUp/PgDn)", page + 1, n_pages),
-            Style::default().fg(Color::Cyan),
+            format!("page {}/{}  ({} rows)", page + 1, n_pages, total_rows),
+            Style::default().fg(if n_pages > 1 {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }),
         ));
     }
     pieces.push(Span::raw(dot));

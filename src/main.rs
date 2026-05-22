@@ -4,7 +4,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+        DisableMouseCapture, EnableMouseCapture, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -63,14 +66,16 @@ async fn main() -> Result<()> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+    Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -79,7 +84,7 @@ fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         prev(info);
     }));
 }
@@ -107,6 +112,9 @@ async fn run(
                 match ev {
                     Event::Key(k) if k.kind != KeyEventKind::Release => {
                         handle_key(k, &mut app, &mut input, &client, &tx, &mut in_flight_task);
+                    }
+                    Event::Mouse(m) => {
+                        handle_mouse(m, &mut app);
                     }
                     Event::Resize(_, _) => { /* redraw on next loop */ }
                     _ => {}
@@ -138,6 +146,18 @@ async fn run(
         t.abort();
     }
     Ok(())
+}
+
+fn handle_mouse(m: MouseEvent, app: &mut App) {
+    match m.kind {
+        MouseEventKind::ScrollUp => {
+            app.current_page = app.current_page.saturating_add(1);
+        }
+        MouseEventKind::ScrollDown => {
+            app.current_page = app.current_page.saturating_sub(1);
+        }
+        _ => {}
+    }
 }
 
 fn handle_key(
