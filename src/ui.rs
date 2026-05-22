@@ -208,15 +208,22 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {    let (role_colo
 
     // Reply (newest in time, sits at the top of this message's block).
     if has_reply {
-        let last_idx = msg.content.split('\n').count().saturating_sub(1);
-        for (i, raw) in msg.content.split('\n').enumerate() {
-            if i == last_idx && cursor_in_reply {
-                out.push(Line::from(vec![
-                    Span::raw(raw.to_string()),
-                    Span::styled("▌", Style::default().fg(Color::DarkGray)),
-                ]));
-            } else {
-                out.push(Line::from(raw.to_string()));
+        match msg.role {
+            Role::Assistant => {
+                out.extend(crate::md::render(&msg.content, cursor_in_reply));
+            }
+            Role::User => {
+                let last_idx = msg.content.split('\n').count().saturating_sub(1);
+                for (i, raw) in msg.content.split('\n').enumerate() {
+                    if i == last_idx && cursor_in_reply {
+                        out.push(Line::from(vec![
+                            Span::raw(raw.to_string()),
+                            Span::styled("▌", Style::default().fg(Color::DarkGray)),
+                        ]));
+                    } else {
+                        out.push(Line::from(raw.to_string()));
+                    }
+                }
             }
         }
     }

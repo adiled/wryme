@@ -20,6 +20,7 @@ mod api;
 mod app;
 mod demo;
 mod input;
+mod md;
 mod station;
 mod ui;
 
