@@ -181,6 +181,7 @@ fn handle_key(
             app.push_user(text);
             app.begin_assistant();
             app.in_flight = true;
+            app.current_page = 0;
             app.note("");
 
             let msgs = app.api_messages();
@@ -189,6 +190,12 @@ fn handle_key(
             *in_flight = Some(tokio::spawn(async move {
                 client.stream_completion(msgs, tx).await;
             }));
+        }
+        KeyCode::PageUp => {
+            app.current_page = app.current_page.saturating_add(1);
+        }
+        KeyCode::PageDown => {
+            app.current_page = app.current_page.saturating_sub(1);
         }
         KeyCode::Left => input.move_left(),
         KeyCode::Right => input.move_right(),

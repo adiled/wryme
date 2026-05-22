@@ -19,6 +19,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Message, Role};
 use crate::input::Input;
@@ -66,7 +67,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         });
     }
 
-    // ---- messages (middle, newest first) ----
+    // ---- messages (middle, newest first, paged) ----
     let mut lines: Vec<Line> = Vec::new();
     for msg in app.messages.iter().rev() {
         push_message(&mut lines, msg);
@@ -80,10 +81,21 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
                 .add_modifier(Modifier::ITALIC),
         )));
     }
-    let messages = Paragraph::new(Text::from(lines))
+    let messages_para = Paragraph::new(Text::from(lines.clone()))
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::NONE));
-    f.render_widget(messages, chunks[1]);
+
+    let viewport_h = chunks[1].height as usize;
+    let total_rows = wrapped_row_count(&lines, chunks[1].width);
+    let n_pages = if total_rows == 0 || viewport_h == 0 {
+        1
+    } else {
+        total_rows.div_ceil(viewport_h)
+    };
+    let page = app.current_page.min(n_pages.saturating_sub(1));
+    let scroll_y = (page * viewport_h).min(u16::MAX as usize) as u16;
+
+    f.render_widget(messages_para.scroll((scroll_y, 0)), chunks[1]);
 
     // ---- status bar ----
     let dot = " • ";
@@ -92,7 +104,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
     } else {
         Color::Cyan
     };
-    let pieces = vec![
+    let mut pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
         Span::styled(
@@ -103,24 +115,30 @@ pub fn draw(f: &mut Frame, app: &App, input: &Input, station: &Station) {
         Span::raw(station.model.clone()),
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
-        Span::raw(dot),
-        Span::styled(
-            app.status.clone(),
-            Style::default().fg(if app.status.starts_with("error")
-                || app.status.starts_with("upstream")
-            {
+    ];
+    if n_pages > 1 {
+        pieces.push(Span::raw(dot));
+        pieces.push(Span::styled(
+            format!("page {}/{}  (PgUp/PgDn)", page + 1, n_pages),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    pieces.push(Span::raw(dot));
+    pieces.push(Span::styled(
+        app.status.clone(),
+        Style::default().fg(
+            if app.status.starts_with("error") || app.status.starts_with("upstream") {
                 Color::Red
             } else {
                 Color::Gray
-            }),
+            },
         ),
-    ];
+    ));
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
 }
 
-fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
-    let (role_color, role_text) = match msg.role {
+fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {    let (role_color, role_text) = match msg.role {
         Role::User => (Color::Green, "you"),
         Role::Assistant => (Color::Magenta, "assistant"),
     };
@@ -200,4 +218,21 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {
             }
         }
     }
+}
+
+/// Approximate visual row count after wrapping. Sums each Line's display
+/// width and rounds up by area width. Not exact (ratatui's word-boundary
+/// wrap may add a row here or there) but close enough to count pages.
+fn wrapped_row_count(lines: &[Line<'_>], area_width: u16) -> usize {
+    let aw = (area_width as usize).max(1);
+    let mut total = 0usize;
+    for line in lines {
+        let w: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        total += if w == 0 { 1 } else { w.div_ceil(aw) };
+    }
+    total
 }

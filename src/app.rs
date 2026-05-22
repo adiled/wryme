@@ -29,6 +29,11 @@ pub struct App {
     pub in_flight: bool,
     pub status: String,
     pub should_quit: bool,
+    /// Which page of the message stack the user is currently viewing.
+    /// 0 = the live page (newest content at top). Higher = further back
+    /// in the conversation. The renderer clamps this to the number of
+    /// pages actually available given the current viewport.
+    pub current_page: usize,
 }
 
 impl App {
@@ -39,6 +44,7 @@ impl App {
             in_flight: false,
             status: String::new(),
             should_quit: false,
+            current_page: 0,
         }
     }
 
