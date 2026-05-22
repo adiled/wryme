@@ -34,6 +34,10 @@ pub struct App {
     /// in the conversation. The renderer clamps this to the number of
     /// pages actually available given the current viewport.
     pub current_page: usize,
+    /// Mouse wheel accumulator. Ticks add up here; once the magnitude
+    /// crosses a threshold we move a page and subtract the threshold.
+    /// Keeps trackpad scrolling from blowing through pages instantly.
+    pub wheel_accum: i32,
 }
 
 impl App {
@@ -45,6 +49,7 @@ impl App {
             status: String::new(),
             should_quit: false,
             current_page: 0,
+            wheel_accum: 0,
         }
     }
 

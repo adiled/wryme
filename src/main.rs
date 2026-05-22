@@ -149,14 +149,21 @@ async fn run(
 }
 
 fn handle_mouse(m: MouseEvent, app: &mut App) {
+    // Three wheel ticks per page flip. Keeps trackpad scrolling from
+    // blowing through the conversation in one swipe.
+    const TICKS_PER_PAGE: i32 = 3;
     match m.kind {
-        MouseEventKind::ScrollUp => {
-            app.current_page = app.current_page.saturating_add(1);
-        }
-        MouseEventKind::ScrollDown => {
-            app.current_page = app.current_page.saturating_sub(1);
-        }
-        _ => {}
+        MouseEventKind::ScrollUp => app.wheel_accum += 1,
+        MouseEventKind::ScrollDown => app.wheel_accum -= 1,
+        _ => return,
+    }
+    while app.wheel_accum >= TICKS_PER_PAGE {
+        app.current_page = app.current_page.saturating_add(1);
+        app.wheel_accum -= TICKS_PER_PAGE;
+    }
+    while app.wheel_accum <= -TICKS_PER_PAGE {
+        app.current_page = app.current_page.saturating_sub(1);
+        app.wheel_accum += TICKS_PER_PAGE;
     }
 }
 
