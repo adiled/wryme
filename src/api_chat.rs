@@ -1,10 +1,8 @@
 // Chat Completions wire protocol.
 //
-// POSTs to `<base>/chat/completions` with `stream: true`. The response is
-// SSE; each event body is a JSON `ChatChunk` with `choices[].delta` carrying
-// content text, reasoning_content (DeepSeek/Qwen extension), and/or
-// tool_calls. We surface the relevant pieces as StreamEvents and let the
-// caller assemble them into a Message.
+// POSTs to `<shop.url>/chat/completions` with `stream: true`. Body carries
+// the model (from station), the message history, and any translatable
+// dials. SSE response parsed for content / reasoning_content / tool_calls.
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -23,19 +21,26 @@ pub(crate) async fn stream(
         model: &'a str,
         messages: &'a [ApiMessage],
         stream: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        temperature: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_tokens: Option<u32>,
+        // reasoning_effort has no Chat Completions equivalent; silently dropped.
     }
 
-    let base = client.station.url.trim_end_matches('/');
+    let base = client.shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let body = Req {
         model: &client.station.model,
         messages: &messages,
         stream: true,
+        temperature: client.station.dials.boldness,
+        max_tokens: client.station.dials.verbosity,
     };
 
     let mut req = client.http.post(&url).json(&body);
-    if !client.station.key.is_empty() {
-        req = req.bearer_auth(&client.station.key);
+    if !client.shop.key.is_empty() {
+        req = req.bearer_auth(&client.shop.key);
     }
     let resp = req.send().await.context("posting chat/completions")?;
 
@@ -46,16 +51,11 @@ pub(crate) async fn stream(
     }
 
     let mut stream = resp.bytes_stream();
-    // SSE framing: events are separated by \n\n. Within an event, lines
-    // starting with `data: ` carry the payload. The terminator is the
-    // sentinel payload `[DONE]`. We buffer across chunk boundaries.
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading sse chunk")?;
         buf.extend_from_slice(&chunk);
-
-        // Drain whole events from the front of the buffer.
         loop {
             let Some(end) = find_event_boundary(&buf) else {
                 break;
@@ -65,7 +65,6 @@ pub(crate) async fn stream(
             handle_event(event, tx)?;
         }
     }
-    // Any trailing event without a final blank line.
     if !buf.is_empty() {
         handle_event(&buf, tx)?;
     }
@@ -110,8 +109,7 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                 }
             }
             Err(_) => {
-                // Some providers emit non-JSON keepalive comments or vendor
-                // events. Ignore. Only valid JSON matters.
+                // Vendor extensions or keepalive comments. Ignore.
             }
         }
     }
@@ -134,14 +132,8 @@ struct Choice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
-    /// Vendor extension shipped by DeepSeek, Qwen, OpenRouter passthroughs,
-    /// and others that surface reasoning models' chain of thought separately
-    /// from the visible answer. We render this as the "brain" block.
     #[serde(default)]
     reasoning_content: Option<String>,
-    /// Tool-call deltas. We don't execute tools, just surface a "tinkering"
-    /// indicator with the name so the user sees the model trying to do
-    /// something instead of an empty bubble.
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
 }

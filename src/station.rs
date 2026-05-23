@@ -1,56 +1,76 @@
-// Stations: named bundles of (url, key, model) you can talk to. The whole
-// grandma-layer of provider selection. One dial. No second decision.
+// Stations: the recipe / preset side of the equation. A station says
+// "I am using THIS model with THESE dials." It does not know or care
+// which shop will actually run it; resolution happens at startup by
+// matching the station's model name against shops' advertised models.
+//
+// Three dials, all optional. Unset means the model uses whatever default
+// its maker chose. Set means the user has opinions.
+//
+//   - boldness   (temperature)       how loose / creative / unpredictable
+//   - patience   (reasoning effort)  how hard the model deliberates
+//   - verbosity  (max output tokens) the most the model is allowed to say
+//
+// Stations explicitly do NOT carry system prompts, tools, permissions,
+// or anything else that constitutes "an agent." Those will live in a
+// future preset/persona concept that wraps a station and adds extras.
+// Station stays a pure dials-and-model thing.
 //
 // Sources, in order:
-//   1. Built-in `demo` station. Always present, talks to nobody, streams
-//      canned replies. The thing a brand-new user lands on.
-//   2. `WME_DEFAULT_STATION_*` env vars. Defines a single "default" station.
-//      If the user only sets a key, we pre-fill OpenAI defaults around it.
-//   3. `~/.config/wryme/stations.toml`. Any extra stations the user has
-//      written down. Free-form list.
-//
-// Selection: `--station NAME` if given (looked up by exact name), else the
-// first non-demo station in the list, else demo.
+//   1. Built-in demo station. Always present.
+//   2. WME_DEFAULT_STATION_MODEL env var. Optional model pin for env-only users.
+//   3. ~/.config/wryme/stations.toml. Named, saved stations.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// Which OpenAI-compatible wire protocol this station speaks.
-///
-/// `ChatCompletions` is the universal baseline: `/v1/chat/completions` with
-/// flat `choices[].delta` chunks. Almost every server supports it.
-///
-/// `Responses` is the newer typed-event protocol at `/v1/responses`. Cleaner
-/// for tool use, reasoning, refusals, and built-in tools (file_search,
-/// web_search, code_interpreter). OpenAI directly and some agentic
-/// passthroughs (like our local kara server) support it. Most local
-/// servers (Ollama, LM Studio, llama.cpp) do not yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Protocol {
-    ChatCompletions,
-    Responses,
-}
+use crate::shop::Shop;
 
 #[derive(Debug, Clone)]
 pub struct Station {
     pub name: String,
-    pub url: String,
-    pub key: String,
     pub model: String,
-    pub is_demo: bool,
-    pub protocol: Protocol,
+    pub dials: Dials,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Dials {
+    /// Temperature. 0.0 to 2.0, conventionally. Unset = let the model
+    /// pick its own default.
+    pub boldness: Option<f32>,
+    /// Reasoning effort. quick / steady / slow. Only meaningful on models
+    /// that support extended thinking. Translated to "low"/"medium"/"high"
+    /// on the wire for the Responses protocol; silently dropped for Chat
+    /// Completions since it has no equivalent.
+    pub patience: Option<Patience>,
+    /// Max output tokens. Hard ceiling on reply length. Unset = let the
+    /// model stop when it thinks it is done.
+    pub verbosity: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Patience {
+    Quick,
+    Steady,
+    Slow,
+}
+
+impl Patience {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Patience::Quick => "low",
+            Patience::Steady => "medium",
+            Patience::Slow => "high",
+        }
+    }
 }
 
 impl Station {
     pub fn demo() -> Self {
         Self {
             name: "demo".into(),
-            url: String::new(),
-            key: String::new(),
             model: "canned replies".into(),
-            is_demo: true,
-            protocol: Protocol::ChatCompletions,
+            dials: Dials::default(),
         }
     }
 }
@@ -64,38 +84,46 @@ struct StationsFile {
 #[derive(Debug, Deserialize)]
 struct StationDef {
     name: String,
-    url: String,
     model: String,
     #[serde(default)]
-    key: Option<String>,
-    /// Read the key from this env var instead of inlining it. Lets users
-    /// commit the config without leaking secrets.
+    boldness: Option<f32>,
     #[serde(default)]
-    key_env: Option<String>,
-    /// "chat-completions" (default) or "responses". Picks which wire
-    /// protocol we use when talking to this station.
+    patience: Option<PatienceField>,
     #[serde(default)]
-    protocol: Option<String>,
+    verbosity: Option<u32>,
+}
+
+/// Accept either an enum string ("quick"/"steady"/"slow") or, for the
+/// people who liked the wire format, "low"/"medium"/"high". Anything else
+/// is treated as unset.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PatienceField {
+    Named(String),
+}
+
+impl PatienceField {
+    fn into_patience(self) -> Option<Patience> {
+        let PatienceField::Named(s) = self;
+        match s.to_lowercase().as_str() {
+            "quick" | "low" => Some(Patience::Quick),
+            "steady" | "medium" => Some(Patience::Steady),
+            "slow" | "high" => Some(Patience::Slow),
+            _ => None,
+        }
+    }
 }
 
 impl StationDef {
     fn resolve(self) -> Station {
-        let key = match (self.key, self.key_env) {
-            (Some(k), _) => k,
-            (None, Some(env_name)) => std::env::var(&env_name).unwrap_or_default(),
-            (None, None) => String::new(),
-        };
-        let protocol = match self.protocol.as_deref() {
-            Some("responses") => Protocol::Responses,
-            _ => Protocol::ChatCompletions,
-        };
         Station {
             name: self.name,
-            url: self.url,
-            key,
             model: self.model,
-            is_demo: false,
-            protocol,
+            dials: Dials {
+                boldness: self.boldness,
+                patience: self.patience.and_then(|p| p.into_patience()),
+                verbosity: self.verbosity,
+            },
         }
     }
 }
@@ -103,8 +131,8 @@ impl StationDef {
 pub fn load_all() -> Result<Vec<Station>> {
     let mut out = vec![Station::demo()];
 
-    if let Some(env_station) = from_env() {
-        out.push(env_station);
+    if let Some(env_st) = from_env() {
+        out.push(env_st);
     }
 
     if let Some(path) = config_path() {
@@ -122,38 +150,12 @@ pub fn load_all() -> Result<Vec<Station>> {
 }
 
 fn from_env() -> Option<Station> {
-    let name = std::env::var("WME_DEFAULT_STATION_NAME").ok();
-    let url = std::env::var("WME_DEFAULT_STATION_URL").ok();
-    let key = std::env::var("WME_DEFAULT_STATION_KEY")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .unwrap_or_default();
-    let model = std::env::var("WME_DEFAULT_STATION_MODEL").ok();
-    let protocol = std::env::var("WME_DEFAULT_STATION_PROTOCOL").ok();
-
-    // If the user has set absolutely nothing, there's no env station. We'll
-    // fall through to demo.
-    if name.is_none()
-        && url.is_none()
-        && key.is_empty()
-        && model.is_none()
-        && protocol.is_none()
-    {
-        return None;
-    }
-
-    let protocol = match protocol.as_deref() {
-        Some("responses") => Protocol::Responses,
-        _ => Protocol::ChatCompletions,
-    };
-
+    let model = std::env::var("WME_DEFAULT_STATION_MODEL").ok()?;
+    let name = std::env::var("WME_DEFAULT_STATION_NAME").unwrap_or_else(|_| "default".into());
     Some(Station {
-        name: name.unwrap_or_else(|| "default".into()),
-        url: url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
-        key,
-        model: model.unwrap_or_else(|| "gpt-4o-mini".into()),
-        is_demo: false,
-        protocol,
+        name,
+        model,
+        dials: Dials::default(),
     })
 }
 
@@ -166,84 +168,122 @@ fn config_path() -> Option<PathBuf> {
     })
 }
 
-/// Pick the active station. Honors `--station NAME` if given. Falls back to
-/// the first non-demo station, then demo.
-pub fn pick<'a>(stations: &'a [Station], requested: Option<&str>) -> Result<&'a Station> {
+/// Pick the active station given the loaded list, the loaded shops, and
+/// an optional explicit name. Falls back to synthesizing a default from
+/// the first shop's first model when nothing else matches.
+pub fn pick(stations: &[Station], shops: &[Shop], requested: Option<&str>) -> Result<Station> {
     if let Some(name) = requested {
         return stations
             .iter()
             .find(|s| s.name == name)
+            .cloned()
             .with_context(|| {
                 let known: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
-                format!(
-                    "no station named '{}'. Known: {}",
-                    name,
-                    known.join(", ")
-                )
+                format!("no station named '{}'. known: {}", name, known.join(", "))
             });
     }
-    Ok(stations
-        .iter()
-        .find(|s| !s.is_demo)
-        .unwrap_or(&stations[0]))
+    // Prefer the first non-demo station the user has saved.
+    if let Some(st) = stations.iter().find(|s| s.name != "demo") {
+        return Ok(st.clone());
+    }
+    // No saved stations. Synthesize one from the first non-demo shop's
+    // first advertised model. Convention says that is the newest.
+    if let Some(shop) = shops.iter().find(|s| s.name != "demo") {
+        if let Some(model) = shop.models.first() {
+            return Ok(Station {
+                name: "untitled".into(),
+                model: model.clone(),
+                dials: Dials::default(),
+            });
+        }
+    }
+    // Nothing configured at all. Demo.
+    Ok(Station::demo())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shop::{Protocol, Shop};
 
-    #[test]
-    fn demo_is_always_there() {
-        let demo = Station::demo();
-        assert!(demo.is_demo);
-        assert_eq!(demo.name, "demo");
+    fn shop(name: &str, models: &[&str]) -> Shop {
+        Shop {
+            name: name.into(),
+            url: "u".into(),
+            key: "".into(),
+            protocol: Protocol::ChatCompletions,
+            models: models.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn station(name: &str, model: &str) -> Station {
+        Station {
+            name: name.into(),
+            model: model.into(),
+            dials: Dials::default(),
+        }
     }
 
     #[test]
-    fn pick_falls_back_to_demo_when_no_real_station() {
-        let s = vec![Station::demo()];
-        let p = pick(&s, None).unwrap();
-        assert!(p.is_demo);
+    fn demo_station_is_always_there() {
+        let s = Station::demo();
+        assert_eq!(s.name, "demo");
+        assert_eq!(s.model, "canned replies");
     }
 
     #[test]
-    fn pick_prefers_first_non_demo() {
-        let s = vec![
+    fn pick_uses_requested_name() {
+        let stations = vec![
             Station::demo(),
-            Station {
-                name: "a".into(),
-                url: "u".into(),
-                key: "k".into(),
-                model: "m".into(),
-                is_demo: false,
-                protocol: Protocol::ChatCompletions,
-            },
+            station("a", "m1"),
+            station("b", "m2"),
         ];
-        assert_eq!(pick(&s, None).unwrap().name, "a");
+        let shops = vec![Shop::demo()];
+        assert_eq!(pick(&stations, &shops, Some("b")).unwrap().name, "b");
     }
 
     #[test]
-    fn pick_by_name() {
-        let s = vec![
-            Station::demo(),
-            Station {
-                name: "a".into(),
-                url: "u".into(),
-                key: "k".into(),
-                model: "m".into(),
-                is_demo: false,
-                protocol: Protocol::ChatCompletions,
-            },
-            Station {
-                name: "b".into(),
-                url: "u".into(),
-                key: "k".into(),
-                model: "m".into(),
-                is_demo: false,
-                protocol: Protocol::ChatCompletions,
-            },
-        ];
-        assert_eq!(pick(&s, Some("b")).unwrap().name, "b");
-        assert!(pick(&s, Some("nope")).is_err());
+    fn pick_errors_on_unknown_name() {
+        let stations = vec![Station::demo()];
+        let shops = vec![Shop::demo()];
+        assert!(pick(&stations, &shops, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn pick_synthesizes_from_first_shop_when_no_saved_stations() {
+        let stations = vec![Station::demo()];
+        let shops = vec![Shop::demo(), shop("kara", &["sonnet", "haiku"])];
+        let picked = pick(&stations, &shops, None).unwrap();
+        assert_eq!(picked.name, "untitled");
+        assert_eq!(picked.model, "sonnet");
+    }
+
+    #[test]
+    fn pick_falls_back_to_demo_when_nothing_else() {
+        let stations = vec![Station::demo()];
+        let shops = vec![Shop::demo()];
+        let picked = pick(&stations, &shops, None).unwrap();
+        assert_eq!(picked.name, "demo");
+    }
+
+    #[test]
+    fn patience_parses_both_grandma_and_wire_words() {
+        assert_eq!(
+            PatienceField::Named("quick".into()).into_patience(),
+            Some(Patience::Quick)
+        );
+        assert_eq!(
+            PatienceField::Named("LOW".into()).into_patience(),
+            Some(Patience::Quick)
+        );
+        assert_eq!(
+            PatienceField::Named("slow".into()).into_patience(),
+            Some(Patience::Slow)
+        );
+        assert_eq!(
+            PatienceField::Named("high".into()).into_patience(),
+            Some(Patience::Slow)
+        );
+        assert_eq!(PatienceField::Named("garbage".into()).into_patience(), None);
     }
 }

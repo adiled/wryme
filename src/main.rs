@@ -23,6 +23,7 @@ mod app;
 mod demo;
 mod input;
 mod md;
+mod shop;
 mod station;
 mod ui;
 
@@ -37,9 +38,9 @@ use input::Input;
     about = "streaming LLM chat TUI. Input on top, newest reply right below it."
 )]
 struct Args {
-    /// Name of the station to use. Defaults to the env-defined default
-    /// station, then the first station in ~/.config/wryme/stations.toml,
-    /// then the built-in demo.
+    /// Name of a saved station to use. Defaults to the first saved station,
+    /// or a synthesized "untitled" station built from the newest model the
+    /// first shop advertises, or the built-in demo if nothing is configured.
     #[arg(long)]
     station: Option<String>,
 
@@ -52,10 +53,24 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    let shops = shop::load_all().context("loading shops")?;
     let stations = station::load_all().context("loading stations")?;
-    let active = station::pick(&stations, args.station.as_deref())?.clone();
+    let active = station::pick(&stations, &shops, args.station.as_deref())?;
 
-    let client = Client::new(active).context("building api client")?;
+    // Resolve the shop that advertises this station's model. Demo
+    // station's model lives on the demo shop. For everything else we
+    // expect a real shop to claim it.
+    let active_shop = shop::find_for_model(&shops, &active.model)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "station '{}' wants model '{}' but no shop advertises it. \
+                 add this model to a shop's `models = [...]` list in shops.toml.",
+                active.name, active.model
+            )
+        })?;
+
+    let client = Client::new(active_shop, active).context("building api client")?;
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
@@ -104,7 +119,7 @@ async fn run(
     let mut in_flight_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &mut app, &input, client.station()))?;
+        terminal.draw(|f| ui::draw(f, &mut app, &input, client.station(), client.shop()))?;
         if app.should_quit {
             break;
         }

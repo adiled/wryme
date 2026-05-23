@@ -23,9 +23,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::input::Input;
+use crate::shop::{Protocol, Shop};
 use crate::station::Station;
 
-pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
+pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station, shop: &Shop) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -109,11 +110,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
 
     // ---- status bar ----
     let dot = " • ";
-    let station_color = if station.is_demo {
-        Color::Yellow
-    } else {
-        Color::Cyan
-    };
+    let is_demo = shop.protocol == Protocol::Demo;
+    let station_color = if is_demo { Color::Yellow } else { Color::Cyan };
     let mut pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
@@ -123,6 +121,11 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
         ),
         Span::raw(dot),
         Span::raw(station.model.clone()),
+        Span::raw(dot),
+        Span::styled(
+            format!("via {}", shop.name),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
     ];
