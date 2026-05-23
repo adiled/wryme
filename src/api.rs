@@ -184,18 +184,41 @@ impl Client {
         }
 
         // The Responses API takes the system prompt as a top-level
-        // `instructions` field instead of an in-band message. Lift any
-        // role="system" out and put the rest in `input`.
-        let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
-            messages.iter().partition(|m| m.role == "system");
-        let instructions: Option<&str> = system_msgs.first().map(|m| m.content.as_str());
-        let input: Vec<ResponsesInput> = conv_msgs
+        // `instructions` field instead of an in-band message.
+        let instructions: Option<&str> = messages
             .iter()
-            .map(|m| ResponsesInput {
-                role: m.role.as_str(),
-                content: m.content.as_str(),
-            })
+            .find(|m| m.role == "system")
+            .map(|m| m.content.as_str());
+
+        // Conversation messages, system stripped (it lives in `instructions`).
+        let conv_msgs: Vec<&ApiMessage> = messages
+            .iter()
+            .filter(|m| m.role != "system")
             .collect();
+
+        // When `previous_response_id` is set, the server already has the
+        // entire prior conversation pinned to that session. Replaying it
+        // would duplicate every turn. Send only the latest user message
+        // (the new turn). When no previous id, send the whole history
+        // because the server has no other way to see it.
+        let input: Vec<ResponsesInput> = if previous_response_id.is_some() {
+            conv_msgs
+                .last()
+                .into_iter()
+                .map(|m| ResponsesInput {
+                    role: m.role.as_str(),
+                    content: m.content.as_str(),
+                })
+                .collect()
+        } else {
+            conv_msgs
+                .iter()
+                .map(|m| ResponsesInput {
+                    role: m.role.as_str(),
+                    content: m.content.as_str(),
+                })
+                .collect()
+        };
 
         let base = self.station.url.trim_end_matches('/');
         let url = format!("{}/responses", base);
