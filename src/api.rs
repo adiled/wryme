@@ -11,6 +11,10 @@
 //                                 first delta for that call; subsequent argument
 //                                 deltas arrive as ToolCall { name: None }. Used
 //                                 by the UI as a "tinkering" indicator.
+//   - ResponseId { id }         : id from a Responses-protocol response.created
+//                                 event. Stashed by App and replayed as
+//                                 previous_response_id on the next request so
+//                                 the server pins us to the same warm session.
 //   - Done                      : clean end of stream
 //   - Error { message }         : anything we couldn't classify as success
 
@@ -32,6 +36,7 @@ pub enum StreamEvent {
     Delta { text: String },
     Brain { text: String },
     ToolCall { name: Option<String> },
+    ResponseId { id: String },
     Done,
     Error { message: String },
 }
@@ -57,9 +62,14 @@ impl Client {
 
     /// Open a streaming completion. Each delta is sent over `tx` as it arrives.
     /// Returns when the upstream stream closes or errors.
+    ///
+    /// `previous_response_id` is only honored by Responses-protocol stations;
+    /// Chat Completions ignores it. Used for session continuity so the server
+    /// can pin requests to the same warm session.
     pub async fn stream_completion(
         &self,
         messages: Vec<ApiMessage>,
+        previous_response_id: Option<String>,
         tx: UnboundedSender<StreamEvent>,
     ) {
         if self.station.is_demo {
@@ -75,7 +85,10 @@ impl Client {
         }
         let result = match self.station.protocol {
             Protocol::ChatCompletions => self.stream_chat(messages, &tx).await,
-            Protocol::Responses => self.stream_responses(messages, &tx).await,
+            Protocol::Responses => {
+                self.stream_responses(messages, previous_response_id, &tx)
+                    .await
+            }
         };
         if let Err(e) = result {
             let _ = tx.send(StreamEvent::Error {
@@ -150,6 +163,7 @@ impl Client {
     async fn stream_responses(
         &self,
         messages: Vec<ApiMessage>,
+        previous_response_id: Option<String>,
         tx: &UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         #[derive(Serialize)]
@@ -159,6 +173,8 @@ impl Client {
             stream: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             instructions: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            previous_response_id: Option<&'a str>,
         }
 
         #[derive(Serialize)]
@@ -188,6 +204,7 @@ impl Client {
             input,
             stream: true,
             instructions,
+            previous_response_id: previous_response_id.as_deref(),
         };
 
         let mut req = self.http.post(&url).json(&body);
@@ -372,6 +389,20 @@ fn handle_responses_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Re
         };
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
+            "response.created" => {
+                // Capture the response id so we can replay it as
+                // previous_response_id on the next turn and stay pinned
+                // to the same server-side session.
+                if let Some(id) = v
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(|i| i.as_str())
+                {
+                    let _ = tx.send(StreamEvent::ResponseId {
+                        id: id.to_string(),
+                    });
+                }
+            }
             "response.output_text.delta" => {
                 if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
                     if !d.is_empty() {

@@ -132,6 +132,9 @@ async fn run(
                     StreamEvent::ToolCall { name } => {
                         app.record_tool_call(name);
                     }
+                    StreamEvent::ResponseId { id } => {
+                        app.last_response_id = Some(id);
+                    }
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if let Some(t) = in_flight_task.take() {
@@ -250,10 +253,11 @@ fn handle_key(
             app.note("");
 
             let msgs = app.api_messages();
+            let prev_id = app.last_response_id.clone();
             let client = client.clone();
             let tx = tx.clone();
             *in_flight = Some(tokio::spawn(async move {
-                client.stream_completion(msgs, tx).await;
+                client.stream_completion(msgs, prev_id, tx).await;
             }));
         }
         KeyCode::PageUp => match app.view_mode {
