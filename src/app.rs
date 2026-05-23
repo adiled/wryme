@@ -29,6 +29,14 @@ pub struct Message {
     pub brain: String,
     /// True while the model is still streaming into this message.
     pub streaming: bool,
+    /// Local time the message was created, formatted "HH:mm". Set once
+    /// when the message is pushed and never updated. We don't persist
+    /// across sessions, so the date is always today and not stored.
+    pub timestamp: String,
+}
+
+fn now_hhmm() -> String {
+    chrono::Local::now().format("%H:%M").to_string()
 }
 
 pub struct App {
@@ -87,6 +95,7 @@ impl App {
             content,
             brain: String::new(),
             streaming: false,
+            timestamp: now_hhmm(),
         });
     }
 
@@ -96,6 +105,7 @@ impl App {
             content: String::new(),
             brain: String::new(),
             streaming: true,
+            timestamp: now_hhmm(),
         });
     }
 

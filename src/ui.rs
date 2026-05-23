@@ -69,8 +69,9 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
 
     // ---- messages (middle, newest first, paged) ----
     let mut lines: Vec<Line> = Vec::new();
+    let msg_width = chunks[1].width;
     for msg in app.messages.iter().rev() {
-        push_message(&mut lines, msg);
+        push_message(&mut lines, msg, msg_width);
         lines.push(Line::from(""));
     }
     if lines.is_empty() {
@@ -165,19 +166,18 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
     f.render_widget(status, chunks[2]);
 }
 
-fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {    let (role_color, role_text) = match msg.role {
+fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
+    let (role_color, role_text) = match msg.role {
         Role::User => (Color::Green, "you"),
         Role::Assistant => (Color::Magenta, "assistant"),
     };
 
-    let mut header = vec![
-        Span::styled(
-            role_text.to_string(),
-            Style::default()
-                .fg(role_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut header: Vec<Span<'static>> = vec![Span::styled(
+        role_text.to_string(),
+        Style::default()
+            .fg(role_color)
+            .add_modifier(Modifier::BOLD),
+    )];
     if msg.streaming {
         let label = if !msg.content.is_empty() {
             "  writing…"
@@ -191,6 +191,23 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message) {    let (role_colo
             Style::default().fg(Color::DarkGray),
         ));
     }
+
+    // Right-align the timestamp on the same line as the role label by
+    // padding with spaces between them. If the header would overflow the
+    // viewport width, we still keep at least one space of separation.
+    let left_width: usize = header
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let ts_width = UnicodeWidthStr::width(msg.timestamp.as_str());
+    let pad = (area_width as usize)
+        .saturating_sub(left_width + ts_width)
+        .max(1);
+    header.push(Span::raw(" ".repeat(pad)));
+    header.push(Span::styled(
+        msg.timestamp.clone(),
+        Style::default().fg(Color::DarkGray),
+    ));
     out.push(Line::from(header));
 
     let has_reply = !msg.content.is_empty();
