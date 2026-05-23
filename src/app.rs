@@ -178,13 +178,37 @@ impl App {
     }
 
     pub fn finish_streaming(&mut self) {
-        for m in self.messages.iter_mut().rev() {
-            if m.streaming {
-                m.streaming = false;
+        self.in_flight = false;
+
+        // Find the streaming assistant message (most recent) and mark it done.
+        let mut just_finished: Option<usize> = None;
+        for i in (0..self.messages.len()).rev() {
+            if self.messages[i].streaming {
+                self.messages[i].streaming = false;
+                just_finished = Some(i);
                 break;
             }
         }
-        self.in_flight = false;
+
+        // If that turn produced nothing visible at all (no content, no brain,
+        // no tool indicator), drop it so the screen does not show a confusing
+        // empty bubble. Server hiccups and pre-delta errors are common causes.
+        // If the upstream sent an error, the status bar already explains
+        // what happened. If not, leave a short note so the user knows
+        // something landed but came back empty.
+        if let Some(i) = just_finished {
+            let m = &self.messages[i];
+            if m.role == Role::Assistant
+                && m.content.is_empty()
+                && m.brain.is_empty()
+                && m.current_tool.is_none()
+            {
+                self.messages.remove(i);
+                if self.status.is_empty() {
+                    self.note("empty reply");
+                }
+            }
+        }
     }
 
     /// Build the wire-format message list to send upstream.
