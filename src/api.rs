@@ -7,6 +7,10 @@
 // We emit a stream of `StreamEvent` values the UI can consume:
 //   - Delta { text }            : content delta to append to the current reply
 //   - Brain { text }            : reasoning/thinking delta (DeepSeek, Qwen, etc)
+//   - ToolCall { name }         : the model is calling a tool. Name only on the
+//                                 first delta for that call; subsequent argument
+//                                 deltas arrive as ToolCall { name: None }. Used
+//                                 by the UI as a "tinkering" indicator.
 //   - Done                      : clean end of stream
 //   - Error { message }         : anything we couldn't classify as success
 
@@ -27,6 +31,7 @@ pub struct ApiMessage {
 pub enum StreamEvent {
     Delta { text: String },
     Brain { text: String },
+    ToolCall { name: Option<String> },
     Done,
     Error { message: String },
 }
@@ -195,6 +200,12 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                                 let _ = tx.send(StreamEvent::Brain { text: reasoning });
                             }
                         }
+                        if let Some(tool_calls) = delta.tool_calls {
+                            for tc in tool_calls {
+                                let name = tc.function.and_then(|f| f.name);
+                                let _ = tx.send(StreamEvent::ToolCall { name });
+                            }
+                        }
                     }
                 }
             }
@@ -228,6 +239,23 @@ struct Delta {
     /// from the visible answer. We render this as the "brain" block.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Tool-call deltas. We don't execute tools, just surface a "tinkering"
+    /// indicator with the name so the user sees the model trying to do
+    /// something instead of an empty bubble.
+    #[serde(default)]
+    tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct DeltaToolCall {
+    #[serde(default)]
+    function: Option<DeltaFunction>,
+}
+
+#[derive(Deserialize)]
+struct DeltaFunction {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn truncate(s: &str, max: usize) -> String {

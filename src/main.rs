@@ -129,6 +129,9 @@ async fn run(
                     StreamEvent::Brain { text } => {
                         app.append_to_last_brain(&text);
                     }
+                    StreamEvent::ToolCall { name } => {
+                        app.record_tool_call(name);
+                    }
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if let Some(t) = in_flight_task.take() {

@@ -8,6 +8,17 @@ pub enum Role {
     Assistant,
 }
 
+/// What kind of chunk the model most recently sent us during a stream.
+/// Drives the dim header indicator next to the role label: "thinking…"
+/// vs "writing…" vs "tinkering…". Only meaningful while `streaming`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Streaming,
+    Thinking,
+    Tinkering,
+    Writing,
+}
+
 /// How the message area handles overflow.
 ///
 /// Page is the default. Content is shown in discrete viewport-sized chunks
@@ -33,6 +44,14 @@ pub struct Message {
     /// when the message is pushed and never updated. We don't persist
     /// across sessions, so the date is always today and not stored.
     pub timestamp: String,
+    /// What the model is currently doing (writing, thinking, calling a
+    /// tool). Drives the dim header label. Stops being displayed once
+    /// streaming ends.
+    pub phase: Phase,
+    /// Name of the tool the model is currently calling, if any. Surfaced
+    /// to the right of the phase indicator on the header line, just left
+    /// of the timestamp. Only displayed while streaming.
+    pub current_tool: Option<String>,
 }
 
 fn now_hhmm() -> String {
@@ -96,6 +115,8 @@ impl App {
             brain: String::new(),
             streaming: false,
             timestamp: now_hhmm(),
+            phase: Phase::Streaming,
+            current_tool: None,
         });
     }
 
@@ -106,6 +127,8 @@ impl App {
             brain: String::new(),
             streaming: true,
             timestamp: now_hhmm(),
+            phase: Phase::Streaming,
+            current_tool: None,
         });
     }
 
@@ -117,6 +140,7 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.streaming)
         {
             m.content.push_str(delta);
+            m.phase = Phase::Writing;
         }
     }
 
@@ -128,6 +152,21 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.streaming)
         {
             m.brain.push_str(delta);
+            m.phase = Phase::Thinking;
+        }
+    }
+
+    pub fn record_tool_call(&mut self, name: Option<String>) {
+        if let Some(m) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::Assistant && m.streaming)
+        {
+            m.phase = Phase::Tinkering;
+            if let Some(n) = name {
+                m.current_tool = Some(n);
+            }
         }
     }
 

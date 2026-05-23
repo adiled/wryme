@@ -21,7 +21,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Message, Role, ViewMode};
+use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::input::Input;
 use crate::station::Station;
 
@@ -179,12 +179,11 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
             .add_modifier(Modifier::BOLD),
     )];
     if msg.streaming {
-        let label = if !msg.content.is_empty() {
-            "  writing…"
-        } else if !msg.brain.is_empty() {
-            "  thinking…"
-        } else {
-            "  streaming…"
+        let label = match msg.phase {
+            Phase::Writing => "  writing…",
+            Phase::Thinking => "  thinking…",
+            Phase::Tinkering => "  tinkering…",
+            Phase::Streaming => "  streaming…",
         };
         header.push(Span::styled(
             label.to_string(),
@@ -192,22 +191,43 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
         ));
     }
 
-    // Right-align the timestamp on the same line as the role label by
-    // padding with spaces between them. If the header would overflow the
-    // viewport width, we still keep at least one space of separation.
+    // Build the right side of the header. Tool name (if any, while streaming)
+    // sits just to the left of the timestamp with two spaces between them.
+    let tool_span: Option<Span<'static>> = if msg.streaming {
+        msg.current_tool.as_ref().map(|name| {
+            Span::styled(
+                name.clone(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+        })
+    } else {
+        None
+    };
+    let ts_span = Span::styled(
+        msg.timestamp.clone(),
+        Style::default().fg(Color::DarkGray),
+    );
+
+    // Width math. Pad with spaces between the header's left content and the
+    // right cluster (tool name + timestamp).
     let left_width: usize = header
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
+    let tool_width = tool_span
+        .as_ref()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()) + 2)
+        .unwrap_or(0);
     let ts_width = UnicodeWidthStr::width(msg.timestamp.as_str());
     let pad = (area_width as usize)
-        .saturating_sub(left_width + ts_width)
+        .saturating_sub(left_width + tool_width + ts_width)
         .max(1);
     header.push(Span::raw(" ".repeat(pad)));
-    header.push(Span::styled(
-        msg.timestamp.clone(),
-        Style::default().fg(Color::DarkGray),
-    ));
+    if let Some(t) = tool_span {
+        header.push(t);
+        header.push(Span::raw("  "));
+    }
+    header.push(ts_span);
     out.push(Line::from(header));
 
     let has_reply = !msg.content.is_empty();
