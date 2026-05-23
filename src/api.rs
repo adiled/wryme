@@ -389,15 +389,16 @@ fn handle_responses_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Re
             "response.output_item.added" => {
                 // A new output item appeared. If it is a tool call, surface
                 // the tool name. Built-in tools (file_search, web_search,
-                // code_interpreter) get their type as the name; explicit
-                // function calls carry a "name" field on the item.
+                // code_interpreter, etc.) get their type as the name.
+                // Explicit function calls and MCP server calls carry a
+                // "name" field on the item.
                 let item = v.get("item");
                 let item_type = item
                     .and_then(|i| i.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
                 let name: Option<String> = match item_type {
-                    "function_call" => item
+                    "function_call" | "mcp_call" => item
                         .and_then(|i| i.get("name"))
                         .and_then(|n| n.as_str())
                         .map(String::from),
