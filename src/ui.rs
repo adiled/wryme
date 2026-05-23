@@ -180,15 +180,20 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     )];
     if msg.streaming {
         let label = match msg.phase {
-            Phase::Writing => "  writing…",
-            Phase::Thinking => "  thinking…",
-            Phase::Tinkering => "  tinkering…",
-            Phase::Streaming => "  streaming…",
+            Phase::Writing => Some("  writing…"),
+            Phase::Thinking => Some("  thinking…"),
+            Phase::Tinkering => Some("  tinkering…"),
+            // Initial state. No chunk has arrived yet. Suppress the
+            // generic "streaming…" filler; the empty header reads as
+            // "waiting" cleanly enough.
+            Phase::Streaming => None,
         };
-        header.push(Span::styled(
-            label.to_string(),
-            Style::default().fg(Color::DarkGray),
-        ));
+        if let Some(l) = label {
+            header.push(Span::styled(
+                l.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     }
 
     // Build the right side of the header. Tool name (if any, while streaming)

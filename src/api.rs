@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::station::Station;
+use crate::station::{Protocol, Station};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiMessage {
@@ -73,7 +73,11 @@ impl Client {
             let _ = tx.send(StreamEvent::Done);
             return;
         }
-        if let Err(e) = self.stream_inner(messages, &tx).await {
+        let result = match self.station.protocol {
+            Protocol::ChatCompletions => self.stream_chat(messages, &tx).await,
+            Protocol::Responses => self.stream_responses(messages, &tx).await,
+        };
+        if let Err(e) = result {
             let _ = tx.send(StreamEvent::Error {
                 message: format!("{:#}", e),
             });
@@ -81,7 +85,7 @@ impl Client {
         let _ = tx.send(StreamEvent::Done);
     }
 
-    async fn stream_inner(
+    async fn stream_chat(
         &self,
         messages: Vec<ApiMessage>,
         tx: &UnboundedSender<StreamEvent>,
@@ -136,6 +140,84 @@ impl Client {
         // Any trailing event without a final blank line.
         if !buf.is_empty() {
             handle_event(&buf, tx)?;
+        }
+        Ok(())
+    }
+
+    /// POST to /responses with typed SSE events. Each event is a JSON
+    /// object with a "type" field. We pattern-match the types that
+    /// correspond to our StreamEvent variants and drop the rest.
+    async fn stream_responses(
+        &self,
+        messages: Vec<ApiMessage>,
+        tx: &UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct ResponsesReq<'a> {
+            model: &'a str,
+            input: Vec<ResponsesInput<'a>>,
+            stream: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            instructions: Option<&'a str>,
+        }
+
+        #[derive(Serialize)]
+        struct ResponsesInput<'a> {
+            role: &'a str,
+            content: &'a str,
+        }
+
+        // The Responses API takes the system prompt as a top-level
+        // `instructions` field instead of an in-band message. Lift any
+        // role="system" out and put the rest in `input`.
+        let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
+            messages.iter().partition(|m| m.role == "system");
+        let instructions: Option<&str> = system_msgs.first().map(|m| m.content.as_str());
+        let input: Vec<ResponsesInput> = conv_msgs
+            .iter()
+            .map(|m| ResponsesInput {
+                role: m.role.as_str(),
+                content: m.content.as_str(),
+            })
+            .collect();
+
+        let base = self.station.url.trim_end_matches('/');
+        let url = format!("{}/responses", base);
+        let body = ResponsesReq {
+            model: &self.station.model,
+            input,
+            stream: true,
+            instructions,
+        };
+
+        let mut req = self.http.post(&url).json(&body);
+        if !self.station.key.is_empty() {
+            req = req.bearer_auth(&self.station.key);
+        }
+        let resp = req.send().await.context("posting responses")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("reading sse chunk")?;
+            buf.extend_from_slice(&chunk);
+            loop {
+                let Some(end) = find_event_boundary(&buf) else {
+                    break;
+                };
+                let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
+                let event = &event_bytes[..end.body_len];
+                handle_responses_event(event, tx)?;
+            }
+        }
+        if !buf.is_empty() {
+            handle_responses_event(&buf, tx)?;
         }
         Ok(())
     }
@@ -266,4 +348,83 @@ fn truncate(s: &str, max: usize) -> String {
         out.push_str("…");
         out
     }
+}
+
+/// Parse one SSE event body from the /responses stream and emit the
+/// matching StreamEvent. Events are JSON objects with a "type" field;
+/// anything we don't recognize is silently ignored.
+fn handle_responses_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
+    let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
+    // An SSE event body can include `event:` and `data:` lines. We only
+    // need the `data:` payload; the JSON inside carries its own `type`.
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim_start();
+        if payload == "[DONE]" || payload.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match event_type {
+            "response.output_text.delta" => {
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
+                    if !d.is_empty() {
+                        let _ = tx.send(StreamEvent::Delta { text: d.to_string() });
+                    }
+                }
+            }
+            "response.reasoning_summary_text.delta" => {
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
+                    if !d.is_empty() {
+                        let _ = tx.send(StreamEvent::Brain { text: d.to_string() });
+                    }
+                }
+            }
+            "response.output_item.added" => {
+                // A new output item appeared. If it is a tool call, surface
+                // the tool name. Built-in tools (file_search, web_search,
+                // code_interpreter) get their type as the name; explicit
+                // function calls carry a "name" field on the item.
+                let item = v.get("item");
+                let item_type = item
+                    .and_then(|i| i.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let name: Option<String> = match item_type {
+                    "function_call" => item
+                        .and_then(|i| i.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(String::from),
+                    "file_search_call" => Some("file_search".into()),
+                    "web_search_call" => Some("web_search".into()),
+                    "code_interpreter_call" => Some("code_interpreter".into()),
+                    "image_generation_call" => Some("image_generation".into()),
+                    "computer_use_call" => Some("computer_use".into()),
+                    _ => None,
+                };
+                if name.is_some() {
+                    let _ = tx.send(StreamEvent::ToolCall { name });
+                }
+            }
+            // Built-in tool progress events. Each fires throughout the
+            // tool's run; the indicator stays "tinkering" until the model
+            // resumes writing.
+            "response.file_search_call.in_progress"
+            | "response.file_search_call.searching"
+            | "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+            | "response.code_interpreter_call.in_progress"
+            | "response.code_interpreter_call.interpreting" => {
+                let _ = tx.send(StreamEvent::ToolCall { name: None });
+            }
+            _ => { /* ignore */ }
+        }
+    }
+    Ok(())
 }

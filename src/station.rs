@@ -16,6 +16,22 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Which OpenAI-compatible wire protocol this station speaks.
+///
+/// `ChatCompletions` is the universal baseline: `/v1/chat/completions` with
+/// flat `choices[].delta` chunks. Almost every server supports it.
+///
+/// `Responses` is the newer typed-event protocol at `/v1/responses`. Cleaner
+/// for tool use, reasoning, refusals, and built-in tools (file_search,
+/// web_search, code_interpreter). OpenAI directly and some agentic
+/// passthroughs (like our local kara server) support it. Most local
+/// servers (Ollama, LM Studio, llama.cpp) do not yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    ChatCompletions,
+    Responses,
+}
+
 #[derive(Debug, Clone)]
 pub struct Station {
     pub name: String,
@@ -23,6 +39,7 @@ pub struct Station {
     pub key: String,
     pub model: String,
     pub is_demo: bool,
+    pub protocol: Protocol,
 }
 
 impl Station {
@@ -33,6 +50,7 @@ impl Station {
             key: String::new(),
             model: "canned replies".into(),
             is_demo: true,
+            protocol: Protocol::ChatCompletions,
         }
     }
 }
@@ -54,6 +72,10 @@ struct StationDef {
     /// commit the config without leaking secrets.
     #[serde(default)]
     key_env: Option<String>,
+    /// "chat-completions" (default) or "responses". Picks which wire
+    /// protocol we use when talking to this station.
+    #[serde(default)]
+    protocol: Option<String>,
 }
 
 impl StationDef {
@@ -63,12 +85,17 @@ impl StationDef {
             (None, Some(env_name)) => std::env::var(&env_name).unwrap_or_default(),
             (None, None) => String::new(),
         };
+        let protocol = match self.protocol.as_deref() {
+            Some("responses") => Protocol::Responses,
+            _ => Protocol::ChatCompletions,
+        };
         Station {
             name: self.name,
             url: self.url,
             key,
             model: self.model,
             is_demo: false,
+            protocol,
         }
     }
 }
@@ -102,12 +129,23 @@ fn from_env() -> Option<Station> {
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
         .unwrap_or_default();
     let model = std::env::var("WME_DEFAULT_STATION_MODEL").ok();
+    let protocol = std::env::var("WME_DEFAULT_STATION_PROTOCOL").ok();
 
     // If the user has set absolutely nothing, there's no env station. We'll
     // fall through to demo.
-    if name.is_none() && url.is_none() && key.is_empty() && model.is_none() {
+    if name.is_none()
+        && url.is_none()
+        && key.is_empty()
+        && model.is_none()
+        && protocol.is_none()
+    {
         return None;
     }
+
+    let protocol = match protocol.as_deref() {
+        Some("responses") => Protocol::Responses,
+        _ => Protocol::ChatCompletions,
+    };
 
     Some(Station {
         name: name.unwrap_or_else(|| "default".into()),
@@ -115,6 +153,7 @@ fn from_env() -> Option<Station> {
         key,
         model: model.unwrap_or_else(|| "gpt-4o-mini".into()),
         is_demo: false,
+        protocol,
     })
 }
 
@@ -177,6 +216,7 @@ mod tests {
                 key: "k".into(),
                 model: "m".into(),
                 is_demo: false,
+                protocol: Protocol::ChatCompletions,
             },
         ];
         assert_eq!(pick(&s, None).unwrap().name, "a");
@@ -192,6 +232,7 @@ mod tests {
                 key: "k".into(),
                 model: "m".into(),
                 is_demo: false,
+                protocol: Protocol::ChatCompletions,
             },
             Station {
                 name: "b".into(),
@@ -199,6 +240,7 @@ mod tests {
                 key: "k".into(),
                 model: "m".into(),
                 is_demo: false,
+                protocol: Protocol::ChatCompletions,
             },
         ];
         assert_eq!(pick(&s, Some("b")).unwrap().name, "b");
