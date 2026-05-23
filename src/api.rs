@@ -1,18 +1,19 @@
-// Shared types and the protocol dispatcher for talking to an LLM endpoint.
+// Shared types and the protocol dispatcher.
 //
-// Each Client carries a (Shop, Station) pair. The shop owns the wire
-// concerns (url, key, protocol). The station owns the model identity and
-// the dials. The protocol-specific work lives in two sibling files:
+// Client wraps just the reqwest http handle. Active shop and station live
+// on App and are passed in per request so the popup can mutate them
+// without going through Client.
 //
-//   api_chat.rs       /chat/completions (universal baseline)
-//   api_responses.rs  /responses (typed events, kara, OpenAI Responses)
+// Per-protocol work lives in two sibling files:
+//   api_chat.rs       /chat/completions
+//   api_responses.rs  /responses
 //
-// StreamEvents emitted by either protocol:
-//   Delta { text }      content delta to append to the current reply
+// StreamEvents both protocols can emit:
+//   Delta { text }      content delta
 //   Brain { text }      reasoning / thinking delta
-//   ToolCall { name }   the model is calling a tool; drives "tinkering"
-//   ResponseId { id }   captured from Responses response.created; replayed
-//                       as previous_response_id next turn for session pinning
+//   ToolCall { name }   model is calling a tool; drives "tinkering"
+//   ResponseId { id }   captured from response.created, replayed as
+//                       previous_response_id next turn for session pinning
 //   Done                clean end of stream
 //   Error { message }   anything we couldn't classify as success
 
@@ -42,36 +43,29 @@ pub enum StreamEvent {
 #[derive(Clone)]
 pub struct Client {
     pub(crate) http: reqwest::Client,
-    pub(crate) shop: Shop,
-    pub(crate) station: Station,
 }
 
 impl Client {
-    pub fn new(shop: Shop, station: Station) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("building http client")?;
-        Ok(Self { http, shop, station })
+        Ok(Self { http })
     }
 
-    pub fn shop(&self) -> &Shop {
-        &self.shop
-    }
-
-    pub fn station(&self) -> &Station {
-        &self.station
-    }
-
-    /// Open a streaming completion. Each delta is sent over `tx` as it arrives.
-    /// Returns when the upstream stream closes or errors.
+    /// Open a streaming completion against the given shop with the given
+    /// station's model + dials. Each StreamEvent is sent on `tx` as it
+    /// arrives; returns when the upstream stream closes or errors.
     pub async fn stream_completion(
         &self,
+        shop: Shop,
+        station: Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
         tx: UnboundedSender<StreamEvent>,
     ) {
-        let result = match self.shop.protocol {
+        let result = match shop.protocol {
             Protocol::Demo => {
                 let prompt = messages
                     .iter()
@@ -82,9 +76,19 @@ impl Client {
                 crate::demo::stream(prompt, tx.clone()).await;
                 Ok(())
             }
-            Protocol::ChatCompletions => crate::api_chat::stream(self, messages, &tx).await,
+            Protocol::ChatCompletions => {
+                crate::api_chat::stream(self, &shop, &station, messages, &tx).await
+            }
             Protocol::Responses => {
-                crate::api_responses::stream(self, messages, previous_response_id, &tx).await
+                crate::api_responses::stream(
+                    self,
+                    &shop,
+                    &station,
+                    messages,
+                    previous_response_id,
+                    &tx,
+                )
+                .await
             }
         };
         if let Err(e) = result {

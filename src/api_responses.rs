@@ -13,10 +13,13 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
-use crate::station::Patience;
+use crate::shop::Shop;
+use crate::station::{Patience, Station};
 
 pub(crate) async fn stream(
     client: &Client,
+    shop: &Shop,
+    station: &Station,
     messages: Vec<ApiMessage>,
     previous_response_id: Option<String>,
     tx: &UnboundedSender<StreamEvent>,
@@ -78,26 +81,26 @@ pub(crate) async fn stream(
             .collect()
     };
 
-    let reasoning = client.station.dials.patience.map(|p: Patience| Reasoning {
+    let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
         effort: p.as_wire(),
     });
 
-    let base = client.shop.url.trim_end_matches('/');
+    let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
     let body = ResponsesReq {
-        model: &client.station.model,
+        model: &station.model,
         input,
         stream: true,
         instructions,
         previous_response_id: previous_response_id.as_deref(),
-        temperature: client.station.dials.boldness,
-        max_output_tokens: client.station.dials.verbosity,
+        temperature: station.dials.boldness,
+        max_output_tokens: station.dials.verbosity,
         reasoning,
     };
 
     let mut req = client.http.post(&url).json(&body);
-    if !client.shop.key.is_empty() {
-        req = req.bearer_auth(&client.shop.key);
+    if !shop.key.is_empty() {
+        req = req.bearer_auth(&shop.key);
     }
     let resp = req.send().await.context("posting responses")?;
 

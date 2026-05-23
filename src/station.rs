@@ -201,6 +201,66 @@ pub fn pick(stations: &[Station], shops: &[Shop], requested: Option<&str>) -> Re
     Ok(Station::demo())
 }
 
+/// Where new stations get written when the user saves from the popup.
+pub fn save_path() -> Option<PathBuf> {
+    config_path()
+}
+
+/// Append one [[station]] block to the stations file. Creates the file
+/// (and parent directory) if missing. Preserves the rest of the file
+/// exactly; we never rewrite anything that was already there.
+pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
+    use std::io::Write;
+    let mut block = String::new();
+    block.push('\n');
+    block.push_str("[[station]]\n");
+    block.push_str(&format!("name = {}\n", toml_str(&station.name)));
+    block.push_str(&format!("model = {}\n", toml_str(&station.model)));
+    if let Some(b) = station.dials.boldness {
+        block.push_str(&format!("boldness = {}\n", b));
+    }
+    if let Some(p) = station.dials.patience {
+        let label = match p {
+            Patience::Quick => "quick",
+            Patience::Steady => "steady",
+            Patience::Slow => "slow",
+        };
+        block.push_str(&format!("patience = \"{}\"\n", label));
+    }
+    if let Some(v) = station.dials.verbosity {
+        block.push_str(&format!("verbosity = {}\n", v));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {} for append", path.display()))?;
+    f.write_all(block.as_bytes())
+        .with_context(|| format!("writing to {}", path.display()))?;
+    Ok(())
+}
+
+/// TOML-quote a single-line string. Only handles backslash and
+/// double-quote escapes; we only ever serialize station names and model
+/// ids which are simple ascii in practice.
+fn toml_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

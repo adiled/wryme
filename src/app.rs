@@ -1,6 +1,9 @@
 // Application state. The UI is a pure function of this.
 
 use crate::api::ApiMessage;
+use crate::popup::Popup;
+use crate::shop::Shop;
+use crate::station::Station;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -92,10 +95,31 @@ pub struct App {
     /// per-session state like cached tool results or MCP server state).
     /// Reset to None on launch; we don't persist across runs.
     pub last_response_id: Option<String>,
+    /// All shops loaded at startup. Read-only after that. Used by the
+    /// popup to list every model any shop can run.
+    pub shops: Vec<Shop>,
+    /// Every saved station loaded at startup, plus any the user saves
+    /// during this session via the popup. Mutable.
+    pub stations: Vec<Station>,
+    /// The station currently in effect. The popup mutates this when the
+    /// user adjusts dials, picks a different model, or loads a saved
+    /// station. Cloned into each in-flight request.
+    pub active_station: Station,
+    /// The shop currently in effect. Re-resolved every time
+    /// active_station.model changes.
+    pub active_shop: Shop,
+    /// The popup overlay state (closed, browsing, or entering a name).
+    pub popup: Popup,
 }
 
 impl App {
-    pub fn new(system: Option<String>) -> Self {
+    pub fn new(
+        system: Option<String>,
+        shops: Vec<Shop>,
+        stations: Vec<Station>,
+        active_station: Station,
+        active_shop: Shop,
+    ) -> Self {
         Self {
             messages: Vec::new(),
             system,
@@ -108,6 +132,11 @@ impl App {
             view_mode: ViewMode::Page,
             last_viewport_h: 0,
             last_response_id: None,
+            shops,
+            stations,
+            active_station,
+            active_shop,
+            popup: Popup::default(),
         }
     }
 

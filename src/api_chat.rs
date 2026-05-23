@@ -10,9 +10,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::shop::Shop;
+use crate::station::Station;
 
 pub(crate) async fn stream(
     client: &Client,
+    shop: &Shop,
+    station: &Station,
     messages: Vec<ApiMessage>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
@@ -25,22 +29,21 @@ pub(crate) async fn stream(
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_tokens: Option<u32>,
-        // reasoning_effort has no Chat Completions equivalent; silently dropped.
     }
 
-    let base = client.shop.url.trim_end_matches('/');
+    let base = shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let body = Req {
-        model: &client.station.model,
+        model: &station.model,
         messages: &messages,
         stream: true,
-        temperature: client.station.dials.boldness,
-        max_tokens: client.station.dials.verbosity,
+        temperature: station.dials.boldness,
+        max_tokens: station.dials.verbosity,
     };
 
     let mut req = client.http.post(&url).json(&body);
-    if !client.shop.key.is_empty() {
-        req = req.bearer_auth(&client.shop.key);
+    if !shop.key.is_empty() {
+        req = req.bearer_auth(&shop.key);
     }
     let resp = req.send().await.context("posting chat/completions")?;
 

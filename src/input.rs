@@ -5,6 +5,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Debug, Default)]
 pub struct Input {
     pub text: String,
     /// Caret position in grapheme clusters, not bytes.
@@ -13,10 +14,7 @@ pub struct Input {
 
 impl Input {
     pub fn new() -> Self {
-        Self {
-            text: String::new(),
-            col: 0,
-        }
+        Self::default()
     }
 
     pub fn grapheme_count(&self) -> usize {

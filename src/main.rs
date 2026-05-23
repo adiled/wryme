@@ -23,6 +23,7 @@ mod app;
 mod demo;
 mod input;
 mod md;
+mod popup;
 mod shop;
 mod station;
 mod ui;
@@ -57,9 +58,7 @@ async fn main() -> Result<()> {
     let stations = station::load_all().context("loading stations")?;
     let active = station::pick(&stations, &shops, args.station.as_deref())?;
 
-    // Resolve the shop that advertises this station's model. Demo
-    // station's model lives on the demo shop. For everything else we
-    // expect a real shop to claim it.
+    // Resolve the shop that advertises this station's model.
     let active_shop = shop::find_for_model(&shops, &active.model)
         .cloned()
         .with_context(|| {
@@ -70,12 +69,21 @@ async fn main() -> Result<()> {
             )
         })?;
 
-    let client = Client::new(active_shop, active).context("building api client")?;
+    let client = Client::new().context("building api client")?;
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
 
-    let result = run(&mut terminal, client, args.system).await;
+    let result = run(
+        &mut terminal,
+        client,
+        args.system,
+        shops,
+        stations,
+        active,
+        active_shop,
+    )
+    .await;
 
     restore_terminal(&mut terminal).ok();
     result
@@ -111,15 +119,19 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: Client,
     system: Option<String>,
+    shops: Vec<shop::Shop>,
+    stations: Vec<station::Station>,
+    active_station: station::Station,
+    active_shop: shop::Shop,
 ) -> Result<()> {
-    let mut app = App::new(system);
+    let mut app = App::new(system, shops, stations, active_station, active_shop);
     let mut input = Input::new();
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &mut app, &input, client.station(), client.shop()))?;
+        terminal.draw(|f| ui::draw(f, &mut app, &input))?;
         if app.should_quit {
             break;
         }
@@ -242,6 +254,12 @@ fn handle_key(
         return;
     }
 
+    // When the station popup is open, it captures input.
+    if app.popup.mode != popup::Mode::Closed {
+        handle_popup_key(k, app);
+        return;
+    }
+
     match k.code {
         KeyCode::Esc => {
             if let Some(t) = in_flight.take() {
@@ -271,10 +289,14 @@ fn handle_key(
 
             let msgs = app.api_messages();
             let prev_id = app.last_response_id.clone();
+            let shop = app.active_shop.clone();
+            let station = app.active_station.clone();
             let client = client.clone();
             let tx = tx.clone();
             *in_flight = Some(tokio::spawn(async move {
-                client.stream_completion(msgs, prev_id, tx).await;
+                client
+                    .stream_completion(shop, station, msgs, prev_id, tx)
+                    .await;
             }));
         }
         KeyCode::PageUp => match app.view_mode {
@@ -310,6 +332,7 @@ fn handle_key(
                     'e' => input.end(),
                     'w' => input.kill_prev_word(),
                     't' => toggle_view_mode(app),
+                    's' => popup::toggle(app),
                     _ => {}
                 }
             } else {
@@ -317,5 +340,59 @@ fn handle_key(
             }
         }
         _ => {}
+    }
+}
+
+/// Keys when the station popup is open. Two sub-modes:
+///   Browse: arrow nav, ←/→ adjust, Enter act, Esc close, Ctrl-S close.
+///   SaveAs: text editing of the name field, Enter commit, Esc cancel.
+fn handle_popup_key(k: KeyEvent, app: &mut App) {
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Ctrl-S always closes from any sub-mode.
+    if ctrl && matches!(k.code, KeyCode::Char('s')) {
+        popup::close(app);
+        return;
+    }
+
+    match app.popup.mode {
+        popup::Mode::Closed => {}
+        popup::Mode::Browse => match k.code {
+            KeyCode::Esc => popup::close(app),
+            KeyCode::Up => popup::move_selection(app, -1),
+            KeyCode::Down => popup::move_selection(app, 1),
+            KeyCode::Left => popup::adjust(app, -1),
+            KeyCode::Right => popup::adjust(app, 1),
+            KeyCode::Enter => popup::activate(app),
+            _ => {}
+        },
+        popup::Mode::SaveAs => match k.code {
+            KeyCode::Esc => {
+                app.popup.mode = popup::Mode::Browse;
+                app.popup.name_input = Input::new();
+            }
+            KeyCode::Enter => popup::commit_save_as(app),
+            KeyCode::Left => app.popup.name_input.move_left(),
+            KeyCode::Right => app.popup.name_input.move_right(),
+            KeyCode::Home => app.popup.name_input.home(),
+            KeyCode::End => app.popup.name_input.end(),
+            KeyCode::Backspace => app.popup.name_input.backspace(),
+            KeyCode::Delete => app.popup.name_input.delete_forward(),
+            KeyCode::Char(c) => {
+                if ctrl {
+                    match c {
+                        'u' => app.popup.name_input.kill_to_start(),
+                        'k' => app.popup.name_input.kill_to_end(),
+                        'a' => app.popup.name_input.home(),
+                        'e' => app.popup.name_input.end(),
+                        'w' => app.popup.name_input.kill_prev_word(),
+                        _ => {}
+                    }
+                } else {
+                    app.popup.name_input.insert_char(c);
+                }
+            }
+            _ => {}
+        },
     }
 }

@@ -23,10 +23,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::input::Input;
-use crate::shop::{Protocol, Shop};
-use crate::station::Station;
+use crate::popup;
+use crate::shop::Protocol;
 
-pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station, shop: &Shop) {
+pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -110,20 +110,20 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station, shop
 
     // ---- status bar ----
     let dot = " • ";
-    let is_demo = shop.protocol == Protocol::Demo;
+    let is_demo = app.active_shop.protocol == Protocol::Demo;
     let station_color = if is_demo { Color::Yellow } else { Color::Cyan };
     let mut pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
         Span::styled(
-            format!("station: {}", station.name),
+            format!("station: {}", app.active_station.name),
             Style::default().fg(station_color),
         ),
         Span::raw(dot),
-        Span::raw(station.model.clone()),
+        Span::raw(app.active_station.model.clone()),
         Span::raw(dot),
         Span::styled(
-            format!("via {}", shop.name),
+            format!("via {}", app.active_shop.name),
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(dot),
@@ -167,6 +167,159 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station, shop
     ));
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
+
+    // ---- station popup overlay ----
+    if app.popup.mode != popup::Mode::Closed {
+        draw_popup(f, app);
+    }
+}
+
+fn draw_popup(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let rows = popup::rows(app);
+
+    // Build a Line per row, including the focused-row highlight and the
+    // current value for adjustable rows.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let selected = i == app.popup.selected && app.popup.mode == popup::Mode::Browse;
+        let marker = if selected { "› " } else { "  " };
+        match row {
+            popup::Row::SectionHeader(label) => {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", label),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            popup::Row::Blank => {
+                lines.push(Line::from(""));
+            }
+            popup::Row::Model => {
+                let style = focus_style(selected);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled("model       ", style),
+                    Span::styled(app.active_station.model.clone(), style),
+                ]));
+            }
+            popup::Row::Boldness => {
+                let style = focus_style(selected);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled("boldness    ", style),
+                    Span::styled(popup::boldness_label(app.active_station.dials.boldness), style),
+                ]));
+            }
+            popup::Row::Patience => {
+                let style = focus_style(selected);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled("patience    ", style),
+                    Span::styled(popup::patience_label(app.active_station.dials.patience), style),
+                ]));
+            }
+            popup::Row::Verbosity => {
+                let style = focus_style(selected);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled("verbosity   ", style),
+                    Span::styled(popup::verbosity_label(app.active_station.dials.verbosity), style),
+                ]));
+            }
+            popup::Row::SavedStation(idx) => {
+                let st = &app.stations[*idx];
+                let style = focus_style(selected);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(st.name.clone(), style),
+                    Span::styled(format!("  ({})", st.model), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            popup::Row::SaveAction => {
+                let style = focus_style(selected);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled("save active as…", style),
+                ]));
+            }
+        }
+    }
+
+    // If we are in SaveAs mode, append an inline prompt row.
+    if app.popup.mode == popup::Mode::SaveAs {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  name: ", Style::default().fg(Color::Cyan)),
+            Span::raw(app.popup.name_input.text.clone()),
+        ]));
+    }
+
+    // Hint line at the bottom.
+    let hint = if app.popup.mode == popup::Mode::SaveAs {
+        "  Enter save  ·  Esc cancel"
+    } else {
+        "  ↑↓ select  ·  ←→ adjust  ·  Enter act  ·  Esc / Ctrl-S close"
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Compute centered modal area: 60% width, height = lines + 2 borders + 1
+    // breathing row at top.
+    let modal_w = (area.width as f32 * 0.60).max(50.0).min(area.width as f32) as u16;
+    let modal_h = (lines.len() as u16 + 4).min(area.height);
+    let modal_x = area.x + (area.width - modal_w) / 2;
+    let modal_y = area.y + (area.height.saturating_sub(modal_h)) / 2;
+    let modal_area = ratatui::layout::Rect {
+        x: modal_x,
+        y: modal_y,
+        width: modal_w,
+        height: modal_h,
+    };
+
+    // Clear underneath so the modal does not show through.
+    f.render_widget(ratatui::widgets::Clear, modal_area);
+
+    // Capture the line count before lines is moved into the Paragraph.
+    let line_count = lines.len();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" station ");
+    let widget = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, modal_area);
+
+    // If we are in SaveAs, put the terminal cursor in the name field.
+    if app.popup.mode == popup::Mode::SaveAs {
+        // The name line is at index line_count - 3 (last 3 entries are
+        // the name line, a blank, and the hint line).
+        let name_line_idx = line_count.saturating_sub(3);
+        let name_y = modal_area.y + 1 + name_line_idx as u16;
+        let prompt_len = "  name: ".len() as u16;
+        let caret = app.popup.name_input.display_col();
+        f.set_cursor_position(ratatui::layout::Position {
+            x: modal_area.x + prompt_len + caret,
+            y: name_y,
+        });
+    }
+}
+
+fn focus_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
 }
 
 fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
