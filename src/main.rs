@@ -17,6 +17,8 @@ use std::io::Stdout;
 use tokio::sync::mpsc;
 
 mod api;
+mod api_chat;
+mod api_responses;
 mod app;
 mod demo;
 mod input;
