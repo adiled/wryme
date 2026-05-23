@@ -169,14 +169,21 @@ fn config_path() -> Option<PathBuf> {
 }
 
 /// Pick the active station given the loaded list, the loaded shops, and
-/// an optional explicit name. Falls back to synthesizing a default from
-/// the first shop's first model when nothing else matches.
-pub fn pick(stations: &[Station], shops: &[Shop], requested: Option<&str>) -> Result<Station> {
+/// an optional explicit name. Returns the station plus its "origin": the
+/// name of the saved entry this session traces back to, or None if the
+/// station was synthesized from scratch (untitled or demo).
+pub fn pick(
+    stations: &[Station],
+    shops: &[Shop],
+    requested: Option<&str>,
+) -> Result<(Station, Option<String>)> {
     if let Some(name) = requested {
-        return stations
-            .iter()
-            .find(|s| s.name == name)
-            .cloned()
+        let found = stations.iter().find(|s| s.name == name).cloned();
+        return found
+            .map(|s| {
+                let origin = if s.name == "demo" { None } else { Some(s.name.clone()) };
+                (s, origin)
+            })
             .with_context(|| {
                 let known: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
                 format!("no station named '{}'. known: {}", name, known.join(", "))
@@ -184,21 +191,24 @@ pub fn pick(stations: &[Station], shops: &[Shop], requested: Option<&str>) -> Re
     }
     // Prefer the first non-demo station the user has saved.
     if let Some(st) = stations.iter().find(|s| s.name != "demo") {
-        return Ok(st.clone());
+        return Ok((st.clone(), Some(st.name.clone())));
     }
     // No saved stations. Synthesize one from the first non-demo shop's
     // first advertised model. Convention says that is the newest.
     if let Some(shop) = shops.iter().find(|s| s.name != "demo") {
         if let Some(model) = shop.models.first() {
-            return Ok(Station {
-                name: "untitled".into(),
-                model: model.clone(),
-                dials: Dials::default(),
-            });
+            return Ok((
+                Station {
+                    name: "untitled".into(),
+                    model: model.clone(),
+                    dials: Dials::default(),
+                },
+                None,
+            ));
         }
     }
     // Nothing configured at all. Demo.
-    Ok(Station::demo())
+    Ok((Station::demo(), None))
 }
 
 /// Where new stations get written when the user saves from the popup.
@@ -211,6 +221,95 @@ pub fn save_path() -> Option<PathBuf> {
 /// exactly; we never rewrite anything that was already there.
 pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
     use std::io::Write;
+    let block = serialize_block(station);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {} for append", path.display()))?;
+    f.write_all(block.as_bytes())
+        .with_context(|| format!("writing to {}", path.display()))?;
+    Ok(())
+}
+
+/// Find the [[station]] block whose `name` matches `station.name` in the
+/// file and replace it with a fresh serialization. Preserves everything
+/// outside that block (other stations, comments, blank lines).
+///
+/// Errors if no block with that name is found, so the caller can decide
+/// whether to fall back to appending or surface a message.
+pub fn update_in_file(path: &PathBuf, station: &Station) -> Result<()> {
+    let original = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let updated = replace_station_block(&original, station)
+        .with_context(|| format!("no station '{}' in {}", station.name, path.display()))?;
+    std::fs::write(path, updated)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Returns Ok(new_content) if a [[station]] block with `station.name`
+/// was found and replaced. Returns Err if no such block exists.
+fn replace_station_block(content: &str, station: &Station) -> Result<String> {
+    use anyhow::anyhow;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut replaced = false;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim_start().starts_with("[[station]]") {
+            // Scan forward to find the end of this block: next [[...]]
+            // header or end of file.
+            let block_start = i;
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("[[") {
+                i += 1;
+            }
+            let block_end = i; // exclusive
+            let block_lines = &lines[block_start..block_end];
+            if block_has_name(block_lines, &station.name) {
+                // Replace this block. The serialized block starts with a
+                // leading newline; strip it since we are placing inline,
+                // and re-trim trailing newlines so we don't add blanks.
+                let serialized = serialize_block(station);
+                let trimmed = serialized
+                    .trim_start_matches('\n')
+                    .trim_end_matches('\n');
+                out.push(trimmed.to_string());
+                replaced = true;
+            } else {
+                for l in block_lines {
+                    out.push((*l).to_string());
+                }
+            }
+        } else {
+            out.push(line.to_string());
+            i += 1;
+        }
+    }
+    if !replaced {
+        return Err(anyhow!("station block not found"));
+    }
+    // Preserve final newline state: if the original ended with \n, the
+    // join below loses it.
+    let mut result = out.join("\n");
+    if content.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+fn block_has_name(block_lines: &[&str], name: &str) -> bool {
+    let needle = format!("name = {}", toml_str(name));
+    block_lines.iter().any(|l| l.trim() == needle)
+}
+
+fn serialize_block(station: &Station) -> String {
     let mut block = String::new();
     block.push('\n');
     block.push_str("[[station]]\n");
@@ -230,18 +329,7 @@ pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
     if let Some(v) = station.dials.verbosity {
         block.push_str(&format!("verbosity = {}\n", v));
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("opening {} for append", path.display()))?;
-    f.write_all(block.as_bytes())
-        .with_context(|| format!("writing to {}", path.display()))?;
-    Ok(())
+    block
 }
 
 /// TOML-quote a single-line string. Only handles backslash and
@@ -299,7 +387,9 @@ mod tests {
             station("b", "m2"),
         ];
         let shops = vec![Shop::demo()];
-        assert_eq!(pick(&stations, &shops, Some("b")).unwrap().name, "b");
+        let (got, origin) = pick(&stations, &shops, Some("b")).unwrap();
+        assert_eq!(got.name, "b");
+        assert_eq!(origin.as_deref(), Some("b"));
     }
 
     #[test]
@@ -313,17 +403,20 @@ mod tests {
     fn pick_synthesizes_from_first_shop_when_no_saved_stations() {
         let stations = vec![Station::demo()];
         let shops = vec![Shop::demo(), shop("kara", &["sonnet", "haiku"])];
-        let picked = pick(&stations, &shops, None).unwrap();
-        assert_eq!(picked.name, "untitled");
-        assert_eq!(picked.model, "sonnet");
+        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        assert_eq!(got.name, "untitled");
+        assert_eq!(got.model, "sonnet");
+        // Synthesized: no origin.
+        assert_eq!(origin, None);
     }
 
     #[test]
     fn pick_falls_back_to_demo_when_nothing_else() {
         let stations = vec![Station::demo()];
         let shops = vec![Shop::demo()];
-        let picked = pick(&stations, &shops, None).unwrap();
-        assert_eq!(picked.name, "demo");
+        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        assert_eq!(got.name, "demo");
+        assert_eq!(origin, None);
     }
 
     #[test]
@@ -345,5 +438,64 @@ mod tests {
             Some(Patience::Slow)
         );
         assert_eq!(PatienceField::Named("garbage".into()).into_patience(), None);
+    }
+
+    #[test]
+    fn replace_block_preserves_surrounding_content() {
+        let original = "\
+# header comment
+[[station]]
+name = \"alpha\"
+model = \"m1\"
+
+# middle comment
+[[station]]
+name = \"beta\"
+model = \"m2\"
+boldness = 0.5
+
+[[station]]
+name = \"gamma\"
+model = \"m3\"
+";
+        let target = Station {
+            name: "beta".into(),
+            model: "m2-updated".into(),
+            dials: Dials {
+                boldness: Some(1.2),
+                patience: Some(Patience::Slow),
+                verbosity: None,
+            },
+        };
+        let updated = replace_station_block(original, &target).unwrap();
+        // Alpha block intact.
+        assert!(updated.contains("name = \"alpha\""));
+        // Gamma block intact.
+        assert!(updated.contains("name = \"gamma\""));
+        // Comments intact.
+        assert!(updated.contains("# header comment"));
+        assert!(updated.contains("# middle comment"));
+        // Beta block was replaced with new content.
+        assert!(updated.contains("model = \"m2-updated\""));
+        assert!(updated.contains("boldness = 1.2"));
+        assert!(updated.contains("patience = \"slow\""));
+        // Old beta values gone.
+        assert!(!updated.contains("model = \"m2\"\n"));
+        assert!(!updated.contains("boldness = 0.5"));
+    }
+
+    #[test]
+    fn replace_block_errors_when_not_found() {
+        let original = "\
+[[station]]
+name = \"alpha\"
+model = \"m1\"
+";
+        let target = Station {
+            name: "nonexistent".into(),
+            model: "m".into(),
+            dials: Dials::default(),
+        };
+        assert!(replace_station_block(original, &target).is_err());
     }
 }

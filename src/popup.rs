@@ -46,13 +46,15 @@ pub enum Row {
     Patience,
     Verbosity,
     SavedStation(usize), // index into App.stations
-    SaveAction,
+    UpdateAction,        // only present when origin is set AND dirty
+    SaveAsAction,
     Blank,
 }
 
-/// Build the row list from current app state. The order is fixed:
-/// active section header, model, three dials, blank, saved header, each
-/// saved station (skipping the demo placeholder), blank, save action.
+/// Build the row list from current app state. Order is fixed: active
+/// section header, model, three dials, blank, saved header, each saved
+/// station (skipping the demo placeholder), blank, conditional update
+/// action, save-as action.
 pub fn rows(app: &App) -> Vec<Row> {
     let mut out = vec![
         Row::SectionHeader("active"),
@@ -64,15 +66,16 @@ pub fn rows(app: &App) -> Vec<Row> {
         Row::SectionHeader("saved"),
     ];
     for (i, st) in app.stations.iter().enumerate() {
-        // Hide the built-in demo placeholder from the saved list; the
-        // user did not save it.
         if st.name == "demo" {
             continue;
         }
         out.push(Row::SavedStation(i));
     }
     out.push(Row::Blank);
-    out.push(Row::SaveAction);
+    if app.active_origin.is_some() && app.is_dirty() {
+        out.push(Row::UpdateAction);
+    }
+    out.push(Row::SaveAsAction);
     out
 }
 
@@ -145,7 +148,9 @@ pub fn adjust(app: &mut App, delta: i32) {
 }
 
 /// Enter on the focused row. For dial rows, the same as a right-adjust.
-/// For a saved station, load it. For the save action, switch to SaveAs.
+/// For a saved station, load it. For the update action, write current
+/// state back to the saved entry. For the save-as action, switch to
+/// SaveAs mode.
 pub fn activate(app: &mut App) {
     let r = rows(app);
     let row = r.get(app.popup.selected).cloned();
@@ -155,7 +160,10 @@ pub fn activate(app: &mut App) {
                 load_station(app, st);
             }
         }
-        Some(Row::SaveAction) => {
+        Some(Row::UpdateAction) => {
+            commit_update(app);
+        }
+        Some(Row::SaveAsAction) => {
             app.popup.mode = Mode::SaveAs;
             app.popup.name_input = Input::new();
         }
@@ -167,7 +175,8 @@ pub fn activate(app: &mut App) {
 }
 
 /// Commit the SaveAs name input: append a new station to the stations
-/// file with the current model + dials. The active session is unchanged.
+/// file with the current model + dials. Then claim that name as the new
+/// origin so the session becomes "clean."
 pub fn commit_save_as(app: &mut App) {
     let name = app.popup.name_input.text.trim().to_string();
     if name.is_empty() {
@@ -183,28 +192,57 @@ pub fn commit_save_as(app: &mut App) {
         model: app.active_station.model.clone(),
         dials: app.active_station.dials,
     };
-    if let Some(path) = crate::station::save_path() {
-        match crate::station::append_to_file(&path, &new_station) {
-            Ok(()) => {
-                app.stations.push(new_station);
-                app.note(format!("saved station '{}'", name));
-                app.popup.mode = Mode::Browse;
-                app.popup.name_input = Input::new();
-            }
-            Err(e) => {
-                app.note(format!("save failed: {}", e));
-            }
-        }
-    } else {
+    let Some(path) = crate::station::save_path() else {
         app.note("save failed: no $HOME");
+        return;
+    };
+    if let Err(e) = crate::station::append_to_file(&path, &new_station) {
+        app.note(format!("save failed: {}", e));
+        return;
     }
+    app.stations.push(new_station);
+    app.active_station.name = name.clone();
+    app.active_origin = Some(name.clone());
+    app.note(format!("saved station '{}'", name));
+    app.popup.mode = Mode::Browse;
+    app.popup.name_input = Input::new();
+}
+
+/// Overwrite the saved entry for `active_origin` with the current
+/// active state. Surgical edit: other [[station]] blocks and comments
+/// in the file stay intact.
+pub fn commit_update(app: &mut App) {
+    let Some(origin) = app.active_origin.clone() else {
+        app.note("nothing to update; this is an untitled session");
+        return;
+    };
+    let Some(path) = crate::station::save_path() else {
+        app.note("save failed: no $HOME");
+        return;
+    };
+    let updated = Station {
+        name: origin.clone(),
+        model: app.active_station.model.clone(),
+        dials: app.active_station.dials,
+    };
+    if let Err(e) = crate::station::update_in_file(&path, &updated) {
+        app.note(format!("update failed: {}", e));
+        return;
+    }
+    // Replace the in-memory entry too.
+    if let Some(saved) = app.stations.iter_mut().find(|s| s.name == origin) {
+        *saved = updated;
+    }
+    app.note(format!("updated station '{}'", origin));
 }
 
 /// Replace the active station and re-resolve the shop for its model.
+/// Sets `active_origin` so the session traces back to the loaded entry.
 fn load_station(app: &mut App, st: Station) {
     let shop = crate::shop::find_for_model(&app.shops, &st.model).cloned();
     if let Some(shop) = shop {
         let name = st.name.clone();
+        app.active_origin = Some(name.clone());
         app.active_station = st;
         app.active_shop = shop;
         app.last_response_id = None;

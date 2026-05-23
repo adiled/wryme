@@ -54,9 +54,10 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let shops = shop::load_all().context("loading shops")?;
+    let mut shops = shop::load_all().context("loading shops")?;
+    let discovery_errors = shop::discover_all(&mut shops).await;
     let stations = station::load_all().context("loading stations")?;
-    let active = station::pick(&stations, &shops, args.station.as_deref())?;
+    let (active, active_origin) = station::pick(&stations, &shops, args.station.as_deref())?;
 
     // Resolve the shop that advertises this station's model.
     let active_shop = shop::find_for_model(&shops, &active.model)
@@ -82,6 +83,8 @@ async fn main() -> Result<()> {
         stations,
         active,
         active_shop,
+        active_origin,
+        discovery_errors,
     )
     .await;
 
@@ -123,8 +126,25 @@ async fn run(
     stations: Vec<station::Station>,
     active_station: station::Station,
     active_shop: shop::Shop,
+    active_origin: Option<String>,
+    discovery_errors: Vec<(String, String)>,
 ) -> Result<()> {
-    let mut app = App::new(system, shops, stations, active_station, active_shop);
+    let mut app = App::new(
+        system,
+        shops,
+        stations,
+        active_station,
+        active_shop,
+        active_origin,
+    );
+    if !discovery_errors.is_empty() {
+        let summary = discovery_errors
+            .iter()
+            .map(|(s, e)| format!("{}: {}", s, e))
+            .collect::<Vec<_>>()
+            .join("; ");
+        app.note(format!("discovery: {}", summary));
+    }
     let mut input = Input::new();
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();

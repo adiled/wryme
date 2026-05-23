@@ -108,6 +108,11 @@ pub struct App {
     /// The shop currently in effect. Re-resolved every time
     /// active_station.model changes.
     pub active_shop: Shop,
+    /// Name of the saved station this session traces back to, if any.
+    /// None when the session was synthesized (untitled, demo). Used
+    /// alongside `active_station` to compute whether the active config
+    /// is "dirty" (modified vs. its saved form).
+    pub active_origin: Option<String>,
     /// The popup overlay state (closed, browsing, or entering a name).
     pub popup: Popup,
 }
@@ -119,6 +124,7 @@ impl App {
         stations: Vec<Station>,
         active_station: Station,
         active_shop: Shop,
+        active_origin: Option<String>,
     ) -> Self {
         Self {
             messages: Vec::new(),
@@ -136,8 +142,27 @@ impl App {
             stations,
             active_station,
             active_shop,
+            active_origin,
             popup: Popup::default(),
         }
+    }
+
+    /// True when the active station differs from the saved entry it was
+    /// loaded from. False when there is no origin (untitled / demo) or
+    /// when active matches its saved entry exactly.
+    pub fn is_dirty(&self) -> bool {
+        let Some(origin) = &self.active_origin else {
+            return false;
+        };
+        let Some(saved) = self.stations.iter().find(|s| s.name == *origin) else {
+            // Origin set but saved entry missing. Should not happen in
+            // normal use; treat as dirty so the user notices.
+            return true;
+        };
+        saved.model != self.active_station.model
+            || saved.dials.boldness != self.active_station.dials.boldness
+            || saved.dials.patience != self.active_station.dials.patience
+            || saved.dials.verbosity != self.active_station.dials.verbosity
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {

@@ -111,12 +111,24 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     // ---- status bar ----
     let dot = " • ";
     let is_demo = app.active_shop.protocol == Protocol::Demo;
-    let station_color = if is_demo { Color::Yellow } else { Color::Cyan };
+    let dirty = app.is_dirty();
+    let station_label = match (&app.active_origin, dirty) {
+        (Some(origin), true) => format!("tuned from {}", origin),
+        (Some(origin), false) => origin.clone(),
+        (None, _) => app.active_station.name.clone(),
+    };
+    let station_color = if is_demo {
+        Color::Yellow
+    } else if dirty {
+        Color::Magenta
+    } else {
+        Color::Cyan
+    };
     let mut pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
         Span::styled(
-            format!("station: {}", app.active_station.name),
+            format!("station: {}", station_label),
             Style::default().fg(station_color),
         ),
         Span::raw(dot),
@@ -237,11 +249,22 @@ fn draw_popup(f: &mut Frame, app: &mut App) {
                     Span::styled(format!("  ({})", st.model), Style::default().fg(Color::DarkGray)),
                 ]));
             }
-            popup::Row::SaveAction => {
+            popup::Row::UpdateAction => {
+                let style = focus_style(selected);
+                let origin = app
+                    .active_origin
+                    .clone()
+                    .unwrap_or_else(|| "?".into());
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(format!("update '{}'", origin), style),
+                ]));
+            }
+            popup::Row::SaveAsAction => {
                 let style = focus_style(selected);
                 lines.push(Line::from(vec![
                     Span::styled(marker, style),
-                    Span::styled("save active as…", style),
+                    Span::styled("save active as new…", style),
                 ]));
             }
         }

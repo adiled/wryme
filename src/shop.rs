@@ -10,7 +10,7 @@
 //      for the "just install and point it somewhere" case.
 //   3. ~/.config/wryme/shops.toml. Any number of named shops.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -164,6 +164,59 @@ fn config_path() -> Option<PathBuf> {
 /// error at startup with a helpful message.
 pub fn find_for_model<'a>(shops: &'a [Shop], model: &str) -> Option<&'a Shop> {
     shops.iter().find(|s| s.models.iter().any(|m| m == model))
+}
+
+/// Hit each shop's `/v1/models` endpoint to populate its `models` list.
+/// Shops that already have a non-empty `models` (specified by the user
+/// in shops.toml) are left alone. Demo is skipped. Returns the list of
+/// (shop_name, error) pairs for shops where discovery failed.
+pub async fn discover_all(shops: &mut [Shop]) -> Vec<(String, String)> {
+    let http = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            return shops
+                .iter()
+                .map(|s| (s.name.clone(), format!("http client: {}", e)))
+                .collect();
+        }
+    };
+    let mut errors = Vec::new();
+    for shop in shops.iter_mut() {
+        if shop.protocol == Protocol::Demo || !shop.models.is_empty() {
+            continue;
+        }
+        if let Err(e) = discover_models(shop, &http).await {
+            errors.push((shop.name.clone(), format!("{:#}", e)));
+        }
+    }
+    errors
+}
+
+async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> {
+    #[derive(Deserialize)]
+    struct ModelsResponse {
+        data: Vec<ModelEntry>,
+    }
+    #[derive(Deserialize)]
+    struct ModelEntry {
+        id: String,
+    }
+
+    let url = format!("{}/models", shop.url.trim_end_matches('/'));
+    let mut req = http.get(&url);
+    if !shop.key.is_empty() {
+        req = req.bearer_auth(&shop.key);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("GET {}", url))?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("upstream {}", resp.status()));
+    }
+    let parsed: ModelsResponse = resp.json().await.context("parsing /v1/models response")?;
+    shop.models = parsed.data.into_iter().map(|m| m.id).collect();
+    Ok(())
 }
 
 #[cfg(test)]
