@@ -192,11 +192,11 @@ pub fn commit_save_as(app: &mut App) {
         model: app.active_station.model.clone(),
         dials: app.active_station.dials,
     };
-    let Some(path) = crate::station::save_path() else {
+    let Some(path) = crate::station::config_path() else {
         app.note("save failed: no $HOME");
         return;
     };
-    if let Err(e) = crate::station::append_to_file(&path, &new_station) {
+    if let Err(e) = crate::station_save::append_to_file(&path, &new_station) {
         app.note(format!("save failed: {}", e));
         return;
     }
@@ -216,7 +216,7 @@ pub fn commit_update(app: &mut App) {
         app.note("nothing to update; this is an untitled session");
         return;
     };
-    let Some(path) = crate::station::save_path() else {
+    let Some(path) = crate::station::config_path() else {
         app.note("save failed: no $HOME");
         return;
     };
@@ -225,7 +225,7 @@ pub fn commit_update(app: &mut App) {
         model: app.active_station.model.clone(),
         dials: app.active_station.dials,
     };
-    if let Err(e) = crate::station::update_in_file(&path, &updated) {
+    if let Err(e) = crate::station_save::update_in_file(&path, &updated) {
         app.note(format!("update failed: {}", e));
         return;
     }
