@@ -20,6 +20,7 @@ mod api_chat;
 mod api_responses;
 mod app;
 mod demo;
+mod explore;
 mod input;
 mod keys;
 mod md;
@@ -182,6 +183,9 @@ async fn run(
                     }
                     StreamEvent::ToolCall { name } => {
                         app.record_tool_call(name);
+                    }
+                    StreamEvent::ToolResult { name, output } => {
+                        app.append_tool_result(name, output);
                     }
                     StreamEvent::ResponseId { id } => {
                         app.last_response_id = Some(id);

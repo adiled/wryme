@@ -12,6 +12,7 @@
 //   Delta { text }      content delta
 //   Brain { text }      reasoning / thinking delta
 //   ToolCall { name }   model is calling a tool; drives "tinkering"
+//   ToolResult { name, output }  a tool we ran locally; surfaced + fed back
 //   ResponseId { id }   captured from response.created, replayed as
 //                       previous_response_id next turn for session pinning
 //   Done                clean end of stream
@@ -35,6 +36,9 @@ pub enum StreamEvent {
     Delta { text: String },
     Brain { text: String },
     ToolCall { name: Option<String> },
+    /// A tool call we actually ran locally (myshell_explore). The output
+    /// is surfaced in the UI and fed back to the model.
+    ToolResult { name: String, output: String },
     ResponseId { id: String },
     Done,
     Error { message: String },

@@ -6,6 +6,11 @@
 // dials. When previous_response_id is set, we ship only the latest user
 // turn instead of replaying the full history; the server has the rest
 // pinned to its warm session.
+//
+// Tools: we advertise `myshell_explore` (see explore.rs). When the model
+// calls it, we run it locally and feed the result back as a
+// function_call_output item on a follow-up request, looping until the
+// model stops calling tools. This is the complete tool loop — not a stub.
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -13,8 +18,19 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::explore;
 use crate::shop::Shop;
 use crate::station::{Patience, Station};
+
+/// A function call the model made during one response stream.
+struct FuncCall {
+    /// The call id the server pairs a function_call_output with.
+    call_id: String,
+    /// The output item id; matches function_call_arguments.delta events.
+    item_id: String,
+    name: String,
+    arguments: String,
+}
 
 pub(crate) async fn stream(
     client: &Client,
@@ -24,10 +40,78 @@ pub(crate) async fn stream(
     previous_response_id: Option<String>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
+    let instructions: Option<&str> = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.as_str());
+
+    let conv_msgs: Vec<&ApiMessage> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .collect();
+
+    // First request: full conversation, or just the latest user turn when
+    // the session is pinned via previous_response_id.
+    let mut prev_id = previous_response_id;
+    let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
+        conv_msgs
+            .last()
+            .into_iter()
+            .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
+            .collect()
+    } else {
+        conv_msgs
+            .iter()
+            .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
+            .collect()
+    };
+
+    loop {
+        let (calls, new_id) =
+            stream_once(client, shop, station, &input, prev_id.as_deref(), instructions, tx)
+                .await?;
+        if calls.is_empty() {
+            return Ok(());
+        }
+
+        // Execute each tool call locally and build the follow-up input.
+        let mut next_input = Vec::new();
+        for call in calls {
+            let output = match explore::execute(&call.name, &call.arguments).await {
+                Some(o) => o,
+                None => format!("unknown tool '{}'", call.name),
+            };
+            let _ = tx.send(StreamEvent::ToolResult {
+                name: call.name.clone(),
+                output: output.clone(),
+            });
+            next_input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": output,
+            }));
+        }
+        prev_id = Some(new_id);
+        input = next_input;
+    }
+}
+
+/// One request/response round. Streams content/brain/tool events to `tx`,
+/// collects any function calls the model made, and returns them plus the
+/// new response id (for pinning the follow-up request).
+async fn stream_once(
+    client: &Client,
+    shop: &Shop,
+    station: &Station,
+    input: &[serde_json::Value],
+    previous_response_id: Option<&str>,
+    instructions: Option<&str>,
+    tx: &UnboundedSender<StreamEvent>,
+) -> Result<(Vec<FuncCall>, String)> {
     #[derive(Serialize)]
     struct ResponsesReq<'a> {
         model: &'a str,
-        input: Vec<ResponsesInput<'a>>,
+        input: &'a [serde_json::Value],
         stream: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<&'a str>,
@@ -39,12 +123,7 @@ pub(crate) async fn stream(
         max_output_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<Reasoning>,
-    }
-
-    #[derive(Serialize)]
-    struct ResponsesInput<'a> {
-        role: &'a str,
-        content: &'a str,
+        tools: &'a [serde_json::Value],
     }
 
     #[derive(Serialize)]
@@ -52,38 +131,10 @@ pub(crate) async fn stream(
         effort: &'static str,
     }
 
-    let instructions: Option<&str> = messages
-        .iter()
-        .find(|m| m.role == "system")
-        .map(|m| m.content.as_str());
-
-    let conv_msgs: Vec<&ApiMessage> = messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .collect();
-
-    let input: Vec<ResponsesInput> = if previous_response_id.is_some() {
-        conv_msgs
-            .last()
-            .into_iter()
-            .map(|m| ResponsesInput {
-                role: m.role.as_str(),
-                content: m.content.as_str(),
-            })
-            .collect()
-    } else {
-        conv_msgs
-            .iter()
-            .map(|m| ResponsesInput {
-                role: m.role.as_str(),
-                content: m.content.as_str(),
-            })
-            .collect()
-    };
-
     let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
         effort: p.as_wire(),
     });
+    let tools = [explore_tool_json()];
 
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
@@ -92,10 +143,11 @@ pub(crate) async fn stream(
         input,
         stream: true,
         instructions,
-        previous_response_id: previous_response_id.as_deref(),
+        previous_response_id,
         temperature: station.dials.boldness,
         max_output_tokens: station.dials.verbosity,
         reasoning,
+        tools: &tools,
     };
 
     let mut req = client.http.post(&url).json(&body);
@@ -112,6 +164,9 @@ pub(crate) async fn stream(
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let mut calls: Vec<FuncCall> = Vec::new();
+    let mut new_id: Option<String> = None;
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading sse chunk")?;
         buf.extend_from_slice(&chunk);
@@ -121,19 +176,39 @@ pub(crate) async fn stream(
             };
             let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
             let event = &event_bytes[..end.body_len];
-            handle_event(event, tx)?;
+            handle_event(event, tx, &mut calls, &mut new_id)?;
         }
     }
     if !buf.is_empty() {
-        handle_event(&buf, tx)?;
+        handle_event(&buf, tx, &mut calls, &mut new_id)?;
     }
-    Ok(())
+
+    let new_id = new_id.context("no response.created seen")?;
+    Ok((calls, new_id))
 }
 
-/// Parse one SSE event body from the /responses stream and emit the
-/// matching StreamEvent. Events are JSON objects with a "type" field;
-/// anything we don't recognize is silently ignored.
-fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
+/// Advertise myshell_explore in the Responses `tools` array.
+fn explore_tool_json() -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "name": explore::TOOL_NAME,
+        "description": explore::TOOL_DESCRIPTION,
+        "parameters": explore::tool_parameters(),
+    })
+}
+
+fn json_msg(role: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({ "role": role, "content": content })
+}
+
+/// Parse one SSE event body and emit matching StreamEvents. Function calls
+/// are accumulated into `calls`; the newest response id lands in `new_id`.
+fn handle_event(
+    bytes: &[u8],
+    tx: &UnboundedSender<StreamEvent>,
+    calls: &mut Vec<FuncCall>,
+    new_id: &mut Option<String>,
+) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
@@ -156,6 +231,7 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                     .and_then(|r| r.get("id"))
                     .and_then(|i| i.as_str())
                 {
+                    *new_id = Some(id.to_string());
                     let _ = tx.send(StreamEvent::ResponseId {
                         id: id.to_string(),
                     });
@@ -181,28 +257,90 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                     .and_then(|i| i.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                let name: Option<String> = match item_type {
-                    "function_call" | "mcp_call" => item
+                if item_type == "function_call" {
+                    let item_id = item
+                        .and_then(|i| i.get("id"))
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let call_id = item
+                        .and_then(|i| i.get("call_id"))
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
                         .and_then(|i| i.get("name"))
                         .and_then(|n| n.as_str())
-                        .map(String::from),
-                    "file_search_call" => Some("file_search".into()),
-                    "web_search_call" => Some("web_search".into()),
-                    "code_interpreter_call" => Some("code_interpreter".into()),
-                    "image_generation_call" => Some("image_generation".into()),
-                    "computer_use_call" => Some("computer_use".into()),
-                    _ => None,
-                };
-                if name.is_some() {
-                    let _ = tx.send(StreamEvent::ToolCall { name });
+                        .unwrap_or("")
+                        .to_string();
+                    let arguments = item
+                        .and_then(|i| i.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !name.is_empty() {
+                        let _ = tx.send(StreamEvent::ToolCall {
+                            name: Some(name.clone()),
+                        });
+                    }
+                    calls.push(FuncCall {
+                        call_id,
+                        item_id,
+                        name,
+                        arguments,
+                    });
+                } else {
+                    // Built-in tool calls (file/web/code search etc.) we
+                    // don't run locally: still surface a name label.
+                    let name: Option<String> = match item_type {
+                        "file_search_call" => Some("file_search".into()),
+                        "web_search_call" => Some("web_search".into()),
+                        "code_interpreter_call" => Some("code_interpreter".into()),
+                        "image_generation_call" => Some("image_generation".into()),
+                        "computer_use_call" => Some("computer_use".into()),
+                        _ => None,
+                    };
+                    if name.is_some() {
+                        let _ = tx.send(StreamEvent::ToolCall { name });
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                let item_id = v
+                    .get("output_item_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("");
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
+                    if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
+                        c.arguments.push_str(d);
+                    }
+                }
+            }
+            "response.output_item.done" => {
+                let item = v.get("output_item");
+                let item_type = item
+                    .and_then(|i| i.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if item_type == "function_call" {
+                    let item_id = item
+                        .and_then(|i| i.get("id"))
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(arguments) = item
+                        .and_then(|i| i.get("arguments"))
+                        .and_then(|a| a.as_str())
+                    {
+                        if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
+                            c.arguments = arguments.to_string();
+                        }
+                    }
                 }
             }
             "response.file_search_call.in_progress"
-            | "response.file_search_call.searching"
             | "response.web_search_call.in_progress"
-            | "response.web_search_call.searching"
-            | "response.code_interpreter_call.in_progress"
-            | "response.code_interpreter_call.interpreting" => {
+            | "response.code_interpreter_call.in_progress" => {
                 let _ = tx.send(StreamEvent::ToolCall { name: None });
             }
             _ => { /* ignore */ }

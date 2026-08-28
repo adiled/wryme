@@ -269,6 +269,22 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
         )));
     }
 
+    // Tool results (older than the final reply: the machine did these
+    // before it answered). Rendered as a quiet dim block.
+    for tr in &msg.tool_results {
+        out.push(Line::from(""));
+        out.push(Line::from(vec![Span::styled(
+            format!("  {} →", tr.name),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )]));
+        for raw in tr.output.trim_end().lines() {
+            out.push(Line::from(Span::styled(
+                format!("    {}", raw),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
     // Reply (newest in time, sits at the top of this message's block).
     if has_reply {
         match msg.role {
