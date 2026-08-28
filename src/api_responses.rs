@@ -18,8 +18,8 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
-use crate::explore;
 use crate::shop::Shop;
+use crate::tools;
 use crate::station::{Patience, Station};
 
 /// A function call the model made during one response stream.
@@ -77,7 +77,7 @@ pub(crate) async fn stream(
         // Execute each tool call locally and build the follow-up input.
         let mut next_input = Vec::new();
         for call in calls {
-            let output = match explore::execute(&call.name, &call.arguments).await {
+            let output = match tools::execute(&call.name, &call.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
@@ -134,7 +134,7 @@ async fn stream_once(
     let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
         effort: p.as_wire(),
     });
-    let tools = [explore_tool_json()];
+    let tools = tools::tool_defs();
 
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
@@ -185,16 +185,6 @@ async fn stream_once(
 
     let new_id = new_id.context("no response.created seen")?;
     Ok((calls, new_id))
-}
-
-/// Advertise myshell_explore in the Responses `tools` array.
-fn explore_tool_json() -> serde_json::Value {
-    serde_json::json!({
-        "type": "function",
-        "name": explore::TOOL_NAME,
-        "description": explore::TOOL_DESCRIPTION,
-        "parameters": explore::tool_parameters(),
-    })
 }
 
 fn json_msg(role: &str, content: &str) -> serde_json::Value {

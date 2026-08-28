@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
-use crate::explore;
 use crate::shop::Shop;
+use crate::tools;
 use crate::station::Station;
 
 /// One tool call the model made, assembled from the streamed fragments.
@@ -63,7 +63,7 @@ pub(crate) async fn stream(
 
         // Execute each tool call locally and append a `tool` result.
         for c in &calls {
-            let output = match explore::execute(&c.name, &c.arguments).await {
+            let output = match tools::execute(&c.name, &c.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };
@@ -103,7 +103,7 @@ async fn stream_once(
         tools: &'a [serde_json::Value],
     }
 
-    let tools = [explore_tool_json()];
+    let tools = tools::tool_defs();
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let body = Req {
@@ -156,16 +156,6 @@ async fn stream_once(
     }
 
     Ok((calls, assistant_content))
-}
-
-/// Advertise myshell_explore in the Chat Completions `tools` array.
-fn explore_tool_json() -> serde_json::Value {
-    serde_json::json!({
-        "type": "function",
-        "name": explore::TOOL_NAME,
-        "description": explore::TOOL_DESCRIPTION,
-        "parameters": explore::tool_parameters(),
-    })
 }
 
 fn json_msg(role: &str, content: &str) -> serde_json::Value {

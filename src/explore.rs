@@ -32,8 +32,8 @@ aren't sure a command exists or how to use it. Pass a CSV of the words \
 or short phrases you think could be tools. For each one we find it on \
 the system (PATH binaries, shell aliases, shell functions in the user's \
 rc files) and return its --help output, so you know exactly what is \
-available and how to use it. Only after reading the results should you \
-run the command yourself.";
+available and how to use it. Once you know what to run, execute it with \
+your shell tool (myshell).";
 
 /// The JSON parameters schema advertised with the tool.
 pub fn tool_parameters() -> serde_json::Value {

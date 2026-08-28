@@ -22,6 +22,7 @@ mod app;
 mod demo;
 mod explore;
 mod input;
+mod tools;
 mod keys;
 mod md;
 mod popup;
