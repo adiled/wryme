@@ -1,25 +1,11 @@
 // Responses wire protocol.
 //
-// POSTs to `<base>/responses` with `stream: true`. The response is SSE
-// with typed events; each `data:` line carries a JSON object with a
-// "type" field that tells us what kind of update it is. We pattern-match
-// the relevant types and surface them as StreamEvents; everything else
-// is silently ignored so future server-side additions don't break us.
-//
-// Two things this protocol does that Chat Completions cannot:
-//
-//   1. Session continuity. The first event (response.created) carries an
-//      id. We emit it as StreamEvent::ResponseId so App can stash it and
-//      hand it back as `previous_response_id` next turn. With that set,
-//      we only ship the new user message in `input`; the server already
-//      has the prior turns pinned to the warm session.
-//
-//   2. First-class tool indications. `response.output_item.added` events
-//      announce a new output item, including function calls, MCP server
-//      calls, and built-in tools (file_search, web_search, etc.). We
-//      surface the tool name as a StreamEvent::ToolCall so the UI can
-//      switch the header indicator to "tinkering" with the name on the
-//      right.
+// POSTs to `<shop.url>/responses` with `stream: true`. Body uses `input`
+// instead of `messages`, lifts the system prompt to a top-level
+// `instructions` field, carries the model (from station) and translatable
+// dials. When previous_response_id is set, we ship only the latest user
+// turn instead of replaying the full history; the server has the rest
+// pinned to its warm session.
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -27,9 +13,13 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::shop::Shop;
+use crate::station::{Patience, Station};
 
 pub(crate) async fn stream(
     client: &Client,
+    shop: &Shop,
+    station: &Station,
     messages: Vec<ApiMessage>,
     previous_response_id: Option<String>,
     tx: &UnboundedSender<StreamEvent>,
@@ -43,6 +33,12 @@ pub(crate) async fn stream(
         instructions: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         previous_response_id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        temperature: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_output_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning: Option<Reasoning>,
     }
 
     #[derive(Serialize)]
@@ -51,24 +47,21 @@ pub(crate) async fn stream(
         content: &'a str,
     }
 
-    // The Responses API takes the system prompt as a top-level
-    // `instructions` field instead of an in-band message.
+    #[derive(Serialize)]
+    struct Reasoning {
+        effort: &'static str,
+    }
+
     let instructions: Option<&str> = messages
         .iter()
         .find(|m| m.role == "system")
         .map(|m| m.content.as_str());
 
-    // Conversation messages, system stripped (it lives in `instructions`).
     let conv_msgs: Vec<&ApiMessage> = messages
         .iter()
         .filter(|m| m.role != "system")
         .collect();
 
-    // When `previous_response_id` is set, the server already has the
-    // entire prior conversation pinned to that session. Replaying it
-    // would duplicate every turn. Send only the latest user message
-    // (the new turn). When no previous id, send the whole history
-    // because the server has no other way to see it.
     let input: Vec<ResponsesInput> = if previous_response_id.is_some() {
         conv_msgs
             .last()
@@ -88,19 +81,26 @@ pub(crate) async fn stream(
             .collect()
     };
 
-    let base = client.station.url.trim_end_matches('/');
+    let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
+        effort: p.as_wire(),
+    });
+
+    let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
     let body = ResponsesReq {
-        model: &client.station.model,
+        model: &station.model,
         input,
         stream: true,
         instructions,
         previous_response_id: previous_response_id.as_deref(),
+        temperature: station.dials.boldness,
+        max_output_tokens: station.dials.verbosity,
+        reasoning,
     };
 
     let mut req = client.http.post(&url).json(&body);
-    if !client.station.key.is_empty() {
-        req = req.bearer_auth(&client.station.key);
+    if !shop.key.is_empty() {
+        req = req.bearer_auth(&shop.key);
     }
     let resp = req.send().await.context("posting responses")?;
 
@@ -135,8 +135,6 @@ pub(crate) async fn stream(
 /// anything we don't recognize is silently ignored.
 fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
-    // An SSE event body can include `event:` and `data:` lines. We only
-    // need the `data:` payload; the JSON inside carries its own `type`.
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         let Some(payload) = line.strip_prefix("data:") else {
@@ -153,9 +151,6 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
             "response.created" => {
-                // Capture the response id so we can replay it as
-                // previous_response_id on the next turn and stay pinned
-                // to the same server-side session.
                 if let Some(id) = v
                     .get("response")
                     .and_then(|r| r.get("id"))
@@ -181,11 +176,6 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                 }
             }
             "response.output_item.added" => {
-                // A new output item appeared. If it is a tool call, surface
-                // the tool name. Built-in tools (file_search, web_search,
-                // code_interpreter, etc.) get their type as the name.
-                // Explicit function calls and MCP server calls carry a
-                // "name" field on the item.
                 let item = v.get("item");
                 let item_type = item
                     .and_then(|i| i.get("type"))
@@ -207,9 +197,6 @@ fn handle_event(bytes: &[u8], tx: &UnboundedSender<StreamEvent>) -> Result<()> {
                     let _ = tx.send(StreamEvent::ToolCall { name });
                 }
             }
-            // Built-in tool progress events. Each fires throughout the
-            // tool's run; the indicator stays "tinkering" until the model
-            // resumes writing.
             "response.file_search_call.in_progress"
             | "response.file_search_call.searching"
             | "response.web_search_call.in_progress"

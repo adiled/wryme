@@ -1,6 +1,9 @@
 // Application state. The UI is a pure function of this.
 
 use crate::api::ApiMessage;
+use crate::popup::Popup;
+use crate::shop::Shop;
+use crate::station::Station;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -92,10 +95,37 @@ pub struct App {
     /// per-session state like cached tool results or MCP server state).
     /// Reset to None on launch; we don't persist across runs.
     pub last_response_id: Option<String>,
+    /// All shops loaded at startup. Read-only after that. Used by the
+    /// popup to list every model any shop can run.
+    pub shops: Vec<Shop>,
+    /// Every saved station loaded at startup, plus any the user saves
+    /// during this session via the popup. Mutable.
+    pub stations: Vec<Station>,
+    /// The station currently in effect. The popup mutates this when the
+    /// user adjusts dials, picks a different model, or loads a saved
+    /// station. Cloned into each in-flight request.
+    pub active_station: Station,
+    /// The shop currently in effect. Re-resolved every time
+    /// active_station.model changes.
+    pub active_shop: Shop,
+    /// Name of the saved station this session traces back to, if any.
+    /// None when the session was synthesized (untitled, demo). Used
+    /// alongside `active_station` to compute whether the active config
+    /// is "dirty" (modified vs. its saved form).
+    pub active_origin: Option<String>,
+    /// The popup overlay state (closed, browsing, or entering a name).
+    pub popup: Popup,
 }
 
 impl App {
-    pub fn new(system: Option<String>) -> Self {
+    pub fn new(
+        system: Option<String>,
+        shops: Vec<Shop>,
+        stations: Vec<Station>,
+        active_station: Station,
+        active_shop: Shop,
+        active_origin: Option<String>,
+    ) -> Self {
         Self {
             messages: Vec::new(),
             system,
@@ -108,7 +138,31 @@ impl App {
             view_mode: ViewMode::Page,
             last_viewport_h: 0,
             last_response_id: None,
+            shops,
+            stations,
+            active_station,
+            active_shop,
+            active_origin,
+            popup: Popup::default(),
         }
+    }
+
+    /// True when the active station differs from the saved entry it was
+    /// loaded from. False when there is no origin (untitled / demo) or
+    /// when active matches its saved entry exactly.
+    pub fn is_dirty(&self) -> bool {
+        let Some(origin) = &self.active_origin else {
+            return false;
+        };
+        let Some(saved) = self.stations.iter().find(|s| s.name == *origin) else {
+            // Origin set but saved entry missing. Should not happen in
+            // normal use; treat as dirty so the user notices.
+            return true;
+        };
+        saved.model != self.active_station.model
+            || saved.dials.boldness != self.active_station.dials.boldness
+            || saved.dials.patience != self.active_station.dials.patience
+            || saved.dials.verbosity != self.active_station.dials.verbosity
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {

@@ -34,89 +34,97 @@ your computer to add it, or add this line to your `~/.zshrc` or `~/.bashrc`:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Stations
+## The two pieces: shops and stations
 
-The thing on the other end of the conversation is a **station**. A station is
-just a name plus an internet address, a model, and (usually) a secret key.
-You pick one and you talk to it. That's all there is to it.
+wryme uses two simple ideas.
 
-Three ways you can have stations:
+- A **shop** is a place that runs AI for you. It has an internet address
+  and (usually) a key. The shop lists which models it can run. Examples:
+  OpenAI, a server in your garage, a free local one.
 
-1. **`demo`**. Always there. Built in. Streams canned nonsense. Zero setup.
-2. **The default station**. One you set up once in your `~/.zshrc` so it's
-   ready every time you launch.
-3. **More stations**. A list in `~/.config/wryme/stations.toml`. Useful if
-   you switch between providers.
+- A **station** is the AI you actually talk to. It picks a model from a
+  shop and sets a few knobs (how creative, how careful, how long it can
+  talk). You can save as many stations as you want and pick which one you
+  want when you launch.
 
-### Set up your default station
+At launch wryme finds a shop that runs the model your station asked for,
+and away you go.
 
-Pick whichever AI service you have an account with and paste the matching
-block into your `~/.zshrc` or `~/.bashrc`:
+## Set up your first shop
 
-```sh
+Make the file `~/.config/wryme/shops.toml` and put one block in it for the
+AI service you have an account with:
+
+```toml
 # OpenAI
-export WME_DEFAULT_STATION_NAME="openai"
-export WME_DEFAULT_STATION_URL="https://api.openai.com/v1"
-export WME_DEFAULT_STATION_KEY="sk-...your-key-goes-here..."
-export WME_DEFAULT_STATION_MODEL="gpt-4o-mini"
+[[shop]]
+name = "openai"
+url = "https://api.openai.com/v1"
+key_env = "OPENAI_API_KEY"
+protocol = "responses"
+models = ["gpt-4o-mini", "o1-mini", "gpt-4o"]
 ```
 
-```sh
+```toml
 # Groq
-export WME_DEFAULT_STATION_NAME="groq"
-export WME_DEFAULT_STATION_URL="https://api.groq.com/openai/v1"
-export WME_DEFAULT_STATION_KEY="gsk-...your-key..."
-export WME_DEFAULT_STATION_MODEL="llama-3.3-70b-versatile"
+[[shop]]
+name = "groq"
+url = "https://api.groq.com/openai/v1"
+key_env = "GROQ_API_KEY"
+models = ["llama-3.3-70b-versatile", "llama-3.3-8b-instant"]
 ```
+
+```toml
+# Ollama on your own computer. No key needed.
+[[shop]]
+name = "local"
+url = "http://localhost:11434/v1"
+models = ["llama3", "qwen2.5"]
+```
+
+The `models` list is what the shop knows how to run. List them
+newest-first; if you launch wryme without picking a station, it will use
+the first model in the first shop.
+
+Set your API key once in your `~/.zshrc` so wryme can read it:
 
 ```sh
-# Ollama on your own computer (no key needed)
-export WME_DEFAULT_STATION_NAME="local"
-export WME_DEFAULT_STATION_URL="http://localhost:11434/v1"
-export WME_DEFAULT_STATION_MODEL="llama3"
+export OPENAI_API_KEY="sk-...your-key..."
 ```
 
-Where do you get a key? OpenAI: <https://platform.openai.com/api-keys>. Groq:
-<https://console.groq.com/keys>. Each service has its own page.
+You can use `key_env` to point at any env var name, or `key = "..."` if
+you want to put the key directly in the file.
 
-(Shortcut: if you already have `OPENAI_API_KEY` in your environment, wryme
-will use that as the key for the default station automatically. You still
-need to set the URL and model if you want anything other than OpenAI's
-defaults.)
+## Make your stations
 
-### Adding more stations
-
-Make the file `~/.config/wryme/stations.toml` and write each station as a
-block:
+Make the file `~/.config/wryme/stations.toml`. Each station is a model
+plus optional dials:
 
 ```toml
 [[station]]
-name = "groq fast"
-url = "https://api.groq.com/openai/v1"
-model = "llama-3.3-70b-versatile"
-key_env = "GROQ_API_KEY"           # reads $GROQ_API_KEY from your shell
-
-[[station]]
-name = "openai mini"
-url = "https://api.openai.com/v1"
+name = "quick chat"
 model = "gpt-4o-mini"
-key = "sk-..."                     # or paste the key directly
 
 [[station]]
-name = "local"
-url = "http://localhost:11434/v1"
-model = "llama3"                   # no key field, Ollama doesn't need one
+name = "deep thinker"
+model = "o1-mini"
+patience = "slow"
+
+[[station]]
+name = "creative"
+model = "gpt-4o"
+boldness = 1.3
 ```
 
-Then to launch with a specific station:
+The dials, all optional:
 
-```sh
-wme --station "groq fast"
-```
-
-Without `--station`, wryme uses your default (the env one), or the first one
-in the config file if you don't have a default, or `demo` if you have
-nothing at all.
+- **`boldness`**: how wild the AI gets. A number between 0 and 2. Try 0.3
+  for safe, 0.7 for balanced, 1.3 for spicy. Unset means the AI decides.
+- **`patience`**: how hard the AI thinks before answering. `quick`,
+  `steady`, or `slow`. Only matters on models that support extended
+  thinking. Unset means the AI decides.
+- **`verbosity`**: the most words the AI is allowed to say. A number like
+  1024 or 4096. Unset means no cap; the AI stops when it thinks it is done.
 
 ## Using it
 
@@ -129,6 +137,12 @@ wme
 The window opens. The blinking cursor is in a box at the top. Type whatever
 you want to ask. Press **Enter**. The answer streams in below.
 
+Want a specific station? Pass its name:
+
+```sh
+wme --station "deep thinker"
+```
+
 When you're done, press **Ctrl-C** to close it.
 
 ### Keys you might want to know
@@ -138,21 +152,21 @@ When you're done, press **Ctrl-C** to close it.
 | `Enter`      | Send what you typed.                          |
 | `Esc`        | Stop a reply that's still coming in.          |
 | `Ctrl-C`     | Close the program.                            |
+| `Ctrl-T`     | Switch between paged and scrolling view.      |
 | arrow keys   | Move the cursor inside your typing.           |
 | `Backspace`  | Delete the character before the cursor.       |
 
-That's the whole thing.
-
 ## Trouble
 
-- **`wme: command not found`**. Your `~/.local/bin` isn't on your PATH. See
+- **`wme: command not found`**: your `~/.local/bin` isn't on your PATH. See
   the install section above.
-- **The status bar says `station: demo`**. You haven't set up a real one yet.
-  See "Set up your default station" above.
-- **`upstream 401`**. The key for that station is wrong, missing, or expired.
-- **`upstream 404`**. The model name is wrong, or the URL is wrong.
-- **`no station named '...'`**. The name passed to `--station` doesn't match
-  any of the stations wryme could find. Check `~/.config/wryme/stations.toml`.
+- **The status bar says `station: demo`**: you haven't set up a shop yet.
+  See "Set up your first shop" above.
+- **`station 'X' wants model 'Y' but no shop advertises it`**: the station's
+  model name doesn't match any of your shops' `models` lists. Add it to a
+  shop or fix the spelling.
+- **`upstream 401`**: the key for that shop is wrong, missing, or expired.
+- **`upstream 404`**: the model name is wrong, or the URL is wrong.
 
 ## License
 

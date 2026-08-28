@@ -5,8 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     event::{
-        Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-        DisableMouseCapture, EnableMouseCapture, MouseEvent, MouseEventKind,
+        Event, EventStream, KeyEventKind, DisableMouseCapture, EnableMouseCapture,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -22,12 +21,17 @@ mod api_responses;
 mod app;
 mod demo;
 mod input;
+mod keys;
 mod md;
+mod popup;
+mod popup_ui;
+mod shop;
 mod station;
+mod station_save;
 mod ui;
 
 use api::{Client, StreamEvent};
-use app::{App, ViewMode};
+use app::App;
 use input::Input;
 
 #[derive(Parser, Debug)]
@@ -37,9 +41,9 @@ use input::Input;
     about = "streaming LLM chat TUI. Input on top, newest reply right below it."
 )]
 struct Args {
-    /// Name of the station to use. Defaults to the env-defined default
-    /// station, then the first station in ~/.config/wryme/stations.toml,
-    /// then the built-in demo.
+    /// Name of a saved station to use. Defaults to the first saved station,
+    /// or a synthesized "untitled" station built from the newest model the
+    /// first shop advertises, or the built-in demo if nothing is configured.
     #[arg(long)]
     station: Option<String>,
 
@@ -52,15 +56,39 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    let mut shops = shop::load_all().context("loading shops")?;
+    let discovery_errors = shop::discover_all(&mut shops).await;
     let stations = station::load_all().context("loading stations")?;
-    let active = station::pick(&stations, args.station.as_deref())?.clone();
+    let (active, active_origin) = station::pick(&stations, &shops, args.station.as_deref())?;
 
-    let client = Client::new(active).context("building api client")?;
+    // Resolve the shop that advertises this station's model.
+    let active_shop = shop::find_for_model(&shops, &active.model)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "station '{}' wants model '{}' but no shop advertises it. \
+                 add this model to a shop's `models = [...]` list in shops.toml.",
+                active.name, active.model
+            )
+        })?;
+
+    let client = Client::new().context("building api client")?;
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
 
-    let result = run(&mut terminal, client, args.system).await;
+    let result = run(
+        &mut terminal,
+        client,
+        args.system,
+        shops,
+        stations,
+        active,
+        active_shop,
+        active_origin,
+        discovery_errors,
+    )
+    .await;
 
     restore_terminal(&mut terminal).ok();
     result
@@ -96,15 +124,36 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: Client,
     system: Option<String>,
+    shops: Vec<shop::Shop>,
+    stations: Vec<station::Station>,
+    active_station: station::Station,
+    active_shop: shop::Shop,
+    active_origin: Option<String>,
+    discovery_errors: Vec<(String, String)>,
 ) -> Result<()> {
-    let mut app = App::new(system);
+    let mut app = App::new(
+        system,
+        shops,
+        stations,
+        active_station,
+        active_shop,
+        active_origin,
+    );
+    if !discovery_errors.is_empty() {
+        let summary = discovery_errors
+            .iter()
+            .map(|(s, e)| format!("{}: {}", s, e))
+            .collect::<Vec<_>>()
+            .join("; ");
+        app.note(format!("discovery: {}", summary));
+    }
     let mut input = Input::new();
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &mut app, &input, client.station()))?;
+        terminal.draw(|f| ui::draw(f, &mut app, &input))?;
         if app.should_quit {
             break;
         }
@@ -114,10 +163,10 @@ async fn run(
                 let Some(Ok(ev)) = maybe_ev else { continue };
                 match ev {
                     Event::Key(k) if k.kind != KeyEventKind::Release => {
-                        handle_key(k, &mut app, &mut input, &client, &tx, &mut in_flight_task);
+                        keys::handle_key(k, &mut app, &mut input, &client, &tx, &mut in_flight_task);
                     }
                     Event::Mouse(m) => {
-                        handle_mouse(m, &mut app);
+                        keys::handle_mouse(m, &mut app);
                     }
                     Event::Resize(_, _) => { /* redraw on next loop */ }
                     _ => {}
@@ -157,150 +206,3 @@ async fn run(
     Ok(())
 }
 
-fn handle_mouse(m: MouseEvent, app: &mut App) {
-    match app.view_mode {
-        ViewMode::Page => {
-            // Three wheel ticks per page flip. Keeps trackpad scrolling
-            // from blowing through the conversation in one swipe.
-            const TICKS_PER_PAGE: i32 = 3;
-            match m.kind {
-                MouseEventKind::ScrollUp => app.wheel_accum += 1,
-                MouseEventKind::ScrollDown => app.wheel_accum -= 1,
-                _ => return,
-            }
-            while app.wheel_accum >= TICKS_PER_PAGE {
-                app.current_page = app.current_page.saturating_add(1);
-                app.wheel_accum -= TICKS_PER_PAGE;
-            }
-            while app.wheel_accum <= -TICKS_PER_PAGE {
-                app.current_page = app.current_page.saturating_sub(1);
-                app.wheel_accum += TICKS_PER_PAGE;
-            }
-        }
-        ViewMode::Scroll => {
-            // Smooth row-level scroll. Two rows per wheel tick feels close
-            // to traditional terminal pagers without being twitchy.
-            const ROWS_PER_TICK: usize = 2;
-            match m.kind {
-                MouseEventKind::ScrollUp => {
-                    app.scroll_row = app.scroll_row.saturating_add(ROWS_PER_TICK);
-                }
-                MouseEventKind::ScrollDown => {
-                    app.scroll_row = app.scroll_row.saturating_sub(ROWS_PER_TICK);
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn toggle_view_mode(app: &mut App) {
-    app.view_mode = match app.view_mode {
-        ViewMode::Page => ViewMode::Scroll,
-        ViewMode::Scroll => ViewMode::Page,
-    };
-    app.current_page = 0;
-    app.scroll_row = 0;
-    app.wheel_accum = 0;
-    app.note(match app.view_mode {
-        ViewMode::Page => "view: page",
-        ViewMode::Scroll => "view: scroll",
-    });
-}
-
-fn handle_key(
-    k: KeyEvent,
-    app: &mut App,
-    input: &mut Input,
-    client: &Client,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
-    in_flight: &mut Option<tokio::task::JoinHandle<()>>,
-) {
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-
-    // Global: Ctrl-C exits immediately, no questions asked.
-    if ctrl && matches!(k.code, KeyCode::Char('c')) {
-        if let Some(t) = in_flight.take() {
-            t.abort();
-        }
-        app.should_quit = true;
-        return;
-    }
-
-    match k.code {
-        KeyCode::Esc => {
-            if let Some(t) = in_flight.take() {
-                t.abort();
-                app.finish_streaming();
-                app.note("cancelled");
-            } else if !app.status.is_empty() {
-                app.note("");
-            }
-        }
-        KeyCode::Enter => {
-            if app.in_flight {
-                app.note("still streaming. Esc to cancel");
-                return;
-            }
-            let text = input.take().trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-            app.push_user(text);
-            app.begin_assistant();
-            app.in_flight = true;
-            app.current_page = 0;
-            app.scroll_row = 0;
-            app.wheel_accum = 0;
-            app.note("");
-
-            let msgs = app.api_messages();
-            let prev_id = app.last_response_id.clone();
-            let client = client.clone();
-            let tx = tx.clone();
-            *in_flight = Some(tokio::spawn(async move {
-                client.stream_completion(msgs, prev_id, tx).await;
-            }));
-        }
-        KeyCode::PageUp => match app.view_mode {
-            ViewMode::Page => {
-                app.current_page = app.current_page.saturating_add(1);
-            }
-            ViewMode::Scroll => {
-                let step = app.last_viewport_h.saturating_sub(1).max(1);
-                app.scroll_row = app.scroll_row.saturating_add(step);
-            }
-        },
-        KeyCode::PageDown => match app.view_mode {
-            ViewMode::Page => {
-                app.current_page = app.current_page.saturating_sub(1);
-            }
-            ViewMode::Scroll => {
-                let step = app.last_viewport_h.saturating_sub(1).max(1);
-                app.scroll_row = app.scroll_row.saturating_sub(step);
-            }
-        },
-        KeyCode::Left => input.move_left(),
-        KeyCode::Right => input.move_right(),
-        KeyCode::Home => input.home(),
-        KeyCode::End => input.end(),
-        KeyCode::Backspace => input.backspace(),
-        KeyCode::Delete => input.delete_forward(),
-        KeyCode::Char(c) => {
-            if ctrl {
-                match c {
-                    'u' => input.kill_to_start(),
-                    'k' => input.kill_to_end(),
-                    'a' => input.home(),
-                    'e' => input.end(),
-                    'w' => input.kill_prev_word(),
-                    't' => toggle_view_mode(app),
-                    _ => {}
-                }
-            } else {
-                input.insert_char(c);
-            }
-        }
-        _ => {}
-    }
-}

@@ -23,9 +23,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::input::Input;
-use crate::station::Station;
+use crate::popup;
+use crate::shop::Protocol;
 
-pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
+pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -109,8 +110,17 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
 
     // ---- status bar ----
     let dot = " • ";
-    let station_color = if station.is_demo {
+    let is_demo = app.active_shop.protocol == Protocol::Demo;
+    let dirty = app.is_dirty();
+    let station_label = match (&app.active_origin, dirty) {
+        (Some(origin), true) => format!("tuned from {}", origin),
+        (Some(origin), false) => origin.clone(),
+        (None, _) => app.active_station.name.clone(),
+    };
+    let station_color = if is_demo {
         Color::Yellow
+    } else if dirty {
+        Color::Magenta
     } else {
         Color::Cyan
     };
@@ -118,11 +128,16 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
         Span::styled(
-            format!("station: {}", station.name),
+            format!("station: {}", station_label),
             Style::default().fg(station_color),
         ),
         Span::raw(dot),
-        Span::raw(station.model.clone()),
+        Span::raw(app.active_station.model.clone()),
+        Span::raw(dot),
+        Span::styled(
+            format!("via {}", app.active_shop.name),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
     ];
@@ -164,7 +179,13 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input, station: &Station) {
     ));
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
+
+    // ---- station popup overlay ----
+    if app.popup.mode != popup::Mode::Closed {
+        crate::popup_ui::draw(f, app);
+    }
 }
+
 
 fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     let (role_color, role_text) = match msg.role {
