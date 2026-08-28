@@ -26,9 +26,10 @@ Your shell on this machine. Run a shell command and you get back its \
 output (and exit code). It runs in the user's real login shell (bash, \
 zsh, ...), so it behaves like the terminal the human sees. Keep commands \
 single, simple, and read-only unless the user asked you to change \
-something. If you aren't sure a tool exists or how to use it, call \
-myshell_explore FIRST with a CSV of words you think could be tools, then \
-run the real command here.";
+something. If you aren't sure a tool exists or how to use it, call the \
+discovery tool FIRST (the one named after your shell, e.g. zsh_explore \
+or bash_explore) with a CSV of words you think could be tools, then run \
+the real command here.";
 
 /// The JSON parameters schema advertised with the shell tool.
 pub fn tool_parameters() -> serde_json::Value {
@@ -49,14 +50,14 @@ const SHELL_OUTPUT_CAP: usize = 24_000;
 
 /// Dispatch a tool call by name to whichever local tool it names.
 pub async fn execute(name: &str, arguments: &str) -> Option<String> {
-    match name {
-        TOOL_NAME => {
-            let command = extract_command(arguments);
-            Some(run_shell(&command).await)
-        }
-        explore::TOOL_NAME => explore::execute(name, arguments).await,
-        _ => None,
+    if name == TOOL_NAME {
+        let command = extract_command(arguments);
+        return Some(run_shell(&command).await);
     }
+    if name == explore::tool_name() {
+        return explore::execute(name, arguments).await;
+    }
+    None
 }
 
 /// Pull the command out of whatever the model passed. Usually JSON
@@ -110,7 +111,7 @@ pub fn tool_defs() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "type": "function",
-            "name": explore::TOOL_NAME,
+            "name": explore::tool_name(),
             "description": explore::TOOL_DESCRIPTION,
             "parameters": explore::tool_parameters(),
         }),

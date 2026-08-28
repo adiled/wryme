@@ -21,8 +21,19 @@ use tokio::process::Command;
 
 use crate::api::truncate;
 
-/// The tool name the model calls.
-pub const TOOL_NAME: &str = "myshell_explore";
+/// The tool name the model calls. It's named after the user's real login
+/// shell: `zsh_explore` on a zsh machine, `bash_explore` on bash, etc.
+pub fn tool_name() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    format!("{}_explore", shell_basename(&shell))
+}
+
+fn shell_basename(shell: &str) -> String {
+    Path::new(shell)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sh".to_string())
+}
 
 /// What we tell the model about the tool. The point is to make it hit
 /// this FIRST with a CSV of words it thinks could be tools.
@@ -53,7 +64,7 @@ pub fn tool_parameters() -> serde_json::Value {
 /// model, or None if the tool isn't one we run locally. Async because
 /// gathering `--help` shells out and we want it cancellable/timeoutable.
 pub async fn execute(name: &str, arguments: &str) -> Option<String> {
-    if name != TOOL_NAME {
+    if name != tool_name() {
         return None;
     }
     let csv = extract_csv(arguments);
@@ -327,6 +338,20 @@ mod tests {
     #[test]
     fn extract_csv_falls_back_to_bare_string() {
         assert_eq!(extract_csv("ls,git"), "ls,git");
+    }
+
+    #[test]
+    fn shell_basename_from_full_path() {
+        assert_eq!(shell_basename("/bin/zsh"), "zsh");
+        assert_eq!(shell_basename("/usr/bin/bash"), "bash");
+        assert_eq!(shell_basename("/bin/sh"), "sh");
+        assert_eq!(shell_basename(""), "sh");
+    }
+
+    #[test]
+    fn tool_name_ends_with_explore() {
+        assert!(tool_name().ends_with("_explore"));
+        assert!(!tool_name().contains(' '));
     }
 
     #[test]
