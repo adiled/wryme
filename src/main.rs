@@ -20,7 +20,10 @@ mod api_chat;
 mod api_responses;
 mod app;
 mod demo;
+mod explore;
 mod input;
+mod jobs;
+mod tools;
 mod keys;
 mod md;
 mod popup;
@@ -183,6 +186,9 @@ async fn run(
                     StreamEvent::ToolCall { name } => {
                         app.record_tool_call(name);
                     }
+                    StreamEvent::ToolResult { name, output } => {
+                        app.append_tool_result(name, output);
+                    }
                     StreamEvent::ResponseId { id } => {
                         app.last_response_id = Some(id);
                     }
@@ -195,6 +201,26 @@ async fn run(
                     StreamEvent::Error { message } => {
                         app.note(format!("upstream: {message}"));
                     }
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                // Background auto-delivery: a finished async job, and no
+                // turn in flight, so fire a calm background turn that
+                // plants the result and lets the model tell the user.
+                if jobs::has_due() && !app.in_flight {
+                    app.begin_assistant();
+                    app.in_flight = true;
+                    let msgs = app.api_messages();
+                    let prev_id = app.last_response_id.clone();
+                    let shop = app.active_shop.clone();
+                    let station = app.active_station.clone();
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    in_flight_task = Some(tokio::spawn(async move {
+                        client
+                            .stream_completion(shop, station, msgs, prev_id, tx)
+                            .await;
+                    }));
                 }
             }
         }

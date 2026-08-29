@@ -55,6 +55,17 @@ pub struct Message {
     /// to the right of the phase indicator on the header line, just left
     /// of the timestamp. Only displayed while streaming.
     pub current_tool: Option<String>,
+    /// Results of tools we ran locally (myshell_explore) this turn, in
+    /// order. Rendered as a dim block under the header, above the final
+    /// reply, so the user sees the machine doing the thing.
+    pub tool_results: Vec<ToolResult>,
+}
+
+/// One local tool execution: which tool ran and what it returned.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub name: String,
+    pub output: String,
 }
 
 fn now_hhmm() -> String {
@@ -178,6 +189,7 @@ impl App {
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
             current_tool: None,
+            tool_results: Vec::new(),
         });
     }
 
@@ -190,6 +202,7 @@ impl App {
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
             current_tool: None,
+            tool_results: Vec::new(),
         });
     }
 
@@ -231,6 +244,18 @@ impl App {
         }
     }
 
+    pub fn append_tool_result(&mut self, name: String, output: String) {
+        if let Some(m) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::Assistant && m.streaming)
+        {
+            m.phase = Phase::Tinkering;
+            m.tool_results.push(ToolResult { name, output });
+        }
+    }
+
     pub fn finish_streaming(&mut self) {
         self.in_flight = false;
 
@@ -256,6 +281,7 @@ impl App {
                 && m.content.is_empty()
                 && m.brain.is_empty()
                 && m.current_tool.is_none()
+                && m.tool_results.is_empty()
             {
                 self.messages.remove(i);
                 if self.status.is_empty() {
