@@ -1,6 +1,7 @@
 // Application state. The UI is a pure function of this.
 
 use crate::api::ApiMessage;
+use crate::book;
 use crate::popup::Popup;
 use crate::shop::Shop;
 use crate::station::Station;
@@ -126,6 +127,22 @@ pub struct App {
     pub active_origin: Option<String>,
     /// The popup overlay state (closed, browsing, or entering a name).
     pub popup: Popup,
+    /// The book: wryme's memory, a columnar Parquet store of pages.
+    /// Opened at launch; the engine consults/curates it as the next phase
+    /// of the design (close pages on thread drift, feed the index to the
+    /// model's context).
+    #[allow(dead_code)] // not yet read — awaits the engine wiring
+    pub book: book::Book,
+}
+
+/// The book lives at `~/.config/wryme/book`, like the shops and
+/// stations files — one folder for everything wryme keeps.
+fn book_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home)
+        .join(".config")
+        .join("wryme")
+        .join("book")
 }
 
 impl App {
@@ -155,8 +172,10 @@ impl App {
             active_shop,
             active_origin,
             popup: Popup::default(),
+            book: book::open_book(&book_dir()).expect("open book"),
         }
     }
+
 
     /// True when the active station differs from the saved entry it was
     /// loaded from. False when there is no origin (untitled / demo) or

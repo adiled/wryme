@@ -19,6 +19,7 @@ mod api;
 mod api_chat;
 mod api_responses;
 mod app;
+mod book;
 mod demo;
 mod explore;
 mod input;
