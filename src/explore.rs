@@ -28,7 +28,7 @@ pub fn tool_name() -> String {
     format!("{}_explore", shell_basename(&shell))
 }
 
-fn shell_basename(shell: &str) -> String {
+pub(crate) fn shell_basename(shell: &str) -> String {
     Path::new(shell)
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
@@ -44,7 +44,7 @@ or short phrases you think could be tools. For each one we find it on \
 the system (PATH binaries, shell aliases, shell functions in the user's \
 rc files) and return its --help output, so you know exactly what is \
 available and how to use it. Once you know what to run, execute it with \
-your shell tool (myshell).";
+your shell tool (the one named after your shell, e.g. zsh or bash).";
 
 /// The JSON parameters schema advertised with the tool.
 pub fn tool_parameters() -> serde_json::Value {

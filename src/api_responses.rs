@@ -7,10 +7,13 @@
 // turn instead of replaying the full history; the server has the rest
 // pinned to its warm session.
 //
-// Tools: we advertise `myshell_explore` (see explore.rs). When the model
-// calls it, we run it locally and feed the result back as a
-// function_call_output item on a follow-up request, looping until the
-// model stops calling tools. This is the complete tool loop — not a stub.
+// Tools: we advertise the shell tool (named after the user's real shell,
+// e.g. `zsh`), its discovery companion (`zsh_explore`), and the async-job
+// checker (`zsh_check`). When the model calls one we run it locally and
+// feed the result back as a function_call_output item on a follow-up
+// request, looping until the model stops calling tools. Finished async
+// jobs are planted back here as a function_call + function_call_output
+// pair so the model sees the outcome and continues.
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -65,6 +68,27 @@ pub(crate) async fn stream(
             .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
             .collect()
     };
+
+    // Plant any finished async jobs into the input as a check-call +
+    // result pair, so the model sees the outcome and continues.
+    let due = crate::jobs::claim_due();
+    if !due.is_empty() {
+        let check = crate::tools::check_name();
+        for (id, output) in due {
+            let call_id = format!("check_{id}");
+            input.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": call_id,
+                "name": check,
+                "arguments": format!("{{\"id\":{id}}}"),
+            }));
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            }));
+        }
+    }
 
     loop {
         let (calls, new_id) =

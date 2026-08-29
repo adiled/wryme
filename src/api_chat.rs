@@ -40,6 +40,31 @@ pub(crate) async fn stream(
         .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
         .collect();
 
+    // Plant any finished async jobs back into the conversation as a
+    // check-call + result pair, so the model sees the outcome naturally.
+    let due = crate::jobs::claim_due();
+    if !due.is_empty() {
+        let check = crate::tools::check_name();
+        for (id, output) in due {
+            let call_id = format!("check_{id}");
+            let args = format!("{{\"id\":{id}}}");
+            conv.push(serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": check, "arguments": args },
+                }],
+            }));
+            conv.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": output,
+            }));
+        }
+    }
+
     loop {
         let (calls, assistant_content) = stream_once(client, shop, station, &conv, tx).await?;
         if calls.is_empty() {
