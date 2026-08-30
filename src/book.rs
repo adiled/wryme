@@ -1,31 +1,26 @@
 // The book: wryme's memory, kept as a columnar Parquet store so the
-// engine can navigate and load pages at scale — the "EPUB for engine
+// engine can navigate and load threads at scale — the "EPUB for engine
 // readership". Grandma never sees it; she just has an AI that remembers.
 //
-// Two layers, mirroring EPUB's toc-vs-chapters split:
-//   book/index.parquet          the navigation layer. One row per closed
-//                               page, holding ONLY the small metadata
-//                               columns (topic, tags, people, ...). This
-//                               is what the model keeps warm in context,
-//                               and a columnar scan of it never touches
-//                               page content.
-//   book/pages/<id>.parquet     the content layer. Message rows for one
-//                               page, addressable by id and loaded on
-//                               demand. Each page is one immutable file,
-//                               so writing a new page never rewrites the
-//                               big data — only the small index.
+// A compartment is an open-ended thread. It is NEVER closed: it
+// accumulates over time, across windows and reboots. Each time the thread
+// is continued, another segment file is appended; its index row always
+// holds the CURRENT distilled state, never a "closed" snapshot.
 //
-//   book/life_summary.txt       the merged memory of everything old; the
-//                               anti-bloat. Old pages fold into this and
-//                               their content files are dropped.
-//
-// Only open_book is live right now. The curation + consultation API
-// (new_page, close_page, load_page, match_pages, compact) awaits the
-// engine wiring — feeding the index to the model's context and closing
-// pages on thread drift — so those pieces are allowed-dead until then.
-#![allow(dead_code)]
+// Layout, mirroring EPUB's toc-vs-chapters split:
+//   book/index.parquet          the navigation layer. One row per
+//                               compartment: its distilled state (topic,
+//                               tags, people, facts, plans, open threads)
+//                               plus opened_at / updated_at / life_tokens.
+//                               This is what the engine scans; a columnar
+//                               scan never touches thread content.
+//   book/compartments/<id>/     the content layer. Segment files
+//                               <seg>.parquet, message rows for one chunk
+//                               of a thread, appended as it continues.
+//                               Read on demand; addressable by id.
+//   book/life_summary.txt       prose memory of everything quiet, kept by
+//                               the engine. Always in context as text.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -34,8 +29,9 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
 
-/// What the engine keeps from a closed page — the bookmark the model
-/// reads back later. Lists are comma-joined on disk (plain Utf8 columns).
+/// The current distilled state of a compartment — what gets promoted to
+/// the conversation's preamble when the thread is re-established. Lists
+/// are comma-joined on disk (plain Utf8 columns).
 #[derive(Debug, Clone, Default)]
 pub struct Bookmark {
     pub topic: String,
@@ -43,15 +39,17 @@ pub struct Bookmark {
     pub people: Vec<String>,
     pub facts: Vec<String>,
     pub plans: Vec<String>,
+    /// Open threads — what is still in motion. This is the "where we left
+    /// off" so the AI can say "we were comparing flight prices".
     pub open: Vec<String>,
 }
 
-/// One closed page's metadata — a single index row.
+/// One compartment's current index row.
 #[derive(Debug, Clone)]
-pub struct PageMeta {
-    pub page_id: u64,
+pub struct CompartmentMeta {
+    pub id: u64,
     pub opened_at: i64,
-    pub closed_at: i64,
+    pub updated_at: i64,
     pub topic: String,
     pub tags: Vec<String>,
     pub people: Vec<String>,
@@ -61,7 +59,8 @@ pub struct PageMeta {
     pub life_tokens: i64,
 }
 
-/// One message in a page. `content` is the rendered text the model reads.
+/// One message in a compartment segment. `content` is the rendered text
+/// the model reads.
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: String,
@@ -69,22 +68,21 @@ pub struct Message {
     pub ts: i64,
 }
 
-/// The book. Index rows live in memory (small); page content stays on
-/// disk and is loaded per page.
+/// The book. Index rows live in memory (small); thread content stays on
+/// disk and is loaded per compartment.
 pub struct Book {
     dir: PathBuf,
     next_id: u64,
-    index: Vec<PageMeta>,
-    open_pages: HashMap<u64, i64>, // page_id -> opened_at (epoch ms)
+    index: Vec<CompartmentMeta>,
     life_summary: String,
 }
 
 /// The columnar index schema — metadata only, no content.
 fn index_schema() -> SchemaRef {
     let fields = vec![
-        Field::new("page_id", DataType::Int64, false),
+        Field::new("compartment_id", DataType::Int64, false),
         Field::new("opened_at", DataType::Int64, false),
-        Field::new("closed_at", DataType::Int64, false),
+        Field::new("updated_at", DataType::Int64, false),
         Field::new("topic", DataType::Utf8, true),
         Field::new("tags", DataType::Utf8, true),
         Field::new("people", DataType::Utf8, true),
@@ -96,10 +94,10 @@ fn index_schema() -> SchemaRef {
     Schema::new(fields).into()
 }
 
-/// The content schema — message rows for one page.
-fn page_schema() -> SchemaRef {
+/// The content schema — message rows for one segment of a compartment.
+fn segment_schema() -> SchemaRef {
     let fields = vec![
-        Field::new("page_id", DataType::Int64, false),
+        Field::new("compartment_id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
         Field::new("role", DataType::Utf8, true),
         Field::new("content", DataType::Utf8, true),
@@ -136,7 +134,7 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     } else {
         vec![]
     };
-    let next_id = index.iter().map(|m| m.page_id + 1).max().unwrap_or(1);
+    let next_id = index.iter().map(|m| m.id + 1).max().unwrap_or(1);
 
     let summary_path = dir.join("life_summary.txt");
     let life_summary = std::fs::read_to_string(&summary_path).unwrap_or_default();
@@ -145,71 +143,118 @@ pub fn open_book(dir: &Path) -> Result<Book> {
         dir: dir.to_path_buf(),
         next_id,
         index,
-        open_pages: HashMap::new(),
         life_summary,
     })
 }
 
-/// Open a fresh page and return its id. Messages accumulate in the live
-/// app state until `close_page` files it away.
-pub fn new_page(book: &mut Book) -> u64 {
+/// Start a brand-new compartment and return its id. The thread is open
+/// ended: it will accumulate segments forever. The distilled state starts
+/// empty and is set by `update_bookmark` as the thread develops.
+pub fn new_compartment(book: &mut Book) -> Result<u64> {
     let id = book.next_id;
     book.next_id += 1;
-    book.open_pages.insert(id, now_ms());
-    id
+    let now = now_ms();
+    book.index.push(CompartmentMeta {
+        id,
+        opened_at: now,
+        updated_at: now,
+        topic: String::new(),
+        tags: vec![],
+        people: vec![],
+        facts: vec![],
+        plans: vec![],
+        open: vec![],
+        life_tokens: 0,
+    });
+    write_index(book)?;
+    Ok(id)
 }
 
-/// Close a page: write its content file (immutable) and fold its metadata
-/// into the index. The live page's messages are the model's reading
-/// material, so this is where the engine decides what to bookmark.
-pub fn close_page(
-    book: &mut Book,
-    page_id: u64,
-    messages: &[Message],
-    bookmark: &Bookmark,
-) -> Result<()> {
-    let opened_at = book.open_pages.remove(&page_id).unwrap_or_else(now_ms);
-    let closed_at = now_ms();
-    let life_tokens: i64 = messages
-        .iter()
-        .map(|m| m.content.len() as i64)
-        .sum::<i64>();
-
-    write_page(book, page_id, messages)?;
-
-    let meta = PageMeta {
-        page_id,
-        opened_at,
-        closed_at,
-        topic: bookmark.topic.clone(),
-        tags: bookmark.tags.clone(),
-        people: bookmark.people.clone(),
-        facts: bookmark.facts.clone(),
-        plans: bookmark.plans.clone(),
-        open: bookmark.open.clone(),
-        life_tokens,
+/// Append one chunk of a thread as a new segment file for a compartment.
+/// Returns the number of segments the compartment now has.
+pub fn append_segment(book: &mut Book, id: u64, messages: &[Message]) -> Result<u64> {
+    let seg = next_segment(book, id)?;
+    let Some(meta) = book.index.iter_mut().find(|m| m.id == id) else {
+        return Ok(seg); // unknown compartment — nothing appended
     };
-    book.index.push(meta);
+    meta.life_tokens += messages.iter().map(|m| m.content.len() as i64).sum::<i64>();
+    meta.updated_at = now_ms();
+    write_segment(book, id, seg, messages)?;
+    write_index(book)?;
+    Ok(seg + 1)
+}
+
+/// Refresh a compartment's distilled state (and updated_at). Called as the
+/// thread develops — the AI writes its own bookmark, the engine stores it.
+pub fn update_bookmark(book: &mut Book, id: u64, bookmark: &Bookmark) -> Result<()> {
+    let Some(meta) = book.index.iter_mut().find(|m| m.id == id) else {
+        return Ok(());
+    };
+    meta.topic = bookmark.topic.clone();
+    meta.tags = bookmark.tags.clone();
+    meta.people = bookmark.people.clone();
+    meta.facts = bookmark.facts.clone();
+    meta.plans = bookmark.plans.clone();
+    meta.open = bookmark.open.clone();
+    meta.updated_at = now_ms();
     write_index(book)?;
     Ok(())
 }
 
 /// All index rows — the navigation layer, small and always in context.
-pub fn index_entries(book: &Book) -> &[PageMeta] {
+pub fn index_entries(book: &Book) -> &[CompartmentMeta] {
     &book.index
 }
 
-/// Load one page's messages from its content file.
-pub fn load_page(book: &Book, page_id: u64) -> Result<Option<Vec<Message>>> {
-    let path = page_path(book, page_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    Ok(Some(read_page(&path)?))
+/// Look up one compartment's current index row.
+pub fn compartment(book: &Book, id: u64) -> Option<&CompartmentMeta> {
+    book.index.iter().find(|m| m.id == id)
 }
 
-/// Render a page's messages back to the plain text the model reads.
-pub fn render_page(messages: &[Message]) -> String {
+/// Read a compartment's full thread — all segments, concatenated in order.
+pub fn read_compartment(book: &Book, id: u64) -> Result<Option<Vec<Message>>> {
+    let dir = compartment_dir(book, id);
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut all = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+            all.extend(read_segment(&path)?);
+        }
+    }
+    all.sort_by_key(|m| m.ts);
+    Ok(Some(all))
+}
+
+/// The preamble: render a compartment's distilled state to the prose the
+/// model reads at the top of the conversation. One compartment, one
+/// system message.
+pub fn render_bookmark(meta: &CompartmentMeta) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Compartment {}: {}\n", meta.id, meta.topic));
+    if !meta.people.is_empty() {
+        out.push_str(&format!("People: {}\n", meta.people.join(", ")));
+    }
+    if !meta.facts.is_empty() {
+        out.push_str(&format!("Facts: {}\n", meta.facts.join(", ")));
+    }
+    if !meta.plans.is_empty() {
+        out.push_str(&format!("Plans: {}\n", meta.plans.join(", ")));
+    }
+    if !meta.open.is_empty() {
+        out.push_str(&format!("Open: {}\n", meta.open.join(", ")));
+    }
+    if !meta.tags.is_empty() {
+        out.push_str(&format!("Tags: {}\n", meta.tags.join(", ")));
+    }
+    out
+}
+
+/// Render a compartment's full thread text (for reading on demand).
+pub fn render_compartment(messages: &[Message]) -> String {
     let mut out = String::new();
     for m in messages {
         out.push_str(&format!("**{}:** {}\n\n", m.role, m.content));
@@ -227,10 +272,11 @@ pub fn set_life_summary(book: &mut Book, summary: &str) -> Result<()> {
     Ok(())
 }
 
-/// Deterministic retrieval: match grandma's words against the small index
-/// columns (topic / tags / people). No embeddings — just keyword overlap
-/// over the metadata, which a columnar scan makes cheap at scale.
-pub fn match_pages<'a>(book: &'a Book, query: &str) -> Vec<&'a PageMeta> {
+/// Deterministic retrieval: match grandma's words against the index
+/// columns (topic / tags / people / facts / plans / open). No embeddings —
+/// just keyword overlap over the metadata, which a columnar scan makes
+/// cheap at scale.
+pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a CompartmentMeta> {
     let q = query.to_lowercase();
     let words: Vec<String> = q
         .split(|c: char| !c.is_alphanumeric())
@@ -240,7 +286,7 @@ pub fn match_pages<'a>(book: &'a Book, query: &str) -> Vec<&'a PageMeta> {
     if words.is_empty() {
         return vec![];
     }
-    let mut hits: Vec<(&PageMeta, usize)> = book
+    let mut hits: Vec<(&CompartmentMeta, usize)> = book
         .index
         .iter()
         .filter_map(|m| {
@@ -264,50 +310,39 @@ pub fn match_pages<'a>(book: &'a Book, query: &str) -> Vec<&'a PageMeta> {
     hits.into_iter().map(|(m, _)| m).collect()
 }
 
-/// Anti-bloat: fold the oldest index entries into the life summary and
-/// drop their content files, keeping only the newest `keep` pages detailed.
-pub fn compact(book: &mut Book, keep: usize) -> Result<()> {
-    if book.index.len() <= keep {
-        return Ok(());
-    }
-    let drop = book.index.len() - keep;
-    let mut folded = Vec::new();
-    for m in &book.index[..drop] {
-        let line = format!(
-            "{} (page {}): {}. People: {}. Facts: {}. Plans: {}. Open: {}",
-            m.topic,
-            m.page_id,
-            m.tags.join(", "),
-            m.people.join(", "),
-            m.facts.join(", "),
-            m.plans.join(", "),
-            m.open.join(", ")
-        );
-        folded.push(line);
-        let _ = std::fs::remove_file(page_path(book, m.page_id));
-    }
-    let new_summary = format!("{}\n{}", book.life_summary, folded.join("\n"));
-    set_life_summary(book, &new_summary)?;
-    book.index.drain(..drop);
-    write_index(book)?;
-    Ok(())
+fn compartment_dir(book: &Book, id: u64) -> PathBuf {
+    book.dir.join("compartments").join(format!("{id:04}"))
 }
 
-fn page_path(book: &Book, page_id: u64) -> PathBuf {
-    book.dir.join("pages").join(format!("{page_id:04}.parquet"))
+fn next_segment(book: &Book, id: u64) -> Result<u64> {
+    let dir = compartment_dir(book, id);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut max = 0u64;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(".parquet") {
+            if let Ok(n) = stem.parse::<u64>() {
+                max = max.max(n);
+            }
+        }
+    }
+    Ok(max + 1)
 }
 
 // ---- parquet read/write ----------------------------------------------
 
 fn write_index(book: &Book) -> Result<()> {
     let ids = Int64Array::from(
-        book.index.iter().map(|m| m.page_id as i64).collect::<Vec<_>>(),
+        book.index.iter().map(|m| m.id as i64).collect::<Vec<_>>(),
     );
     let opened = Int64Array::from(
         book.index.iter().map(|m| m.opened_at).collect::<Vec<_>>(),
     );
-    let closed = Int64Array::from(
-        book.index.iter().map(|m| m.closed_at).collect::<Vec<_>>(),
+    let updated = Int64Array::from(
+        book.index.iter().map(|m| m.updated_at).collect::<Vec<_>>(),
     );
     let topic = StringArray::from(
         book.index.iter().map(|m| m.topic.as_str()).collect::<Vec<_>>(),
@@ -336,7 +371,7 @@ fn write_index(book: &Book) -> Result<()> {
         vec![
             std::sync::Arc::new(ids),
             std::sync::Arc::new(opened),
-            std::sync::Arc::new(closed),
+            std::sync::Arc::new(updated),
             std::sync::Arc::new(topic),
             std::sync::Arc::new(tags),
             std::sync::Arc::new(people),
@@ -355,15 +390,15 @@ fn write_index(book: &Book) -> Result<()> {
     Ok(())
 }
 
-fn read_index(path: &Path) -> Result<Vec<PageMeta>> {
+fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     let file = std::fs::File::open(path)?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     let mut metas = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let ids = batch.column_by_name("page_id").unwrap();
+        let ids = batch.column_by_name("compartment_id").unwrap();
         let opened = batch.column_by_name("opened_at").unwrap();
-        let closed = batch.column_by_name("closed_at").unwrap();
+        let updated = batch.column_by_name("updated_at").unwrap();
         let topic = batch.column_by_name("topic").unwrap();
         let tags = batch.column_by_name("tags").unwrap();
         let people = batch.column_by_name("people").unwrap();
@@ -372,10 +407,10 @@ fn read_index(path: &Path) -> Result<Vec<PageMeta>> {
         let open = batch.column_by_name("open").unwrap();
         let tokens = batch.column_by_name("life_tokens").unwrap();
         for i in 0..batch.num_rows() {
-            metas.push(PageMeta {
-                page_id: as_i64(ids, i) as u64,
+            metas.push(CompartmentMeta {
+                id: as_i64(ids, i) as u64,
                 opened_at: as_i64(opened, i),
-                closed_at: as_i64(closed, i),
+                updated_at: as_i64(updated, i),
                 topic: as_str(topic, i),
                 tags: split(&as_str(tags, i)),
                 people: split(&as_str(people, i)),
@@ -389,10 +424,11 @@ fn read_index(path: &Path) -> Result<Vec<PageMeta>> {
     Ok(metas)
 }
 
-fn write_page(book: &Book, page_id: u64, messages: &[Message]) -> Result<()> {
-    std::fs::create_dir_all(book.dir.join("pages"))?;
+fn write_segment(book: &Book, id: u64, seg: u64, messages: &[Message]) -> Result<()> {
+    let dir = compartment_dir(book, id);
+    std::fs::create_dir_all(&dir)?;
     let n = messages.len();
-    let ids = Int64Array::from(vec![page_id as i64; n]);
+    let ids = Int64Array::from(vec![id as i64; n]);
     let seq = Int64Array::from((0..n as i64).collect::<Vec<_>>());
     let role = StringArray::from(
         messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
@@ -403,7 +439,7 @@ fn write_page(book: &Book, page_id: u64, messages: &[Message]) -> Result<()> {
     let ts = Int64Array::from(messages.iter().map(|m| m.ts).collect::<Vec<_>>());
 
     let batch = RecordBatch::try_new(
-        page_schema(),
+        segment_schema(),
         vec![
             std::sync::Arc::new(ids),
             std::sync::Arc::new(seq),
@@ -413,36 +449,29 @@ fn write_page(book: &Book, page_id: u64, messages: &[Message]) -> Result<()> {
         ],
     )?;
 
-    let file = std::fs::File::create(page_path(book, page_id))?;
-    let writer = ArrowWriter::try_new(file, page_schema(), None)?;
+    let file = std::fs::File::create(dir.join(format!("{seg:04}.parquet")))?;
+    let writer = ArrowWriter::try_new(file, segment_schema(), None)?;
     let mut writer = writer;
     writer.write(&batch)?;
     let _ = writer.close()?;
     Ok(())
 }
 
-fn read_page(path: &Path) -> Result<Vec<Message>> {
+fn read_segment(path: &Path) -> Result<Vec<Message>> {
     let file = std::fs::File::open(path)?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     let mut msgs = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let seq = batch.column_by_name("seq").unwrap();
         let role = batch.column_by_name("role").unwrap();
         let content = batch.column_by_name("content").unwrap();
         let ts = batch.column_by_name("ts").unwrap();
-        let mut rows: Vec<(i64, String, String, i64)> = Vec::new();
         for i in 0..batch.num_rows() {
-            rows.push((
-                as_i64(seq, i),
-                as_str(role, i),
-                as_str(content, i),
-                as_i64(ts, i),
-            ));
-        }
-        rows.sort_by_key(|r| r.0);
-        for (_, role, content, ts) in rows {
-            msgs.push(Message { role, content, ts });
+            msgs.push(Message {
+                role: as_str(role, i),
+                content: as_str(content, i),
+                ts: as_i64(ts, i),
+            });
         }
     }
     Ok(msgs)
@@ -482,54 +511,71 @@ mod tests {
     }
 
     #[test]
-    fn new_page_and_close_roundtrip() {
-        let dir = tmpdir("roundtrip");
+    fn compartment_appends_segments_open_ended() {
+        let dir = tmpdir("segments");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-        let id = new_page(&mut book);
-        let msgs = vec![
-            msg("user", "let's plan Lisbon"),
-            msg("assistant", "great, May is nice"),
-        ];
-        close_page(
+        let id = new_compartment(&mut book).unwrap();
+
+        // First sitting: two messages.
+        let segs = append_segment(
             &mut book,
             id,
-            &msgs,
+            &[msg("user", "let's plan Lisbon"), msg("assistant", "May is nice")],
+        )
+        .unwrap();
+        assert_eq!(segs, 1);
+
+        // A second sitting, days later, on the same open-ended thread.
+        let segs2 = append_segment(
+            &mut book,
+            id,
+            &[msg("user", "flights got cheaper"), msg("assistant", "book them")],
+        )
+        .unwrap();
+        assert_eq!(segs2, 2);
+
+        update_bookmark(
+            &mut book,
+            id,
             &Bookmark {
                 topic: "Lisbon trip".to_string(),
                 tags: vec!["travel".to_string(), "lisbon".to_string()],
                 people: vec!["grandma".to_string()],
-                facts: vec!["may dates".to_string()],
+                facts: vec!["flights cheaper".to_string()],
                 plans: vec!["book flights".to_string()],
-                open: vec!["compare prices".to_string()],
+                open: vec!["comparing prices".to_string()],
             },
         )
         .unwrap();
 
-        // Reload from disk and read the page back.
-        let mut book2 = open_book(&dir).unwrap();
-        let loaded = load_page(&book2, id).unwrap().unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].content, "let's plan Lisbon");
-        assert_eq!(render_page(&loaded), "**user:** let's plan Lisbon\n\n**assistant:** great, May is nice\n\n");
+        // Reload from disk and read the whole thread back, in order.
+        let book2 = open_book(&dir).unwrap();
+        let all = read_compartment(&book2, id).unwrap().unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].content, "let's plan Lisbon");
+        assert_eq!(all[2].content, "flights got cheaper");
 
         let metas = index_entries(&book2);
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].topic, "Lisbon trip");
-        assert_eq!(metas[0].tags, vec!["travel", "lisbon"]);
+        assert_eq!(metas[0].open, vec!["comparing prices"]);
+        assert_eq!(metas[0].life_tokens, 56); // sum of content byte lengths
+        // Open ended: no closed_at anywhere.
+        assert!(render_bookmark(&metas[0]).contains("Lisbon trip"));
+        assert!(render_bookmark(&metas[0]).contains("comparing prices"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn match_pages_ranks_by_keyword_overlap() {
+    fn match_compartments_ranks_by_keyword_overlap() {
         let dir = tmpdir("match");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-        let a = new_page(&mut book);
-        close_page(
+        let a = new_compartment(&mut book).unwrap();
+        update_bookmark(
             &mut book,
             a,
-            &[msg("user", "lisbon")],
             &Bookmark {
                 topic: "Lisbon trip".to_string(),
                 tags: vec!["travel".to_string(), "lisbon".to_string()],
@@ -538,11 +584,10 @@ mod tests {
             },
         )
         .unwrap();
-        let b = new_page(&mut book);
-        close_page(
+        let b = new_compartment(&mut book).unwrap();
+        update_bookmark(
             &mut book,
             b,
-            &[msg("user", "cat")],
             &Bookmark {
                 topic: "Miso the cat".to_string(),
                 tags: vec!["cat".to_string(), "vet".to_string()],
@@ -552,63 +597,25 @@ mod tests {
         )
         .unwrap();
 
-        let hits = match_pages(&book, "lisbon may dates");
+        let hits = match_compartments(&book, "lisbon may dates");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].topic, "Lisbon trip");
 
-        let cat = match_pages(&book, "take miso to the vet");
+        let cat = match_compartments(&book, "take miso to the vet");
         assert_eq!(cat[0].topic, "Miso the cat");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn compact_folds_old_pages_into_life_summary() {
-        let dir = tmpdir("compact");
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut book = open_book(&dir).unwrap();
-        for i in 0..5 {
-            let id = new_page(&mut book);
-            close_page(
-                &mut book,
-                id,
-                &[msg("user", "chat")],
-                &Bookmark {
-                    topic: format!("topic {i}"),
-                    tags: vec!["tag".to_string()],
-                    ..Bookmark::default()
-                },
-            )
-            .unwrap();
-        }
-        assert_eq!(index_entries(&book).len(), 5);
-        compact(&mut book, 2).unwrap();
-        let metas = index_entries(&book);
-        assert_eq!(metas.len(), 2);
-        assert!(life_summary(&book).contains("topic 0"));
-        // Old content files are gone; new ones remain.
-        assert!(load_page(&book, metas[0].page_id).unwrap().is_some());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn page_ids_are_monotonic_after_reopen() {
+    fn ids_are_monotonic_after_reopen() {
         let dir = tmpdir("ids");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-        let id = new_page(&mut book);
-        close_page(
-            &mut book,
-            id,
-            &[msg("user", "hi")],
-            &Bookmark {
-                topic: "hello".to_string(),
-                ..Bookmark::default()
-            },
-        )
-        .unwrap();
+        let id = new_compartment(&mut book).unwrap();
+        append_segment(&mut book, id, &[msg("user", "hi")]).unwrap();
         drop(book);
         let mut book2 = open_book(&dir).unwrap();
-        let id2 = new_page(&mut book2);
+        let id2 = new_compartment(&mut book2).unwrap();
         assert!(id2 > id);
         let _ = std::fs::remove_dir_all(&dir);
     }
