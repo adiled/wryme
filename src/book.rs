@@ -2,25 +2,27 @@
 // engine can navigate and load threads at scale — the "EPUB for engine
 // readership". Grandma never sees it; she just has an AI that remembers.
 //
-// A compartment is an open-ended thread. It is NEVER closed: it
-#![allow(dead_code)] // life_summary / index_entries await the engine's full use
-// accumulates over time, across windows and reboots. Each time the thread
-// is continued, another segment file is appended; its index row always
-// holds the CURRENT distilled state, never a "closed" snapshot.
+// The stream is the whole truth. Every turn, ever, is written here
+// continuously by the engine — user and assistant alike — as append-only
+// segments. Nothing is partitioned into compartments; the conversation
+// is one continuous thread.
 //
-// Layout, mirroring EPUB's toc-vs-chapters split:
-//   book/index.parquet          the navigation layer. One row per
-//                               compartment: its distilled state (topic,
-//                               tags, people, facts, plans, open threads)
-//                               plus opened_at / updated_at / life_tokens.
-//                               This is what the engine scans; a columnar
-//                               scan never touches thread content.
-//   book/compartments/<id>/     the content layer. Segment files
-//                               <seg>.parquet, message rows for one chunk
-//                               of a thread, appended as it continues.
-//                               Read on demand; addressable by id.
-//   book/life_summary.txt       prose memory of everything quiet, kept by
-//                               the engine. Always in context as text.
+// A compartment is NOT a container of turns. It is a distilled bookmark
+// that POINTS INTO the stream via spans (start_row..end_row). The same
+// stretch of conversation can be deemed into several compartments —
+// attribution overlaps and interleaves freely. A thread through its
+// lifetime can be deemed into multiple compartments.
+//
+// Layout:
+//   book/stream/<NNNN>.parquet   the content. Append-only message rows,
+//                                one continuous record of every turn.
+//   book/index.parquet           the navigation. One row per compartment:
+//                                its current distilled state (topic, tags,
+//                                people, facts, plans, open) plus its
+//                                spans into the stream + life_tokens.
+//                                A columnar scan never touches content.
+//   book/life_summary.txt        prose memory of everything quiet.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -29,8 +31,6 @@ use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
-
-use crate::api::ApiMessage;
 
 /// The current distilled state of a compartment — what gets promoted to
 /// the conversation's preamble when the thread is re-established. Lists
@@ -59,11 +59,24 @@ pub struct CompartmentMeta {
     pub facts: Vec<String>,
     pub plans: Vec<String>,
     pub open: Vec<String>,
+    /// Attributed stretches of the stream, as (start_row..end_row) spans.
+    /// The compartment points INTO the stream; it owns no rows itself.
+    pub spans: Vec<(u64, u64)>,
+    /// Weight of the compartment: sum of content bytes of its spans.
     pub life_tokens: i64,
 }
 
-/// One message in a compartment segment. `content` is the rendered text
-/// the model reads.
+/// One turn in the continuous stream. `content` is the rendered text the
+/// model reads.
+#[derive(Debug, Clone)]
+pub struct StreamRow {
+    pub row_id: u64,
+    pub role: String,
+    pub content: String,
+    pub ts: i64,
+}
+
+/// One message, as read out of a compartment's spans (for rendering).
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: String,
@@ -71,32 +84,67 @@ pub struct Message {
     pub ts: i64,
 }
 
-/// The book. Index rows live in memory (small); thread content stays on
-/// disk and is loaded per compartment.
+/// The book. Index rows live in memory (small); the stream stays on disk
+/// and is loaded per read. `watermark` is the first row NOT yet attributed
+/// to any compartment — the unattributed frontier the engine watches.
 pub struct Book {
     dir: PathBuf,
     next_id: u64,
+    next_row: u64,
+    watermark: u64,
+    /// Content bytes of the unattributed rows [watermark, next_row) —
+    /// the engine's weight signal for the prod.
+    unattr_tokens: i64,
+    unattr_turns: i64,
     index: Vec<CompartmentMeta>,
+    /// Rows not yet flushed to a stream segment.
+    pending: Vec<StreamRow>,
     life_summary: String,
 }
 
 /// The engine: the live, in-memory face of the book that the conversation
 /// talks to. Holds the book plus which compartments are currently
-/// promoted to the conversation's preamble. Shared across turns as an
-/// `Arc<Mutex<Engine>>` so the streaming protocol and the background
-/// delivery can both reach it.
+/// promoted to the conversation's preamble, and the book-writing prod
+/// state. Shared across turns as an `Arc<Mutex<Engine>>` so the streaming
+/// protocol and the background delivery can both reach it.
+///
+/// The engine is NOT an agent. It writes the stream continuously and
+/// prods the agent to deem compartments; establishing and reminiscing
+/// remain the agent's own deliberation.
 pub struct Engine {
     pub book: Book,
     /// Compartments currently promoted to the preamble. Their rendered
     /// bookmarks are prepended as system messages to every request.
     pub established: Vec<u64>,
+    /// Set when an unattributed thread is weightful; delivered once into
+    /// the next request as a quiet system reminder.
+    pending_prod: bool,
+    /// The stream row when a prod was last delivered — a cooldown so it
+    /// nudges, waits a few turns, and nudges again only if still unfiled
+    /// (it never nags every turn).
+    prod_delivered_row: u64,
+    /// The stream row when the last lookup (find/open) happened — used
+    /// for the guard: no prod within a few turns of a lookup.
+    last_lookup_row: u64,
 }
+
+/// Weight thresholds for the book-writing prod. A thread must accumulate
+/// enough turns AND tokens, with no recent lookup, before the engine
+/// nudges the agent to deem it.
+const WEIGHT_TURNS: i64 = 5;
+const WEIGHT_BYTES: i64 = 1600;
+/// Turns of distance from an establishing-related lookup that shield the
+/// thread from a prod (the agent is actively reminiscing over it).
+const LOOKUP_GAP: u64 = 5;
 
 /// Open the engine (book + empty preamble) in `dir`.
 pub fn open_engine(dir: &Path) -> Result<Engine> {
     Ok(Engine {
         book: open_book(dir)?,
         established: vec![],
+        pending_prod: false,
+        last_lookup_row: 0,
+        prod_delivered_row: 0,
     })
 }
 
@@ -111,6 +159,87 @@ impl Engine {
             .collect()
     }
 
+    /// The book-writing prod: deliver it once into the next request, then
+    /// cool down. The engine slips the agent a quiet system reminder when
+    /// an unattributed thread is weightful and unshielded; it nudges, waits
+    /// a few turns, and nudges again only if the thread is still unfiled.
+    /// Never shown to grandma.
+    pub fn take_prod(&mut self) -> Option<String> {
+        if !self.pending_prod {
+            return None;
+        }
+        self.pending_prod = false;
+        self.prod_delivered_row = self.book.next_row;
+        Some(
+            "\n[bookkeeping] This stretch of conversation has accumulated \
+             enough shape to be written into the book. Look back over it and \
+             deem it to the right compartment(s): call the `book` tool with \
+             action \"deem\" (action \"new\" first only if no existing \
+             compartment fits). This is invisible book-keeping — keep talking \
+             to grandma naturally."
+                .to_string(),
+        )
+    }
+
+    /// Write one turn into the continuous stream, then re-check the prod.
+    pub fn record_turn(&mut self, role: &str, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        let book = &mut self.book;
+        book.pending.push(StreamRow {
+            row_id: book.next_row,
+            role: role.to_string(),
+            content: content.to_string(),
+            ts: now_ms(),
+        });
+        book.next_row += 1;
+        book.unattr_tokens += content.len() as i64;
+        book.unattr_turns += 1;
+        if !self.pending_prod
+            && book.unattr_turns >= WEIGHT_TURNS
+            && book.unattr_tokens >= WEIGHT_BYTES
+            && book.next_row.saturating_sub(self.last_lookup_row) >= LOOKUP_GAP
+            && book.next_row.saturating_sub(self.prod_delivered_row) >= LOOKUP_GAP
+        {
+            self.pending_prod = true;
+        }
+    }
+
+    /// Mark that a lookup (find/open) happened at the current stream
+    /// position — the shield that suppresses a prod while the agent is
+    /// actively reminiscing over a thread.
+    pub fn note_lookup(&mut self) {
+        self.last_lookup_row = self.book.next_row;
+    }
+
+    /// Promote a compartment to the preamble and return its rendered
+    /// bookmark plus full thread text (so the model can just know). This
+    /// is the ceremony of "remember when" — the agent's own deliberation.
+    pub fn open(&mut self, id: u64) -> Result<Option<String>> {
+        let Some(meta) = compartment(&self.book, id).cloned() else {
+            return Ok(None);
+        };
+        self.establish(id);
+        self.note_lookup();
+        let mut out = render_bookmark(&meta);
+        if let Some(thread) = read_compartment(&self.book, id)? {
+            out.push_str("\n\n--- thread ---\n\n");
+            out.push_str(&render_compartment(&thread));
+        }
+        Ok(Some(out))
+    }
+
+    /// Attribute the unattributed span [watermark, next_row) to a
+    /// compartment and refresh its distilled bookmark. This is quiet
+    /// book-keeping — it does NOT establish (no ceremony, no preamble).
+    /// Clears the prod. Returns a short confirmation.
+    pub fn deem(&mut self, id: u64, bookmark: &Bookmark) -> Result<String> {
+        let out = deem_span(&mut self.book, id, bookmark)?;
+        self.pending_prod = false;
+        Ok(out)
+    }
+
     fn establish(&mut self, id: u64) {
         if !self.established.contains(&id) {
             self.established.push(id);
@@ -122,110 +251,6 @@ impl Engine {
     pub fn dismiss(&mut self, id: u64) {
         self.established.retain(|&e| e != id);
     }
-
-    /// Promote a compartment to the preamble and return its rendered
-    /// bookmark plus full thread text (so the model can just know).
-    pub fn open(&mut self, id: u64) -> Result<Option<String>> {
-        let Some(meta) = compartment(&self.book, id).cloned() else {
-            return Ok(None);
-        };
-        self.establish(id);
-        let mut out = render_bookmark(&meta);
-        if let Some(thread) = read_compartment(&self.book, id)? {
-            out.push_str("\n\n--- thread ---\n\n");
-            out.push_str(&render_compartment(&thread));
-        }
-        Ok(Some(out))
-    }
-
-    /// Append this sitting's new turns to a compartment and refresh its
-    /// distilled bookmark. Turns already recorded in the compartment are
-    /// skipped (continuations don't duplicate). Promotes it to the
-    /// preamble. Returns a short confirmation.
-    pub fn append(
-        &mut self,
-        id: u64,
-        bookmark: &Bookmark,
-        session: &[ApiMessage],
-    ) -> Result<String> {
-        let existing = read_compartment(&self.book, id)?;
-        let mut seen: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-        if let Some(msgs) = &existing {
-            for m in msgs {
-                seen.insert((m.role.clone(), m.content.clone()));
-            }
-        }
-        let mut fresh: Vec<Message> = Vec::new();
-        for m in session {
-            if m.role == "system" {
-                continue;
-            }
-            let key = (m.role.clone(), m.content.clone());
-            if seen.insert(key.clone()) {
-                fresh.push(Message {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    ts: now_ms(),
-                });
-            }
-        }
-        let segs = append_segment(&mut self.book, id, &fresh)?;
-        update_bookmark(&mut self.book, id, bookmark)?;
-        self.establish(id);
-        Ok(format!(
-            "appended {} new message(s) to compartment #{id} (segment {segs}); bookmark refreshed",
-            fresh.len()
-        ))
-    }
-}
-
-/// The columnar index schema — metadata only, no content.
-fn index_schema() -> SchemaRef {
-    let fields = vec![
-        Field::new("compartment_id", DataType::Int64, false),
-        Field::new("opened_at", DataType::Int64, false),
-        Field::new("updated_at", DataType::Int64, false),
-        Field::new("topic", DataType::Utf8, true),
-        Field::new("tags", DataType::Utf8, true),
-        Field::new("people", DataType::Utf8, true),
-        Field::new("facts", DataType::Utf8, true),
-        Field::new("plans", DataType::Utf8, true),
-        Field::new("open", DataType::Utf8, true),
-        Field::new("life_tokens", DataType::Int64, false),
-    ];
-    Schema::new(fields).into()
-}
-
-/// The content schema — message rows for one segment of a compartment.
-fn segment_schema() -> SchemaRef {
-    let fields = vec![
-        Field::new("compartment_id", DataType::Int64, false),
-        Field::new("seq", DataType::Int64, false),
-        Field::new("role", DataType::Utf8, true),
-        Field::new("content", DataType::Utf8, true),
-        Field::new("ts", DataType::Int64, false),
-    ];
-    Schema::new(fields).into()
-}
-
-fn join(list: &[String]) -> String {
-    list.join(",")
-}
-
-fn split(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Open (or create) the book in `dir`.
@@ -238,6 +263,7 @@ pub fn open_book(dir: &Path) -> Result<Book> {
         vec![]
     };
     let next_id = index.iter().map(|m| m.id + 1).max().unwrap_or(1);
+    let next_row = read_stream_max_row(dir)?;
 
     let summary_path = dir.join("life_summary.txt");
     let life_summary = std::fs::read_to_string(&summary_path).unwrap_or_default();
@@ -245,14 +271,22 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     Ok(Book {
         dir: dir.to_path_buf(),
         next_id,
+        next_row,
+        // On a fresh open the frontier is the whole stream (everything is
+        // unattributed); on a continued open the frontier is restored to
+        // the end so we never re-deem already-attributed rows.
+        watermark: next_row,
+        unattr_tokens: 0,
+        unattr_turns: 0,
         index,
+        pending: vec![],
         life_summary,
     })
 }
 
 /// Start a brand-new compartment and return its id. The thread is open
-/// ended: it will accumulate segments forever. The distilled state starts
-/// empty and is set by `update_bookmark` as the thread develops.
+/// ended: it will accumulate spans forever. The distilled state starts
+/// empty and is set when the agent deems into it.
 pub fn new_compartment(book: &mut Book) -> Result<u64> {
     let id = book.next_id;
     book.next_id += 1;
@@ -267,28 +301,49 @@ pub fn new_compartment(book: &mut Book) -> Result<u64> {
         facts: vec![],
         plans: vec![],
         open: vec![],
+        spans: vec![],
         life_tokens: 0,
     });
     write_index(book)?;
     Ok(id)
 }
 
-/// Append one chunk of a thread as a new segment file for a compartment.
-/// Returns the number of segments the compartment now has.
-pub fn append_segment(book: &mut Book, id: u64, messages: &[Message]) -> Result<u64> {
-    let seg = next_segment(book, id)?;
+/// Attribute the unattributed span to a compartment: record the span,
+/// refresh the distilled bookmark, add its weight, flush the rows to the
+/// stream, and advance the watermark. The compartment owns no rows — it
+/// only points into the stream.
+pub fn deem_span(book: &mut Book, id: u64, bookmark: &Bookmark) -> Result<String> {
     let Some(meta) = book.index.iter_mut().find(|m| m.id == id) else {
-        return Ok(seg); // unknown compartment — nothing appended
+        return Ok(format!("unknown compartment #{id}"));
     };
-    meta.life_tokens += messages.iter().map(|m| m.content.len() as i64).sum::<i64>();
+    let start = book.watermark;
+    let end = book.next_row;
+    if start >= end {
+        return Ok(format!("no new turns to deem into #{id}"));
+    }
+    meta.spans.push((start, end));
+    merge_spans(&mut meta.spans);
+    meta.life_tokens += book.unattr_tokens;
+    meta.topic = bookmark.topic.clone();
+    meta.tags = bookmark.tags.clone();
+    meta.people = bookmark.people.clone();
+    meta.facts = bookmark.facts.clone();
+    meta.plans = bookmark.plans.clone();
+    meta.open = bookmark.open.clone();
     meta.updated_at = now_ms();
-    write_segment(book, id, seg, messages)?;
+    flush_stream(book)?;
+    book.watermark = end;
+    book.unattr_tokens = 0;
+    book.unattr_turns = 0;
     write_index(book)?;
-    Ok(seg + 1)
+    Ok(format!(
+        "deemed rows {start}..{end} into compartment #{id}; bookmark refreshed"
+    ))
 }
 
-/// Refresh a compartment's distilled state (and updated_at). Called as the
-/// thread develops — the AI writes its own bookmark, the engine stores it.
+/// Refresh a compartment's distilled state (and updated_at) without
+/// deeming new rows. Called when the thread is re-established and the AI
+/// re-distills what matters.
 pub fn update_bookmark(book: &mut Book, id: u64, bookmark: &Bookmark) -> Result<()> {
     let Some(meta) = book.index.iter_mut().find(|m| m.id == id) else {
         return Ok(());
@@ -314,22 +369,30 @@ pub fn compartment(book: &Book, id: u64) -> Option<&CompartmentMeta> {
     book.index.iter().find(|m| m.id == id)
 }
 
-/// Read a compartment's full thread — all segments, concatenated in order.
+/// Read a compartment's full thread — every row its spans point into the
+/// stream, concatenated in order.
 pub fn read_compartment(book: &Book, id: u64) -> Result<Option<Vec<Message>>> {
-    let dir = compartment_dir(book, id);
-    if !dir.exists() {
+    let Some(meta) = compartment(book, id) else {
         return Ok(None);
+    };
+    if meta.spans.is_empty() {
+        return Ok(Some(vec![]));
     }
-    let mut all = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "parquet").unwrap_or(false) {
-            all.extend(read_segment(&path)?);
+    let rows = read_stream(book)?;
+    let mut out = Vec::new();
+    for (s, e) in &meta.spans {
+        for r in &rows {
+            if r.row_id >= *s && r.row_id < *e {
+                out.push(Message {
+                    role: r.role.clone(),
+                    content: r.content.clone(),
+                    ts: r.ts,
+                });
+            }
         }
     }
-    all.sort_by_key(|m| m.ts);
-    Ok(Some(all))
+    out.sort_by_key(|m| m.ts);
+    Ok(Some(out))
 }
 
 /// The preamble: render a compartment's distilled state to the prose the
@@ -413,12 +476,12 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
     hits.into_iter().map(|(m, _)| m).collect()
 }
 
-fn compartment_dir(book: &Book, id: u64) -> PathBuf {
-    book.dir.join("compartments").join(format!("{id:04}"))
+fn stream_dir(book: &Book) -> PathBuf {
+    book.dir.join("stream")
 }
 
-fn next_segment(book: &Book, id: u64) -> Result<u64> {
-    let dir = compartment_dir(book, id);
+fn next_stream_segment(book: &Book) -> Result<u64> {
+    let dir = stream_dir(book);
     if !dir.exists() {
         return Ok(0);
     }
@@ -435,7 +498,99 @@ fn next_segment(book: &Book, id: u64) -> Result<u64> {
     Ok(max + 1)
 }
 
+fn flush_stream(book: &mut Book) -> Result<()> {
+    if book.pending.is_empty() {
+        return Ok(());
+    }
+    let seg = next_stream_segment(book)?;
+    write_stream_segment(book, seg, &book.pending)?;
+    book.pending.clear();
+    Ok(())
+}
+
+fn read_stream(book: &Book) -> Result<Vec<StreamRow>> {
+    let mut all = Vec::new();
+    let dir = stream_dir(book);
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                all.extend(read_stream_segment(&path)?);
+            }
+        }
+    }
+    all.extend(book.pending.iter().cloned());
+    all.sort_by_key(|r| r.row_id);
+    Ok(all)
+}
+
+/// The highest row id already on disk — so the frontier resumes correctly
+/// across restarts.
+fn read_stream_max_row(dir: &Path) -> Result<u64> {
+    let stream_dir = dir.join("stream");
+    if !stream_dir.exists() {
+        return Ok(0);
+    }
+    let mut max = 0u64;
+    for entry in std::fs::read_dir(&stream_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+            let seg = read_stream_segment(&path)?;
+            for r in &seg {
+                max = max.max(r.row_id + 1);
+            }
+        }
+    }
+    Ok(max)
+}
+
+fn merge_spans(spans: &mut Vec<(u64, u64)>) {
+    spans.sort_by_key(|s| s.0);
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (s, e) in spans.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    *spans = merged;
+}
+
 // ---- parquet read/write ----------------------------------------------
+
+/// The navigation schema — distilled state + spans, no content.
+fn index_schema() -> SchemaRef {
+    let fields = vec![
+        Field::new("compartment_id", DataType::Int64, false),
+        Field::new("opened_at", DataType::Int64, false),
+        Field::new("updated_at", DataType::Int64, false),
+        Field::new("topic", DataType::Utf8, true),
+        Field::new("tags", DataType::Utf8, true),
+        Field::new("people", DataType::Utf8, true),
+        Field::new("facts", DataType::Utf8, true),
+        Field::new("plans", DataType::Utf8, true),
+        Field::new("open", DataType::Utf8, true),
+        Field::new("spans", DataType::Utf8, true),
+        Field::new("life_tokens", DataType::Int64, false),
+    ];
+    Schema::new(fields).into()
+}
+
+/// The stream schema — one row per turn, ever.
+fn stream_schema() -> SchemaRef {
+    let fields = vec![
+        Field::new("row_id", DataType::Int64, false),
+        Field::new("role", DataType::Utf8, true),
+        Field::new("content", DataType::Utf8, true),
+        Field::new("ts", DataType::Int64, false),
+    ];
+    Schema::new(fields).into()
+}
 
 fn write_index(book: &Book) -> Result<()> {
     let ids = Int64Array::from(
@@ -465,6 +620,12 @@ fn write_index(book: &Book) -> Result<()> {
     let open = StringArray::from(
         book.index.iter().map(|m| join(&m.open)).collect::<Vec<String>>(),
     );
+    let spans = StringArray::from(
+        book.index
+            .iter()
+            .map(|m| join_spans(&m.spans))
+            .collect::<Vec<String>>(),
+    );
     let tokens = Int64Array::from(
         book.index.iter().map(|m| m.life_tokens).collect::<Vec<_>>(),
     );
@@ -481,6 +642,7 @@ fn write_index(book: &Book) -> Result<()> {
             std::sync::Arc::new(facts),
             std::sync::Arc::new(plans),
             std::sync::Arc::new(open),
+            std::sync::Arc::new(spans),
             std::sync::Arc::new(tokens),
         ],
     )?;
@@ -508,6 +670,7 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
         let facts = batch.column_by_name("facts").unwrap();
         let plans = batch.column_by_name("plans").unwrap();
         let open = batch.column_by_name("open").unwrap();
+        let spans = batch.column_by_name("spans").unwrap();
         let tokens = batch.column_by_name("life_tokens").unwrap();
         for i in 0..batch.num_rows() {
             metas.push(CompartmentMeta {
@@ -520,6 +683,7 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
                 facts: split(&as_str(facts, i)),
                 plans: split(&as_str(plans, i)),
                 open: split(&as_str(open, i)),
+                spans: split_spans(&as_str(spans, i)),
                 life_tokens: as_i64(tokens, i),
             });
         }
@@ -527,25 +691,18 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     Ok(metas)
 }
 
-fn write_segment(book: &Book, id: u64, seg: u64, messages: &[Message]) -> Result<()> {
-    let dir = compartment_dir(book, id);
+fn write_stream_segment(book: &Book, seg: u64, rows: &[StreamRow]) -> Result<()> {
+    let dir = stream_dir(book);
     std::fs::create_dir_all(&dir)?;
-    let n = messages.len();
-    let ids = Int64Array::from(vec![id as i64; n]);
-    let seq = Int64Array::from((0..n as i64).collect::<Vec<_>>());
-    let role = StringArray::from(
-        messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
-    );
-    let content = StringArray::from(
-        messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
-    );
-    let ts = Int64Array::from(messages.iter().map(|m| m.ts).collect::<Vec<_>>());
+    let ids = Int64Array::from(rows.iter().map(|r| r.row_id as i64).collect::<Vec<_>>());
+    let role = StringArray::from(rows.iter().map(|r| r.role.as_str()).collect::<Vec<_>>());
+    let content = StringArray::from(rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>());
+    let ts = Int64Array::from(rows.iter().map(|r| r.ts).collect::<Vec<_>>());
 
     let batch = RecordBatch::try_new(
-        segment_schema(),
+        stream_schema(),
         vec![
             std::sync::Arc::new(ids),
-            std::sync::Arc::new(seq),
             std::sync::Arc::new(role),
             std::sync::Arc::new(content),
             std::sync::Arc::new(ts),
@@ -553,31 +710,33 @@ fn write_segment(book: &Book, id: u64, seg: u64, messages: &[Message]) -> Result
     )?;
 
     let file = std::fs::File::create(dir.join(format!("{seg:04}.parquet")))?;
-    let writer = ArrowWriter::try_new(file, segment_schema(), None)?;
+    let writer = ArrowWriter::try_new(file, stream_schema(), None)?;
     let mut writer = writer;
     writer.write(&batch)?;
     let _ = writer.close()?;
     Ok(())
 }
 
-fn read_segment(path: &Path) -> Result<Vec<Message>> {
+fn read_stream_segment(path: &Path) -> Result<Vec<StreamRow>> {
     let file = std::fs::File::open(path)?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-    let mut msgs = Vec::new();
+    let mut rows = Vec::new();
     for batch in reader {
         let batch = batch?;
+        let ids = batch.column_by_name("row_id").unwrap();
         let role = batch.column_by_name("role").unwrap();
         let content = batch.column_by_name("content").unwrap();
         let ts = batch.column_by_name("ts").unwrap();
         for i in 0..batch.num_rows() {
-            msgs.push(Message {
+            rows.push(StreamRow {
+                row_id: as_i64(ids, i) as u64,
                 role: as_str(role, i),
                 content: as_str(content, i),
                 ts: as_i64(ts, i),
             });
         }
     }
-    Ok(msgs)
+    Ok(rows)
 }
 
 fn as_i64(col: &arrow_array::ArrayRef, i: usize) -> i64 {
@@ -597,6 +756,42 @@ fn as_str(col: &arrow_array::ArrayRef, i: usize) -> String {
         .to_string()
 }
 
+fn join(list: &[String]) -> String {
+    list.join(",")
+}
+
+fn split(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn join_spans(spans: &[(u64, u64)]) -> String {
+    spans
+        .iter()
+        .map(|(s, e)| format!("{s}:{e}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn split_spans(s: &str) -> Vec<(u64, u64)> {
+    s.split(',')
+        .filter_map(|t| {
+            let (a, b) = t.split_once(':')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,8 +800,9 @@ mod tests {
         std::env::temp_dir().join(format!("wryme_book_{tag}_{}", std::process::id()))
     }
 
-    fn msg(role: &str, content: &str) -> Message {
-        Message {
+    fn msg(role: &str, content: &str, row_id: u64) -> StreamRow {
+        StreamRow {
+            row_id,
             role: role.to_string(),
             content: content.to_string(),
             ts: now_ms(),
@@ -614,112 +810,138 @@ mod tests {
     }
 
     #[test]
-    fn compartment_appends_segments_open_ended() {
-        let dir = tmpdir("segments");
+    fn stream_is_continuous_and_never_partitioned() {
+        let dir = tmpdir("stream");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-        let id = new_compartment(&mut book).unwrap();
+        book.pending.push(msg("user", "hello", 0));
+        book.next_row += 1;
+        book.pending.push(msg("assistant", "hi there", 1));
+        book.next_row += 1;
+        flush_stream(&mut book).unwrap();
+        flush_stream(&mut book).unwrap(); // empty — no-op
 
-        // First sitting: two messages.
-        let segs = append_segment(
-            &mut book,
-            id,
-            &[msg("user", "let's plan Lisbon"), msg("assistant", "May is nice")],
-        )
-        .unwrap();
-        assert_eq!(segs, 1);
+        // One continuous record, in order, regardless of compartment.
+        let rows = read_stream(&book).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content, "hello");
+        assert_eq!(rows[1].content, "hi there");
 
-        // A second sitting, days later, on the same open-ended thread.
-        let segs2 = append_segment(
-            &mut book,
-            id,
-            &[msg("user", "flights got cheaper"), msg("assistant", "book them")],
-        )
-        .unwrap();
-        assert_eq!(segs2, 2);
-
-        update_bookmark(
-            &mut book,
-            id,
-            &Bookmark {
-                topic: "Lisbon trip".to_string(),
-                tags: vec!["travel".to_string(), "lisbon".to_string()],
-                people: vec!["grandma".to_string()],
-                facts: vec!["flights cheaper".to_string()],
-                plans: vec!["book flights".to_string()],
-                open: vec!["comparing prices".to_string()],
-            },
-        )
-        .unwrap();
-
-        // Reload from disk and read the whole thread back, in order.
+        // Restart: the frontier resumes at the end of what is on disk.
         let book2 = open_book(&dir).unwrap();
-        let all = read_compartment(&book2, id).unwrap().unwrap();
-        assert_eq!(all.len(), 4);
-        assert_eq!(all[0].content, "let's plan Lisbon");
-        assert_eq!(all[2].content, "flights got cheaper");
-
-        let metas = index_entries(&book2);
-        assert_eq!(metas.len(), 1);
-        assert_eq!(metas[0].topic, "Lisbon trip");
-        assert_eq!(metas[0].open, vec!["comparing prices"]);
-        assert_eq!(metas[0].life_tokens, 56); // sum of content byte lengths
-        // Open ended: no closed_at anywhere.
-        assert!(render_bookmark(&metas[0]).contains("Lisbon trip"));
-        assert!(render_bookmark(&metas[0]).contains("comparing prices"));
+        assert_eq!(book2.next_row, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn match_compartments_ranks_by_keyword_overlap() {
-        let dir = tmpdir("match");
+    fn deem_attributes_spans_and_multiple_compartments_interleave() {
+        let dir = tmpdir("deem");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-        let a = new_compartment(&mut book).unwrap();
-        update_bookmark(
-            &mut book,
-            a,
-            &Bookmark {
-                topic: "Lisbon trip".to_string(),
-                tags: vec!["travel".to_string(), "lisbon".to_string()],
-                facts: vec!["may".to_string()],
-                ..Bookmark::default()
-            },
-        )
-        .unwrap();
-        let b = new_compartment(&mut book).unwrap();
-        update_bookmark(
-            &mut book,
-            b,
-            &Bookmark {
-                topic: "Miso the cat".to_string(),
-                tags: vec!["cat".to_string(), "vet".to_string()],
-                facts: vec!["vet tuesday".to_string()],
-                ..Bookmark::default()
-            },
-        )
-        .unwrap();
 
-        let hits = match_compartments(&book, "lisbon may dates");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].topic, "Lisbon trip");
+        let garden = new_compartment(&mut book).unwrap();
+        let neighbours = new_compartment(&mut book).unwrap();
 
-        let cat = match_compartments(&book, "take miso to the vet");
-        assert_eq!(cat[0].topic, "Miso the cat");
+        // Turns 0..3 about the garden, 3..6 about the neighbours.
+        for c in ["soil", "roses", "shade"] {
+            book.pending.push(msg("user", c, book.next_row));
+            book.next_row += 1;
+            book.unattr_turns += 1;
+            book.unattr_tokens += c.len() as i64;
+        }
+        deem_span(&mut book, garden, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+
+        for c in ["dog", "fence", "noise"] {
+            book.pending.push(msg("user", c, book.next_row));
+            book.next_row += 1;
+            book.unattr_turns += 1;
+            book.unattr_tokens += c.len() as i64;
+        }
+        deem_span(&mut book, neighbours, &Bookmark { topic: "neighbours".into(), ..Default::default() }).unwrap();
+
+        // Back to the garden later: a second, non-contiguous span.
+        for c in ["compost", "mulch"] {
+            book.pending.push(msg("user", c, book.next_row));
+            book.next_row += 1;
+            book.unattr_turns += 1;
+            book.unattr_tokens += c.len() as i64;
+        }
+        deem_span(&mut book, garden, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+
+        let g = compartment(&book, garden).unwrap();
+        let n = compartment(&book, neighbours).unwrap();
+        assert_eq!(g.spans, vec![(0, 3), (6, 8)]); // interleaved, not merged
+        assert_eq!(n.spans, vec![(3, 6)]);
+
+        let g_thread = read_compartment(&book, garden).unwrap().unwrap();
+        assert_eq!(g_thread.len(), 5); // rows 0..3 + 6..8
+        assert_eq!(g_thread[0].content, "soil");
+        assert_eq!(g_thread[4].content, "mulch");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ids_are_monotonic_after_reopen() {
-        let dir = tmpdir("ids");
+    fn deem_advances_watermark_and_skips_empty() {
+        let dir = tmpdir("watermark");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
         let id = new_compartment(&mut book).unwrap();
-        append_segment(&mut book, id, &[msg("user", "hi")]).unwrap();
-        drop(book);
-        let mut book2 = open_book(&dir).unwrap();
-        let id2 = new_compartment(&mut book2).unwrap();
-        assert!(id2 > id);
+
+        assert!(deem_span(&mut book, id, &Bookmark::default()).unwrap().contains("no new turns"));
+        assert_eq!(book.watermark, 0);
+
+        book.pending.push(msg("user", "one", book.next_row));
+        book.next_row += 1;
+        book.unattr_turns += 1;
+        book.unattr_tokens += 3;
+        deem_span(&mut book, id, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap();
+        assert_eq!(book.watermark, 1);
+        assert_eq!(book.unattr_tokens, 0);
+        assert_eq!(compartment(&book, id).unwrap().spans, vec![(0, 1)]);
+
+        // Nothing new to deem now.
+        assert!(deem_span(&mut book, id, &Bookmark::default()).unwrap().contains("no new turns"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_prod_fires_only_when_weightful_and_unshielded() {
+        let dir = tmpdir("prod");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = open_engine(&dir).unwrap();
+
+        // A few short turns: not weightful yet.
+        for _ in 0..4 {
+            e.record_turn("user", "a");
+        }
+        assert_eq!(e.take_prod(), None);
+
+        // Enough turns + tokens, no lookup shield → prod.
+        for _ in 0..40 {
+            e.record_turn("user", "this is a long enough sentence to count as weight");
+        }
+        assert!(e.take_prod().is_some());
+
+        // A lookup shields it.
+        let mut e2 = open_engine(&dir).unwrap();
+        e2.record_turn("user", "this is a long enough sentence to count as weight");
+        e2.note_lookup();
+        e2.record_turn("user", "this is a long enough sentence to count as weight");
+        e2.record_turn("user", "this is a long enough sentence to count as weight");
+        // still within the lookup gap
+        assert_eq!(e2.take_prod(), None);
+
+        // Deeming clears the prod.
+        let mut e3 = open_engine(&dir).unwrap();
+        for _ in 0..40 {
+            e3.record_turn("user", "this is a long enough sentence to count as weight");
+        }
+        let id = new_compartment(&mut e3.book).unwrap();
+        e3.deem(id, &Bookmark { topic: "x".into(), ..Default::default() }).unwrap();
+        assert_eq!(e3.take_prod(), None);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

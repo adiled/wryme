@@ -93,7 +93,7 @@ pub(crate) async fn stream(
 
         // Execute each tool call locally and append a `tool` result.
         for c in &calls {
-            let output = match tools::execute(&engine, &c.name, &c.arguments, &messages).await {
+            let output = match tools::execute(&engine, &c.name, &c.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };

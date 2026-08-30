@@ -107,7 +107,7 @@ pub(crate) async fn stream(
         // Execute each tool call locally and build the follow-up input.
         let mut next_input = Vec::new();
         for call in calls {
-            let output = match tools::execute(&engine, &call.name, &call.arguments, &messages).await {
+            let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
@@ -129,11 +129,14 @@ pub(crate) async fn stream(
     }
 }
 
-/// Prepend the established compartments' rendered bookmarks as `system`
-/// input items, so the model always sees its memory at the top.
+/// Prepend the established compartments' rendered bookmarks and any
+/// book-writing prod as `system` input items, so the model always sees
+/// its memory at the top. (The Responses protocol drops system messages
+/// other than the first instructions, so the engine's preamble must be
+/// injected as real input items each round.)
 fn prepend_preamble(input: &mut Vec<serde_json::Value>, engine: &Arc<Mutex<book::Engine>>) {
-    let preambles = if let Ok(e) = engine.lock() {
-        e.preamble()
+    let (preambles, prod) = if let Ok(mut e) = engine.lock() {
+        (e.preamble(), e.take_prod())
     } else {
         return;
     };
@@ -141,6 +144,9 @@ fn prepend_preamble(input: &mut Vec<serde_json::Value>, engine: &Arc<Mutex<book:
         .into_iter()
         .map(|p| serde_json::json!({ "type": "system", "content": p }))
         .collect();
+    if let Some(prod) = prod {
+        items.push(serde_json::json!({ "type": "system", "content": prod }));
+    }
     items.append(input);
     *input = items;
 }

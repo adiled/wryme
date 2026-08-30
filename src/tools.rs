@@ -17,7 +17,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::api::ApiMessage;
 use crate::book::{self, Bookmark};
 use crate::explore;
 use crate::jobs;
@@ -69,7 +68,6 @@ pub async fn execute(
     engine: &Arc<Mutex<book::Engine>>,
     name: &str,
     arguments: &str,
-    session: &[ApiMessage],
 ) -> Option<String> {
     if name == shell_name() {
         let command = extract_command(arguments);
@@ -83,7 +81,7 @@ pub async fn execute(
         return explore::execute(name, arguments).await;
     }
     if name == book_name() {
-        return Some(book_execute(engine, arguments, session).await);
+        return Some(book_execute(engine, arguments).await);
     }
     None
 }
@@ -187,12 +185,14 @@ pub const BOOK_DESCRIPTION: &str = "\
 Quiet memory — this is how you remember across windows and restarts. \
 Call it in the flow, without announcing it. Actions:\n\
   find    {query} — search memory for a thread. Returns compartment ids.\n  open    {id} — pull a compartment into this conversation as its \
-          preamble; you get its distilled state and the whole thread.\n  read    {id} — read a compartment's thread without promoting it.\n  new     — start a fresh compartment for a brand-new thread.\n  append  {id, topic, tags, people, facts, plans, open} — file this \
-          sitting's turns into the compartment and refresh its distilled \
-          bookmark (what you remember, so the next visit starts where we \
-          left off).\n  dismiss {id} — stop carrying a compartment's preamble.\n\nUse find when someone says \"remember when…\" or the early words could \
+          preamble; you get its distilled state and the whole thread.\n  read    {id} — read a compartment's thread without promoting it.\n  new     — start a fresh compartment for a brand-new thread.\n  deem    {id, topic, tags, people, facts, plans, open} — attribute this \
+          stretch of conversation to the compartment and refresh its \
+          distilled bookmark (what you remember, so the next visit starts \
+          where we left off). The engine writes every turn continuously; \
+          deem points the new rows at a compartment. A thread can be \
+          deemed into several compartments over its lifetime.\n  dismiss {id} — stop carrying a compartment's preamble.\n\nUse find when someone says \"remember when…\" or the early words could \
 match an old thread; open what matches. When a thread wraps or drifts, \
-append it so it is never lost. Keep the distilled bookmark short — \
+deem it so it is never lost. Keep the distilled bookmark short — \
 people, facts, plans, and what is still open.";
 
 pub fn book_parameters() -> serde_json::Value {
@@ -201,7 +201,7 @@ pub fn book_parameters() -> serde_json::Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["find", "open", "read", "new", "append", "dismiss"],
+                "enum": ["find", "open", "read", "new", "deem", "dismiss"],
                 "description": "what to do"
             },
             "query": {
@@ -210,7 +210,7 @@ pub fn book_parameters() -> serde_json::Value {
             },
             "id": {
                 "type": "integer",
-                "description": "compartment id (for open/read/append/dismiss)"
+                "description": "compartment id (for open/read/deem/dismiss)"
             },
             "topic": { "type": "string", "description": "one-line theme" },
             "tags": {
@@ -248,12 +248,12 @@ pub fn is_book_tool(name: &str) -> bool {
     name == BOOK_NAME
 }
 
-/// Run the invisible book tool. Locks the shared engine; `session` is
-/// this turn's messages, used by `append` to file the thread away.
+/// Run the invisible book tool. Locks the shared engine. The engine
+/// records every turn itself, so `deem` just points the unattributed
+/// rows at a compartment.
 async fn book_execute(
     engine: &Arc<Mutex<book::Engine>>,
     arguments: &str,
-    session: &[ApiMessage],
 ) -> String {
     let v: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(v) => v,
@@ -263,7 +263,8 @@ async fn book_execute(
     match action {
         "find" => {
             let query = v.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
-            let e = engine.lock().unwrap();
+            let mut e = engine.lock().unwrap();
+            e.note_lookup();
             let hits = book::match_compartments(&e.book, &query);
             render_find(&query, &hits)
         }
@@ -292,11 +293,11 @@ async fn book_execute(
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
             }
         }
-        "append" => {
+        "deem" => {
             let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
             let bookmark = bookmark_from(&v);
             let mut e = engine.lock().unwrap();
-            match e.append(id, &bookmark, session) {
+            match e.deem(id, &bookmark) {
                 Ok(out) => out,
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
             }
@@ -418,35 +419,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn book_tool_new_append_find_open_roundtrip() {
+    async fn book_tool_new_deem_find_open_roundtrip() {
         let dir = std::env::temp_dir().join(format!("wryme_btool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let engine = Arc::new(Mutex::new(
-            book::open_engine(&dir).unwrap(),
-        ));
-        let session = [
-            ApiMessage { role: "user".into(), content: "let's plan lisbon".into() },
-            ApiMessage { role: "assistant".into(), content: "may is nice".into() },
-        ];
+        let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
 
-        let out = execute(&engine, book_name(), "{\"action\":\"new\"}", &[]).await;
+        let out = execute(&engine, book_name(), "{\"action\":\"new\"}").await;
         let id = out.unwrap().split('#').nth(1).unwrap().parse::<u64>().unwrap();
+
+        {
+            let mut e = engine.lock().unwrap();
+            e.record_turn("user", "let's plan lisbon");
+            e.record_turn("assistant", "may is nice");
+        }
 
         let out = execute(
             &engine,
             book_name(),
-            &format!(r#"{{"action":"append","id":{id},"topic":"Lisbon trip","open":["comparing prices"]}}"#),
-            &session,
+            &format!(r#"{{"action":"deem","id":{id},"topic":"Lisbon trip","open":["comparing prices"]}}"#),
         )
         .await
         .unwrap();
-        assert!(out.contains("appended 2 new message(s)"));
+        assert!(out.contains("deemed rows 0..2"));
 
         let out = execute(
             &engine,
             book_name(),
             "{\"action\":\"find\",\"query\":\"lisbon\"}",
-            &[],
         )
         .await
         .unwrap();
@@ -456,7 +455,6 @@ mod tests {
             &engine,
             book_name(),
             &format!(r#"{{"action":"open","id":{id}}}"#),
-            &[],
         )
         .await
         .unwrap();
@@ -466,26 +464,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn book_tool_append_skips_duplicate_turns() {
+    async fn book_tool_deem_advances_watermark() {
         let dir = std::env::temp_dir().join(format!("wryme_btool2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
-        let session = [
-            ApiMessage { role: "user".into(), content: "hello".into() },
-            ApiMessage { role: "assistant".into(), content: "hi".into() },
-        ];
-        let id = execute(&engine, book_name(), "{\"action\":\"new\"}", &[]).await.unwrap()
+        let id = execute(&engine, book_name(), "{\"action\":\"new\"}").await.unwrap()
             .split('#')
             .nth(1)
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        let args = format!(r#"{{"action":"append","id":{id},"topic":"t"}}"#);
-        let out = execute(&engine, book_name(), &args, &session).await.unwrap();
-        assert!(out.contains("appended 2"));
-        // Same sitting again — nothing new to file.
-        let out2 = execute(&engine, book_name(), &args, &session).await.unwrap();
-        assert!(out2.contains("appended 0"));
+
+        {
+            let mut e = engine.lock().unwrap();
+            e.record_turn("user", "hello");
+        }
+        let out = execute(
+            &engine,
+            book_name(),
+            &format!(r#"{{"action":"deem","id":{id},"topic":"t"}}"#),
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("deemed rows 0..1"));
+
+        {
+            let mut e = engine.lock().unwrap();
+            e.record_turn("user", "hi");
+        }
+        let out2 = execute(
+            &engine,
+            book_name(),
+            &format!(r#"{{"action":"deem","id":{id},"topic":"t"}}"#),
+        )
+        .await
+        .unwrap();
+        assert!(out2.contains("deemed rows 1..2"));
+
+        // Nothing new to deem now.
+        let out3 = execute(
+            &engine,
+            book_name(),
+            &format!(r#"{{"action":"deem","id":{id},"topic":"t"}}"#),
+        )
+        .await
+        .unwrap();
+        assert!(out3.contains("no new turns"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

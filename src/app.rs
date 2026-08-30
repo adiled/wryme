@@ -213,6 +213,16 @@ impl App {
             current_tool: None,
             tool_results: Vec::new(),
         });
+        // The engine records every turn into the continuous stream, and
+        // re-checks whether an unattributed thread is weightful enough to
+        // prod the agent into deeming it.
+        if let Some(last) = self.messages.last() {
+            if last.role == Role::User {
+                if let Ok(mut e) = self.engine.lock() {
+                    e.record_turn("user", &last.content);
+                }
+            }
+        }
     }
 
     pub fn begin_assistant(&mut self) {
@@ -291,6 +301,18 @@ impl App {
             }
         }
 
+        // The engine records the finished assistant turn into the
+        // continuous stream (the user turn was already recorded at push
+        // time), so the whole thread lives in the book.
+        if let Some(i) = just_finished {
+            let m = &self.messages[i];
+            if m.role == Role::Assistant && !m.content.is_empty() {
+                if let Ok(mut e) = self.engine.lock() {
+                    e.record_turn("assistant", &m.content);
+                }
+            }
+        }
+
         // If that turn produced nothing visible at all (no content, no brain,
         // no tool indicator), drop it so the screen does not show a confusing
         // empty bubble. Server hiccups and pre-delta errors are common causes.
@@ -325,11 +347,19 @@ impl App {
                 content: sys.clone(),
             });
         }
-        if let Ok(engine) = self.engine.lock() {
+        if let Ok(mut engine) = self.engine.lock() {
             for preamble in engine.preamble() {
                 out.push(ApiMessage {
                     role: "system".into(),
                     content: preamble,
+                });
+            }
+            // The book-writing prod: a quiet system reminder the engine
+            // slips the agent once when an unattributed thread is weightful.
+            if let Some(prod) = engine.take_prod() {
+                out.push(ApiMessage {
+                    role: "system".into(),
+                    content: prod,
                 });
             }
         }
