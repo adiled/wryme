@@ -1,5 +1,7 @@
 // Application state. The UI is a pure function of this.
 
+use std::sync::{Arc, Mutex};
+
 use crate::api::ApiMessage;
 use crate::book;
 use crate::popup::Popup;
@@ -127,12 +129,11 @@ pub struct App {
     pub active_origin: Option<String>,
     /// The popup overlay state (closed, browsing, or entering a name).
     pub popup: Popup,
-    /// The book: wryme's memory, a columnar Parquet store of pages.
-    /// Opened at launch; the engine consults/curates it as the next phase
-    /// of the design (close pages on thread drift, feed the index to the
-    /// model's context).
-    #[allow(dead_code)] // not yet read — awaits the engine wiring
-    pub book: book::Book,
+    /// The book engine: wryme's memory, a columnar Parquet store of
+    /// open-ended compartments. Shared across turns as an Arc<Mutex<..>>
+    /// so the streaming protocol and the background delivery can both
+    /// reach it (the invisible `book` tool locks it in the flow).
+    pub engine: Arc<Mutex<book::Engine>>,
 }
 
 /// The book lives at `~/.config/wryme/book`, like the shops and
@@ -172,7 +173,9 @@ impl App {
             active_shop,
             active_origin,
             popup: Popup::default(),
-            book: book::open_book(&book_dir()).expect("open book"),
+            engine: Arc::new(Mutex::new(
+                book::open_engine(&book_dir()).expect("open book"),
+            )),
         }
     }
 
@@ -310,7 +313,10 @@ impl App {
         }
     }
 
-    /// Build the wire-format message list to send upstream.
+    /// Build the wire-format message list to send upstream. The base
+    /// system prompt, then the established compartments' rendered
+    /// bookmarks as one system message each — the preamble — then the
+    /// live turns.
     pub fn api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if let Some(sys) = &self.system {
@@ -318,6 +324,14 @@ impl App {
                 role: "system".into(),
                 content: sys.clone(),
             });
+        }
+        if let Ok(engine) = self.engine.lock() {
+            for preamble in engine.preamble() {
+                out.push(ApiMessage {
+                    role: "system".into(),
+                    content: preamble,
+                });
+            }
         }
         for m in &self.messages {
             // Skip an empty streaming placeholder. We send the history

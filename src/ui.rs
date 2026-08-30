@@ -200,10 +200,34 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
             .add_modifier(Modifier::BOLD),
     )];
     if msg.streaming {
+        // Hidden tools (the bookkeeper and the phantom async checker) are
+        // treated visually, not as tools: the bookkeeper shows a quiet
+        // "reminiscing…" and no tool name; the checker is fully invisible.
+        // The app phase is still `Tinkering` — this is purely presentation.
+        let hidden = msg
+            .current_tool
+            .as_ref()
+            .map(|n| crate::tools::is_hidden_tool(n))
+            .unwrap_or(false);
+        let bookish = msg
+            .current_tool
+            .as_ref()
+            .map(|n| crate::tools::is_book_tool(n))
+            .unwrap_or(false);
         let label = match msg.phase {
             Phase::Writing => Some("  writing…"),
             Phase::Thinking => Some("  thinking…"),
-            Phase::Tinkering => Some("  tinkering…"),
+            Phase::Tinkering => {
+                if hidden {
+                    if bookish {
+                        Some("  reminiscing…")
+                    } else {
+                        None
+                    }
+                } else {
+                    Some("  tinkering…")
+                }
+            }
             // Initial state. No chunk has arrived yet. Suppress the
             // generic "streaming…" filler; the empty header reads as
             // "waiting" cleanly enough.
@@ -219,13 +243,19 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
 
     // Build the right side of the header. Tool name (if any, while streaming)
     // sits just to the left of the timestamp with two spaces between them.
+    // Hidden tools (bookkeeper / phantom checker) never show a name.
     let tool_span: Option<Span<'static>> = if msg.streaming {
-        msg.current_tool.as_ref().map(|name| {
-            Span::styled(
-                name.clone(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )
-        })
+        msg.current_tool
+            .as_ref()
+            .filter(|name| !crate::tools::is_hidden_tool(name))
+            .map(|name| {
+                Span::styled(
+                    name.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
     } else {
         None
     };

@@ -9,12 +9,15 @@
 // messages on a follow-up request, looping until the model stops calling
 // tools. This is the complete tool loop — not a stub.
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::book;
 use crate::shop::Shop;
 use crate::tools;
 use crate::station::Station;
@@ -31,10 +34,12 @@ pub(crate) async fn stream(
     shop: &Shop,
     station: &Station,
     messages: Vec<ApiMessage>,
+    engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     // Local conversation we grow across follow-up requests. Starts as the
-    // incoming history; tool calls and their results get appended here.
+    // incoming history (which already carries the preamble system
+    // messages); tool calls and their results get appended here.
     let mut conv: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
@@ -88,7 +93,7 @@ pub(crate) async fn stream(
 
         // Execute each tool call locally and append a `tool` result.
         for c in &calls {
-            let output = match tools::execute(&c.name, &c.arguments).await {
+            let output = match tools::execute(&engine, &c.name, &c.arguments, &messages).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };

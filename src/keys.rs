@@ -79,10 +79,11 @@ pub fn handle_key(
             let shop = app.active_shop.clone();
             let station = app.active_station.clone();
             let client = client.clone();
+            let engine = app.engine.clone();
             let tx = tx.clone();
             *in_flight = Some(tokio::spawn(async move {
                 client
-                    .stream_completion(shop, station, msgs, prev_id, tx)
+                    .stream_completion(shop, station, msgs, prev_id, engine, tx)
                     .await;
             }));
         }

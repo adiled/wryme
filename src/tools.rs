@@ -14,8 +14,11 @@
 // is auto-delivered back into the conversation. All three are advertised
 // and dispatched together.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::api::ApiMessage;
+use crate::book::{self, Bookmark};
 use crate::explore;
 use crate::jobs;
 
@@ -59,8 +62,15 @@ pub fn tool_parameters() -> serde_json::Value {
 
 const SHELL_TIMEOUT_SECS: u64 = 10;
 
-/// Dispatch a tool call by name to whichever local tool it names.
-pub async fn execute(name: &str, arguments: &str) -> Option<String> {
+/// Dispatch a tool call by name to whichever local tool it names. `engine`
+/// is the shared book engine (used by the invisible `book` tool) and
+/// `session` is this turn's assembled messages (used by `append`).
+pub async fn execute(
+    engine: &Arc<Mutex<book::Engine>>,
+    name: &str,
+    arguments: &str,
+    session: &[ApiMessage],
+) -> Option<String> {
     if name == shell_name() {
         let command = extract_command(arguments);
         return Some(run_shell(&command).await);
@@ -71,6 +81,9 @@ pub async fn execute(name: &str, arguments: &str) -> Option<String> {
     }
     if name == explore::tool_name() {
         return explore::execute(name, arguments).await;
+    }
+    if name == book_name() {
+        return Some(book_execute(engine, arguments, session).await);
     }
     None
 }
@@ -159,8 +172,182 @@ async fn run_shell(command: &str) -> String {
     }
 }
 
+/// The invisible bookkeeping tool: how the same agent that talks also
+/// remembers. Grandma never sees it — the UI treats it as a quiet
+/// "reminiscing…" instead of a tool. The model calls it in the flow to
+/// look up the book, promote a compartment to the preamble, or file the
+/// current thread away with its own distilled bookmark.
+pub const BOOK_NAME: &str = "book";
+
+pub fn book_name() -> &'static str {
+    BOOK_NAME
+}
+
+pub const BOOK_DESCRIPTION: &str = "\
+Quiet memory — this is how you remember across windows and restarts. \
+Call it in the flow, without announcing it. Actions:\n\
+  find    {query} — search memory for a thread. Returns compartment ids.\n  open    {id} — pull a compartment into this conversation as its \
+          preamble; you get its distilled state and the whole thread.\n  read    {id} — read a compartment's thread without promoting it.\n  new     — start a fresh compartment for a brand-new thread.\n  append  {id, topic, tags, people, facts, plans, open} — file this \
+          sitting's turns into the compartment and refresh its distilled \
+          bookmark (what you remember, so the next visit starts where we \
+          left off).\n  dismiss {id} — stop carrying a compartment's preamble.\n\nUse find when someone says \"remember when…\" or the early words could \
+match an old thread; open what matches. When a thread wraps or drifts, \
+append it so it is never lost. Keep the distilled bookmark short — \
+people, facts, plans, and what is still open.";
+
+pub fn book_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["find", "open", "read", "new", "append", "dismiss"],
+                "description": "what to do"
+            },
+            "query": {
+                "type": "string",
+                "description": "words to search memory for (for find)"
+            },
+            "id": {
+                "type": "integer",
+                "description": "compartment id (for open/read/append/dismiss)"
+            },
+            "topic": { "type": "string", "description": "one-line theme" },
+            "tags": {
+                "type": "array", "items": { "type": "string" },
+                "description": "searchable tags"
+            },
+            "people": {
+                "type": "array", "items": { "type": "string" }
+            },
+            "facts": {
+                "type": "array", "items": { "type": "string" }
+            },
+            "plans": {
+                "type": "array", "items": { "type": "string" }
+            },
+            "open": {
+                "type": "array", "items": { "type": "string" },
+                "description": "open threads — where we left off"
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+/// True for the tools grandma never sees: the bookkeeper and the phantom
+/// async-job checker. The UI suppresses the "tinkering…" label and the
+/// tool name for these.
+pub fn is_hidden_tool(name: &str) -> bool {
+    name == BOOK_NAME || name == check_name()
+}
+
+/// True for the bookkeeping tool specifically — the UI shows it as a
+/// quiet "reminiscing…" instead of a tool.
+pub fn is_book_tool(name: &str) -> bool {
+    name == BOOK_NAME
+}
+
+/// Run the invisible book tool. Locks the shared engine; `session` is
+/// this turn's messages, used by `append` to file the thread away.
+async fn book_execute(
+    engine: &Arc<Mutex<book::Engine>>,
+    arguments: &str,
+    session: &[ApiMessage],
+) -> String {
+    let v: serde_json::Value = match serde_json::from_str(arguments) {
+        Ok(v) => v,
+        Err(_) => return format!("{BOOK_NAME}: could not parse arguments"),
+    };
+    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    match action {
+        "find" => {
+            let query = v.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+            let e = engine.lock().unwrap();
+            let hits = book::match_compartments(&e.book, &query);
+            render_find(&query, &hits)
+        }
+        "open" => {
+            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let mut e = engine.lock().unwrap();
+            match e.open(id) {
+                Ok(Some(text)) => text,
+                Ok(None) => format!("unknown compartment #{id}"),
+                Err(err) => format!("{BOOK_NAME}: {err:#}"),
+            }
+        }
+        "read" => {
+            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let e = engine.lock().unwrap();
+            match book::read_compartment(&e.book, id) {
+                Ok(Some(msgs)) if !msgs.is_empty() => book::render_compartment(&msgs),
+                Ok(_) => format!("compartment #{id} has no thread yet"),
+                Err(err) => format!("{BOOK_NAME}: {err:#}"),
+            }
+        }
+        "new" => {
+            let mut e = engine.lock().unwrap();
+            match book::new_compartment(&mut e.book) {
+                Ok(id) => format!("created compartment #{id}"),
+                Err(err) => format!("{BOOK_NAME}: {err:#}"),
+            }
+        }
+        "append" => {
+            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let bookmark = bookmark_from(&v);
+            let mut e = engine.lock().unwrap();
+            match e.append(id, &bookmark, session) {
+                Ok(out) => out,
+                Err(err) => format!("{BOOK_NAME}: {err:#}"),
+            }
+        }
+        "dismiss" => {
+            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let mut e = engine.lock().unwrap();
+            e.dismiss(id);
+            format!("dropped compartment #{id} from the preamble")
+        }
+        _ => format!("{BOOK_NAME}: unknown action '{action}'"),
+    }
+}
+
+fn render_find(query: &str, hits: &[&book::CompartmentMeta]) -> String {
+    if hits.is_empty() {
+        return format!("no compartments match \"{query}\"");
+    }
+    let mut out = format!("compartments matching \"{query}\":\n");
+    for m in hits {
+        out.push_str(&format!(
+            "  #{} {} — open: {}\n",
+            m.id,
+            m.topic,
+            m.open.join(", ")
+        ));
+    }
+    out
+}
+
+fn bookmark_from(v: &serde_json::Value) -> Bookmark {
+    Bookmark {
+        topic: v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        tags: str_list(v, "tags"),
+        people: str_list(v, "people"),
+        facts: str_list(v, "facts"),
+        plans: str_list(v, "plans"),
+        open: str_list(v, "open"),
+    }
+}
+
+fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
 /// The JSON tool definitions advertised in both protocols: the shell
-/// tool, its discovery companion, and the async-job checker.
+/// tool, its discovery companion, the async-job checker, and the
+/// invisible bookkeeper.
 pub fn tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -175,11 +362,12 @@ pub fn tool_defs() -> Vec<serde_json::Value> {
             "description": explore::TOOL_DESCRIPTION,
             "parameters": explore::tool_parameters(),
         }),
+        serde_json::json!({ "type": "function", "name": check_name(), "description": CHECK_DESCRIPTION, "parameters": check_parameters() }),
         serde_json::json!({
             "type": "function",
-            "name": check_name(),
-            "description": CHECK_DESCRIPTION,
-            "parameters": check_parameters(),
+            "name": book_name(),
+            "description": BOOK_DESCRIPTION,
+            "parameters": book_parameters(),
         }),
     ]
 }
@@ -216,9 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_defs_advertises_three_tools() {
+    fn tool_defs_advertises_four_tools() {
         let defs = tool_defs();
-        assert_eq!(defs.len(), 3);
+        assert_eq!(defs.len(), 4);
         let names: Vec<&str> = defs
             .iter()
             .map(|d| d["name"].as_str().unwrap())
@@ -226,12 +414,79 @@ mod tests {
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&explore::tool_name().as_str()));
         assert!(names.contains(&check_name().as_str()));
+        assert!(names.contains(&book_name()));
     }
 
     #[tokio::test]
-    async fn execute_check_unknown_job() {
-        let out = execute(&check_name(), "{\"id\":9999}").await;
-        assert_eq!(out.as_deref(), Some("unknown job id 9999"));
+    async fn book_tool_new_append_find_open_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("wryme_btool_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Arc::new(Mutex::new(
+            book::open_engine(&dir).unwrap(),
+        ));
+        let session = [
+            ApiMessage { role: "user".into(), content: "let's plan lisbon".into() },
+            ApiMessage { role: "assistant".into(), content: "may is nice".into() },
+        ];
+
+        let out = execute(&engine, book_name(), "{\"action\":\"new\"}", &[]).await;
+        let id = out.unwrap().split('#').nth(1).unwrap().parse::<u64>().unwrap();
+
+        let out = execute(
+            &engine,
+            book_name(),
+            &format!(r#"{{"action":"append","id":{id},"topic":"Lisbon trip","open":["comparing prices"]}}"#),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("appended 2 new message(s)"));
+
+        let out = execute(
+            &engine,
+            book_name(),
+            "{\"action\":\"find\",\"query\":\"lisbon\"}",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("#") && out.contains("Lisbon trip"));
+
+        let out = execute(
+            &engine,
+            book_name(),
+            &format!(r#"{{"action":"open","id":{id}}}"#),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("let's plan lisbon"));
+        assert!(out.contains("comparing prices"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn book_tool_append_skips_duplicate_turns() {
+        let dir = std::env::temp_dir().join(format!("wryme_btool2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        let session = [
+            ApiMessage { role: "user".into(), content: "hello".into() },
+            ApiMessage { role: "assistant".into(), content: "hi".into() },
+        ];
+        let id = execute(&engine, book_name(), "{\"action\":\"new\"}", &[]).await.unwrap()
+            .split('#')
+            .nth(1)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let args = format!(r#"{{"action":"append","id":{id},"topic":"t"}}"#);
+        let out = execute(&engine, book_name(), &args, &session).await.unwrap();
+        assert!(out.contains("appended 2"));
+        // Same sitting again — nothing new to file.
+        let out2 = execute(&engine, book_name(), &args, &session).await.unwrap();
+        assert!(out2.contains("appended 0"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

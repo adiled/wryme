@@ -61,12 +61,15 @@ impl Client {
     /// Open a streaming completion against the given shop with the given
     /// station's model + dials. Each StreamEvent is sent on `tx` as it
     /// arrives; returns when the upstream stream closes or errors.
+    /// `engine` is the shared book engine, so the invisible `book` tool
+    /// can reach memory mid-turn.
     pub async fn stream_completion(
         &self,
         shop: Shop,
         station: Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
+        engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
         let result = match shop.protocol {
@@ -81,7 +84,7 @@ impl Client {
                 Ok(())
             }
             Protocol::ChatCompletions => {
-                crate::api_chat::stream(self, &shop, &station, messages, &tx).await
+                crate::api_chat::stream(self, &shop, &station, messages, engine, &tx).await
             }
             Protocol::Responses => {
                 crate::api_responses::stream(
@@ -90,6 +93,7 @@ impl Client {
                     &station,
                     messages,
                     previous_response_id,
+                    engine,
                     &tx,
                 )
                 .await

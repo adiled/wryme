@@ -3,6 +3,7 @@
 // readership". Grandma never sees it; she just has an AI that remembers.
 //
 // A compartment is an open-ended thread. It is NEVER closed: it
+#![allow(dead_code)] // life_summary / index_entries await the engine's full use
 // accumulates over time, across windows and reboots. Each time the thread
 // is continued, another segment file is appended; its index row always
 // holds the CURRENT distilled state, never a "closed" snapshot.
@@ -28,6 +29,8 @@ use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
+
+use crate::api::ApiMessage;
 
 /// The current distilled state of a compartment — what gets promoted to
 /// the conversation's preamble when the thread is re-established. Lists
@@ -75,6 +78,106 @@ pub struct Book {
     next_id: u64,
     index: Vec<CompartmentMeta>,
     life_summary: String,
+}
+
+/// The engine: the live, in-memory face of the book that the conversation
+/// talks to. Holds the book plus which compartments are currently
+/// promoted to the conversation's preamble. Shared across turns as an
+/// `Arc<Mutex<Engine>>` so the streaming protocol and the background
+/// delivery can both reach it.
+pub struct Engine {
+    pub book: Book,
+    /// Compartments currently promoted to the preamble. Their rendered
+    /// bookmarks are prepended as system messages to every request.
+    pub established: Vec<u64>,
+}
+
+/// Open the engine (book + empty preamble) in `dir`.
+pub fn open_engine(dir: &Path) -> Result<Engine> {
+    Ok(Engine {
+        book: open_book(dir)?,
+        established: vec![],
+    })
+}
+
+impl Engine {
+    /// The preamble: rendered bookmark prose for every established
+    /// compartment, in order. Prepended as system messages by the caller.
+    pub fn preamble(&self) -> Vec<String> {
+        self.established
+            .iter()
+            .filter_map(|id| compartment(&self.book, *id))
+            .map(render_bookmark)
+            .collect()
+    }
+
+    fn establish(&mut self, id: u64) {
+        if !self.established.contains(&id) {
+            self.established.push(id);
+        }
+    }
+
+    /// Drop a compartment from the preamble (it is never closed — it
+    /// just stops riding along in the conversation).
+    pub fn dismiss(&mut self, id: u64) {
+        self.established.retain(|&e| e != id);
+    }
+
+    /// Promote a compartment to the preamble and return its rendered
+    /// bookmark plus full thread text (so the model can just know).
+    pub fn open(&mut self, id: u64) -> Result<Option<String>> {
+        let Some(meta) = compartment(&self.book, id).cloned() else {
+            return Ok(None);
+        };
+        self.establish(id);
+        let mut out = render_bookmark(&meta);
+        if let Some(thread) = read_compartment(&self.book, id)? {
+            out.push_str("\n\n--- thread ---\n\n");
+            out.push_str(&render_compartment(&thread));
+        }
+        Ok(Some(out))
+    }
+
+    /// Append this sitting's new turns to a compartment and refresh its
+    /// distilled bookmark. Turns already recorded in the compartment are
+    /// skipped (continuations don't duplicate). Promotes it to the
+    /// preamble. Returns a short confirmation.
+    pub fn append(
+        &mut self,
+        id: u64,
+        bookmark: &Bookmark,
+        session: &[ApiMessage],
+    ) -> Result<String> {
+        let existing = read_compartment(&self.book, id)?;
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        if let Some(msgs) = &existing {
+            for m in msgs {
+                seen.insert((m.role.clone(), m.content.clone()));
+            }
+        }
+        let mut fresh: Vec<Message> = Vec::new();
+        for m in session {
+            if m.role == "system" {
+                continue;
+            }
+            let key = (m.role.clone(), m.content.clone());
+            if seen.insert(key.clone()) {
+                fresh.push(Message {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    ts: now_ms(),
+                });
+            }
+        }
+        let segs = append_segment(&mut self.book, id, &fresh)?;
+        update_bookmark(&mut self.book, id, bookmark)?;
+        self.establish(id);
+        Ok(format!(
+            "appended {} new message(s) to compartment #{id} (segment {segs}); bookmark refreshed",
+            fresh.len()
+        ))
+    }
 }
 
 /// The columnar index schema — metadata only, no content.
