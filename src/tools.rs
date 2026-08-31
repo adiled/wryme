@@ -183,15 +183,20 @@ pub fn book_name() -> &'static str {
 
 pub const BOOK_DESCRIPTION: &str = "\
 Quiet memory — this is how you remember across windows and restarts. \
-Call it in the flow, without announcing it. Actions:\n\
-  find    {query} — search memory for a thread. Returns compartment ids.\n  open    {id} — pull a compartment into this conversation as its \
-          preamble; you get its distilled state and the whole thread.\n  read    {id} — read a compartment's thread without promoting it.\n  new     — start a fresh compartment for a brand-new thread.\n  deem    {id, topic, tags, people, facts, plans, open} — attribute this \
-          stretch of conversation to the compartment and refresh its \
-          distilled bookmark (what you remember, so the next visit starts \
-          where we left off). The engine writes every turn continuously; \
-          deem points the new rows at a compartment. A thread can be \
-          deemed into several compartments over its lifetime.\n  dismiss {id} — stop carrying a compartment's preamble.\n\nUse find when someone says \"remember when…\" or the early words could \
-match an old thread; open what matches. When a thread wraps or drifts, \
+Call it in the flow, without announcing it. A memory is a page: a \
+distilled bookmark plus the stretches of conversation it points into. \
+Pages are addressed by their topic — never a number. Actions:\n\
+  find    {query} — search memory for a page. Returns matched pages.\n  open    {topic} — pull a page into this conversation as its \
+          preamble; you get its distilled state and the whole thread.\n  read    {topic} — read a page's thread without promoting it.\n  deem    {topic, tags, people, facts, plans, open} — attribute this \
+          stretch of conversation to the page named by topic and refresh \
+          its distilled bookmark (what you remember, so the next visit \
+          starts where we left off). If no page with that topic exists, \
+          this stretch BIRTHS it — there is no separate \"create\" step. \
+          The engine writes every turn continuously; deem points the new \
+          rows at a page. A thread can be deemed into several pages over \
+          its lifetime. If a second page is needed, name it distinctly \
+          (e.g. \"roses\", not \"garden\" again).\n  dismiss {topic} — stop carrying a page's preamble.\n\nUse find when someone says \"remember when…\" or the early words could \
+match an old page; open what matches. When a thread wraps or drifts, \
 deem it so it is never lost. Keep the distilled bookmark short — \
 people, facts, plans, and what is still open.";
 
@@ -201,18 +206,17 @@ pub fn book_parameters() -> serde_json::Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["find", "open", "read", "new", "deem", "dismiss"],
+                "enum": ["find", "open", "read", "deem", "dismiss"],
                 "description": "what to do"
             },
             "query": {
                 "type": "string",
                 "description": "words to search memory for (for find)"
             },
-            "id": {
-                "type": "integer",
-                "description": "compartment id (for open/read/deem/dismiss)"
+            "topic": {
+                "type": "string",
+                "description": "the page's name — the only handle you use (for open/read/deem/dismiss)"
             },
-            "topic": { "type": "string", "description": "one-line theme" },
             "tags": {
                 "type": "array", "items": { "type": "string" },
                 "description": "searchable tags"
@@ -269,44 +273,36 @@ async fn book_execute(
             render_find(&query, &hits)
         }
         "open" => {
-            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let topic = v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string();
             let mut e = engine.lock().unwrap();
-            match e.open(id) {
+            match e.open(&topic) {
                 Ok(Some(text)) => text,
-                Ok(None) => format!("unknown compartment #{id}"),
+                Ok(None) => format!("no page \"{topic}\""),
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
             }
         }
         "read" => {
-            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let topic = v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string();
             let e = engine.lock().unwrap();
-            match book::read_compartment(&e.book, id) {
+            match book::read_compartment(&e.book, &topic) {
                 Ok(Some(msgs)) if !msgs.is_empty() => book::render_compartment(&msgs),
-                Ok(_) => format!("compartment #{id} has no thread yet"),
-                Err(err) => format!("{BOOK_NAME}: {err:#}"),
-            }
-        }
-        "new" => {
-            let mut e = engine.lock().unwrap();
-            match book::new_compartment(&mut e.book) {
-                Ok(id) => format!("created compartment #{id}"),
+                Ok(_) => format!("page \"{topic}\" has no thread yet"),
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
             }
         }
         "deem" => {
-            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
             let bookmark = bookmark_from(&v);
             let mut e = engine.lock().unwrap();
-            match e.deem(id, &bookmark) {
+            match e.deem(&bookmark) {
                 Ok(out) => out,
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
             }
         }
         "dismiss" => {
-            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            let topic = v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string();
             let mut e = engine.lock().unwrap();
-            e.dismiss(id);
-            format!("dropped compartment #{id} from the preamble")
+            e.dismiss(&topic);
+            format!("dropped \"{topic}\" from the preamble")
         }
         _ => format!("{BOOK_NAME}: unknown action '{action}'"),
     }
@@ -316,11 +312,10 @@ fn render_find(query: &str, hits: &[&book::CompartmentMeta]) -> String {
     if hits.is_empty() {
         return format!("no compartments match \"{query}\"");
     }
-    let mut out = format!("compartments matching \"{query}\":\n");
+    let mut out = format!("pages matching \"{query}\":\n");
     for m in hits {
         out.push_str(&format!(
-            "  #{} {} — open: {}\n",
-            m.id,
+            "  {} — open: {}\n",
             m.topic,
             m.open.join(", ")
         ));
@@ -419,13 +414,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn book_tool_new_deem_find_open_roundtrip() {
+    async fn book_tool_deem_births_find_open_roundtrip() {
         let dir = std::env::temp_dir().join(format!("wryme_btool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
-
-        let out = execute(&engine, book_name(), "{\"action\":\"new\"}").await;
-        let id = out.unwrap().split('#').nth(1).unwrap().parse::<u64>().unwrap();
 
         {
             let mut e = engine.lock().unwrap();
@@ -433,10 +425,11 @@ mod tests {
             e.record_turn("assistant", "may is nice");
         }
 
+        // No separate create step — deeming into an unborn topic births it.
         let out = execute(
             &engine,
             book_name(),
-            &format!(r#"{{"action":"deem","id":{id},"topic":"Lisbon trip","open":["comparing prices"]}}"#),
+            r#"{"action":"deem","topic":"Lisbon trip","open":["comparing prices"]}"#,
         )
         .await
         .unwrap();
@@ -449,12 +442,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(out.contains("#") && out.contains("Lisbon trip"));
+        assert!(out.contains("Lisbon trip"));
 
         let out = execute(
             &engine,
             book_name(),
-            &format!(r#"{{"action":"open","id":{id}}}"#),
+            "{\"action\":\"open\",\"topic\":\"Lisbon trip\"}",
         )
         .await
         .unwrap();
@@ -468,12 +461,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wryme_btool2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
-        let id = execute(&engine, book_name(), "{\"action\":\"new\"}").await.unwrap()
-            .split('#')
-            .nth(1)
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
 
         {
             let mut e = engine.lock().unwrap();
@@ -482,7 +469,7 @@ mod tests {
         let out = execute(
             &engine,
             book_name(),
-            &format!(r#"{{"action":"deem","id":{id},"topic":"t"}}"#),
+            "{\"action\":\"deem\",\"topic\":\"t\"}",
         )
         .await
         .unwrap();
@@ -495,7 +482,7 @@ mod tests {
         let out2 = execute(
             &engine,
             book_name(),
-            &format!(r#"{{"action":"deem","id":{id},"topic":"t"}}"#),
+            "{\"action\":\"deem\",\"topic\":\"t\"}",
         )
         .await
         .unwrap();
@@ -505,7 +492,7 @@ mod tests {
         let out3 = execute(
             &engine,
             book_name(),
-            &format!(r#"{{"action":"deem","id":{id},"topic":"t"}}"#),
+            "{\"action\":\"deem\",\"topic\":\"t\"}",
         )
         .await
         .unwrap();

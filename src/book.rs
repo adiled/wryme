@@ -47,10 +47,12 @@ pub struct Bookmark {
     pub open: Vec<String>,
 }
 
-/// One compartment's current index row.
+/// One compartment's current index row. A compartment has NO identity —
+/// it is not a container you create and track. It IS a page: a distilled
+/// bookmark plus its spans into the stream. It is addressed by what it is
+/// (its `topic`), never a number.
 #[derive(Debug, Clone)]
 pub struct CompartmentMeta {
-    pub id: u64,
     pub opened_at: i64,
     pub updated_at: i64,
     pub topic: String,
@@ -89,8 +91,10 @@ pub struct Message {
 /// to any compartment — the unattributed frontier the engine watches.
 pub struct Book {
     dir: PathBuf,
-    next_id: u64,
     next_row: u64,
+    /// The next stream segment number — a monotonic counter kept in
+    /// memory so flushing a turn is O(1), not a directory scan.
+    next_seg: u64,
     watermark: u64,
     /// Content bytes of the unattributed rows [watermark, next_row) —
     /// the engine's weight signal for the prod.
@@ -113,9 +117,9 @@ pub struct Book {
 /// remain the agent's own deliberation.
 pub struct Engine {
     pub book: Book,
-    /// Compartments currently promoted to the preamble. Their rendered
+    /// Pages currently promoted to the preamble. Their rendered
     /// bookmarks are prepended as system messages to every request.
-    pub established: Vec<u64>,
+    pub established: Vec<String>,
     /// Set when an unattributed thread is weightful; delivered once into
     /// the next request as a quiet system reminder.
     pending_prod: bool,
@@ -149,12 +153,12 @@ pub fn open_engine(dir: &Path) -> Result<Engine> {
 }
 
 impl Engine {
-    /// The preamble: rendered bookmark prose for every established
-    /// compartment, in order. Prepended as system messages by the caller.
+    /// The preamble: rendered bookmark prose for every established page,
+    /// in order. Prepended as system messages by the caller.
     pub fn preamble(&self) -> Vec<String> {
         self.established
             .iter()
-            .filter_map(|id| compartment(&self.book, *id))
+            .filter_map(|topic| compartment(&self.book, topic))
             .map(render_bookmark)
             .collect()
     }
@@ -196,6 +200,10 @@ impl Engine {
         book.next_row += 1;
         book.unattr_tokens += content.len() as i64;
         book.unattr_turns += 1;
+        // Flush to disk now, so every turn is durable even if the agent
+        // never deems and the app exits. The stream truly writes
+        // continuously; deeming later only points rows at pages.
+        let _ = flush_stream(book);
         if !self.pending_prod
             && book.unattr_turns >= WEIGHT_TURNS
             && book.unattr_tokens >= WEIGHT_BYTES
@@ -213,43 +221,43 @@ impl Engine {
         self.last_lookup_row = self.book.next_row;
     }
 
-    /// Promote a compartment to the preamble and return its rendered
-    /// bookmark plus full thread text (so the model can just know). This
-    /// is the ceremony of "remember when" — the agent's own deliberation.
-    pub fn open(&mut self, id: u64) -> Result<Option<String>> {
-        let Some(meta) = compartment(&self.book, id).cloned() else {
+    /// Promote a page to the preamble and return its rendered bookmark
+    /// plus full thread text (so the model can just know). This is the
+    /// ceremony of "remember when" — the agent's own deliberation.
+    pub fn open(&mut self, topic: &str) -> Result<Option<String>> {
+        let Some(meta) = compartment(&self.book, topic).cloned() else {
             return Ok(None);
         };
-        self.establish(id);
+        self.establish(topic);
         self.note_lookup();
         let mut out = render_bookmark(&meta);
-        if let Some(thread) = read_compartment(&self.book, id)? {
+        if let Some(thread) = read_compartment(&self.book, topic)? {
             out.push_str("\n\n--- thread ---\n\n");
             out.push_str(&render_compartment(&thread));
         }
         Ok(Some(out))
     }
 
-    /// Attribute the unattributed span [watermark, next_row) to a
-    /// compartment and refresh its distilled bookmark. This is quiet
-    /// book-keeping — it does NOT establish (no ceremony, no preamble).
-    /// Clears the prod. Returns a short confirmation.
-    pub fn deem(&mut self, id: u64, bookmark: &Bookmark) -> Result<String> {
-        let out = deem_span(&mut self.book, id, bookmark)?;
+    /// Attribute the unattributed span [watermark, next_row) to the page
+    /// named by the bookmark's topic (birthing it if absent) and refresh
+    /// its distilled bookmark. This is quiet book-keeping — it does NOT
+    /// establish (no ceremony, no preamble). Clears the prod.
+    pub fn deem(&mut self, bookmark: &Bookmark) -> Result<String> {
+        let out = deem_span(&mut self.book, bookmark)?;
         self.pending_prod = false;
         Ok(out)
     }
 
-    fn establish(&mut self, id: u64) {
-        if !self.established.contains(&id) {
-            self.established.push(id);
+    fn establish(&mut self, topic: &str) {
+        if !self.established.iter().any(|t| t == topic) {
+            self.established.push(topic.to_string());
         }
     }
 
-    /// Drop a compartment from the preamble (it is never closed — it
-    /// just stops riding along in the conversation).
-    pub fn dismiss(&mut self, id: u64) {
-        self.established.retain(|&e| e != id);
+    /// Drop a page from the preamble (it is never closed — it just stops
+    /// riding along in the conversation).
+    pub fn dismiss(&mut self, topic: &str) {
+        self.established.retain(|t| t != topic);
     }
 }
 
@@ -257,21 +265,25 @@ impl Engine {
 pub fn open_book(dir: &Path) -> Result<Book> {
     std::fs::create_dir_all(dir)?;
     let index_path = dir.join("index.parquet");
-    let index = if index_path.exists() {
+    let mut index = if index_path.exists() {
         read_index(&index_path)?
     } else {
         vec![]
     };
-    let next_id = index.iter().map(|m| m.id + 1).max().unwrap_or(1);
+    // Drop ghost pages — rows with no topic are leftovers from the old
+    // "new without deem" registry; a page is only a page if it is about
+    // something.
+    index.retain(|m| !m.topic.trim().is_empty());
     let next_row = read_stream_max_row(dir)?;
+    let next_seg = read_stream_max_seg(dir)? + 1;
 
     let summary_path = dir.join("life_summary.txt");
     let life_summary = std::fs::read_to_string(&summary_path).unwrap_or_default();
 
     Ok(Book {
         dir: dir.to_path_buf(),
-        next_id,
         next_row,
+        next_seg,
         // On a fresh open the frontier is the whole stream (everything is
         // unattributed); on a continued open the frontier is restored to
         // the end so we never re-deem already-attributed rows.
@@ -284,68 +296,89 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     })
 }
 
-/// Start a brand-new compartment and return its id. The thread is open
-/// ended: it will accumulate spans forever. The distilled state starts
-/// empty and is set when the agent deems into it.
-pub fn new_compartment(book: &mut Book) -> Result<u64> {
-    let id = book.next_id;
-    book.next_id += 1;
+/// Attribute the unattributed span to a page, addressed by its topic.
+/// If no page with that topic exists it is BORN here — book-writing is
+/// the product, not the precondition. If several pages share the topic
+/// they merge into one (a page's identity is its name + spans). Records
+/// the span, refreshes the distilled bookmark, adds its weight, flushes
+/// the rows to the stream, and advances the watermark. The page owns no
+/// rows — it only points into the stream.
+pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
+    let topic = bookmark.topic.trim();
+    if topic.is_empty() {
+        return Ok("a page needs a topic to be deemed into".to_string());
+    }
     let now = now_ms();
-    book.index.push(CompartmentMeta {
-        id,
-        opened_at: now,
-        updated_at: now,
-        topic: String::new(),
-        tags: vec![],
-        people: vec![],
-        facts: vec![],
-        plans: vec![],
-        open: vec![],
-        spans: vec![],
-        life_tokens: 0,
-    });
-    write_index(book)?;
-    Ok(id)
-}
-
-/// Attribute the unattributed span to a compartment: record the span,
-/// refresh the distilled bookmark, add its weight, flush the rows to the
-/// stream, and advance the watermark. The compartment owns no rows — it
-/// only points into the stream.
-pub fn deem_span(book: &mut Book, id: u64, bookmark: &Bookmark) -> Result<String> {
-    let Some(meta) = book.index.iter_mut().find(|m| m.id == id) else {
-        return Ok(format!("unknown compartment #{id}"));
+    let mut page = None;
+    let mut i = 0;
+    while i < book.index.len() {
+        if eq_topic(&book.index[i].topic, topic) {
+            if page.is_none() {
+                page = Some(i);
+                i += 1;
+                continue;
+            }
+            // A duplicate same-name page: fold its spans into the first
+            // and drop it, so the invariant "one page per topic" holds.
+            let dup = book.index.remove(i);
+            if let Some(p) = page {
+                book.index[p].spans.extend(dup.spans);
+                merge_spans(&mut book.index[p].spans);
+                book.index[p].life_tokens += dup.life_tokens;
+                book.index[p].opened_at = book.index[p].opened_at.min(dup.opened_at);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    let idx = match page {
+        Some(i) => i,
+        None => {
+            book.index.push(CompartmentMeta {
+                opened_at: now,
+                updated_at: now,
+                topic: topic.to_string(),
+                tags: vec![],
+                people: vec![],
+                facts: vec![],
+                plans: vec![],
+                open: vec![],
+                spans: vec![],
+                life_tokens: 0,
+            });
+            book.index.len() - 1
+        }
     };
     let start = book.watermark;
     let end = book.next_row;
     if start >= end {
-        return Ok(format!("no new turns to deem into #{id}"));
+        return Ok(format!("no new turns to deem into \"{topic}\""));
     }
+    let meta = &mut book.index[idx];
     meta.spans.push((start, end));
     merge_spans(&mut meta.spans);
     meta.life_tokens += book.unattr_tokens;
-    meta.topic = bookmark.topic.clone();
     meta.tags = bookmark.tags.clone();
     meta.people = bookmark.people.clone();
     meta.facts = bookmark.facts.clone();
     meta.plans = bookmark.plans.clone();
     meta.open = bookmark.open.clone();
-    meta.updated_at = now_ms();
+    meta.updated_at = now;
     flush_stream(book)?;
     book.watermark = end;
     book.unattr_tokens = 0;
     book.unattr_turns = 0;
     write_index(book)?;
     Ok(format!(
-        "deemed rows {start}..{end} into compartment #{id}; bookmark refreshed"
+        "deemed rows {start}..{end} into \"{topic}\"; bookmark refreshed"
     ))
 }
 
-/// Refresh a compartment's distilled state (and updated_at) without
-/// deeming new rows. Called when the thread is re-established and the AI
-/// re-distills what matters.
-pub fn update_bookmark(book: &mut Book, id: u64, bookmark: &Bookmark) -> Result<()> {
-    let Some(meta) = book.index.iter_mut().find(|m| m.id == id) else {
+/// Refresh a page's distilled state (and updated_at) without deeming new
+/// rows. Called when a thread is re-established and the AI re-distills
+/// what matters. Addressed by topic.
+pub fn update_bookmark(book: &mut Book, topic: &str, bookmark: &Bookmark) -> Result<()> {
+    let Some(meta) = book.index.iter_mut().find(|m| eq_topic(&m.topic, topic)) else {
         return Ok(());
     };
     meta.topic = bookmark.topic.clone();
@@ -364,15 +397,15 @@ pub fn index_entries(book: &Book) -> &[CompartmentMeta] {
     &book.index
 }
 
-/// Look up one compartment's current index row.
-pub fn compartment(book: &Book, id: u64) -> Option<&CompartmentMeta> {
-    book.index.iter().find(|m| m.id == id)
+/// Look up one page's current index row, by its topic.
+pub fn compartment<'a>(book: &'a Book, topic: &'a str) -> Option<&'a CompartmentMeta> {
+    book.index.iter().find(|m| eq_topic(&m.topic, topic))
 }
 
-/// Read a compartment's full thread — every row its spans point into the
+/// Read a page's full thread — every row its spans point into the
 /// stream, concatenated in order.
-pub fn read_compartment(book: &Book, id: u64) -> Result<Option<Vec<Message>>> {
-    let Some(meta) = compartment(book, id) else {
+pub fn read_compartment(book: &Book, topic: &str) -> Result<Option<Vec<Message>>> {
+    let Some(meta) = compartment(book, topic) else {
         return Ok(None);
     };
     if meta.spans.is_empty() {
@@ -395,12 +428,11 @@ pub fn read_compartment(book: &Book, id: u64) -> Result<Option<Vec<Message>>> {
     Ok(Some(out))
 }
 
-/// The preamble: render a compartment's distilled state to the prose the
-/// model reads at the top of the conversation. One compartment, one
-/// system message.
+/// The preamble: render a page's distilled state to the prose the model
+/// reads at the top of the conversation. One page, one system message.
 pub fn render_bookmark(meta: &CompartmentMeta) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# Compartment {}: {}\n", meta.id, meta.topic));
+    out.push_str(&format!("# {}\n", meta.topic));
     if !meta.people.is_empty() {
         out.push_str(&format!("People: {}\n", meta.people.join(", ")));
     }
@@ -480,29 +512,12 @@ fn stream_dir(book: &Book) -> PathBuf {
     book.dir.join("stream")
 }
 
-fn next_stream_segment(book: &Book) -> Result<u64> {
-    let dir = stream_dir(book);
-    if !dir.exists() {
-        return Ok(0);
-    }
-    let mut max = 0u64;
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = name.strip_suffix(".parquet") {
-            if let Ok(n) = stem.parse::<u64>() {
-                max = max.max(n);
-            }
-        }
-    }
-    Ok(max + 1)
-}
-
 fn flush_stream(book: &mut Book) -> Result<()> {
     if book.pending.is_empty() {
         return Ok(());
     }
-    let seg = next_stream_segment(book)?;
+    let seg = book.next_seg;
+    book.next_seg += 1;
     write_stream_segment(book, seg, &book.pending)?;
     book.pending.clear();
     Ok(())
@@ -546,6 +561,30 @@ fn read_stream_max_row(dir: &Path) -> Result<u64> {
     Ok(max)
 }
 
+/// The highest stream segment number on disk — so the flush counter
+/// resumes correctly across restarts.
+fn read_stream_max_seg(dir: &Path) -> Result<u64> {
+    let stream_dir = dir.join("stream");
+    if !stream_dir.exists() {
+        return Ok(0);
+    }
+    let mut max = 0u64;
+    for entry in std::fs::read_dir(&stream_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(".parquet") {
+            if let Ok(n) = stem.parse::<u64>() {
+                max = max.max(n);
+            }
+        }
+    }
+    Ok(max)
+}
+
+fn eq_topic(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 fn merge_spans(spans: &mut Vec<(u64, u64)>) {
     spans.sort_by_key(|s| s.0);
     let mut merged: Vec<(u64, u64)> = Vec::new();
@@ -563,13 +602,13 @@ fn merge_spans(spans: &mut Vec<(u64, u64)>) {
 
 // ---- parquet read/write ----------------------------------------------
 
-/// The navigation schema — distilled state + spans, no content.
+/// The navigation schema — distilled state + spans, no content, no
+/// compartment id. A page is addressed by its topic.
 fn index_schema() -> SchemaRef {
     let fields = vec![
-        Field::new("compartment_id", DataType::Int64, false),
         Field::new("opened_at", DataType::Int64, false),
         Field::new("updated_at", DataType::Int64, false),
-        Field::new("topic", DataType::Utf8, true),
+        Field::new("topic", DataType::Utf8, false),
         Field::new("tags", DataType::Utf8, true),
         Field::new("people", DataType::Utf8, true),
         Field::new("facts", DataType::Utf8, true),
@@ -593,9 +632,6 @@ fn stream_schema() -> SchemaRef {
 }
 
 fn write_index(book: &Book) -> Result<()> {
-    let ids = Int64Array::from(
-        book.index.iter().map(|m| m.id as i64).collect::<Vec<_>>(),
-    );
     let opened = Int64Array::from(
         book.index.iter().map(|m| m.opened_at).collect::<Vec<_>>(),
     );
@@ -633,7 +669,6 @@ fn write_index(book: &Book) -> Result<()> {
     let batch = RecordBatch::try_new(
         index_schema(),
         vec![
-            std::sync::Arc::new(ids),
             std::sync::Arc::new(opened),
             std::sync::Arc::new(updated),
             std::sync::Arc::new(topic),
@@ -661,7 +696,6 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     let mut metas = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let ids = batch.column_by_name("compartment_id").unwrap();
         let opened = batch.column_by_name("opened_at").unwrap();
         let updated = batch.column_by_name("updated_at").unwrap();
         let topic = batch.column_by_name("topic").unwrap();
@@ -674,7 +708,6 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
         let tokens = batch.column_by_name("life_tokens").unwrap();
         for i in 0..batch.num_rows() {
             metas.push(CompartmentMeta {
-                id: as_i64(ids, i) as u64,
                 opened_at: as_i64(opened, i),
                 updated_at: as_i64(updated, i),
                 topic: as_str(topic, i),
@@ -834,13 +867,10 @@ mod tests {
     }
 
     #[test]
-    fn deem_attributes_spans_and_multiple_compartments_interleave() {
+    fn deem_attributes_spans_and_multiple_pages_interleave() {
         let dir = tmpdir("deem");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-
-        let garden = new_compartment(&mut book).unwrap();
-        let neighbours = new_compartment(&mut book).unwrap();
 
         // Turns 0..3 about the garden, 3..6 about the neighbours.
         for c in ["soil", "roses", "shade"] {
@@ -849,7 +879,7 @@ mod tests {
             book.unattr_turns += 1;
             book.unattr_tokens += c.len() as i64;
         }
-        deem_span(&mut book, garden, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+        deem_span(&mut book, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
 
         for c in ["dog", "fence", "noise"] {
             book.pending.push(msg("user", c, book.next_row));
@@ -857,7 +887,7 @@ mod tests {
             book.unattr_turns += 1;
             book.unattr_tokens += c.len() as i64;
         }
-        deem_span(&mut book, neighbours, &Bookmark { topic: "neighbours".into(), ..Default::default() }).unwrap();
+        deem_span(&mut book, &Bookmark { topic: "neighbours".into(), ..Default::default() }).unwrap();
 
         // Back to the garden later: a second, non-contiguous span.
         for c in ["compost", "mulch"] {
@@ -866,14 +896,14 @@ mod tests {
             book.unattr_turns += 1;
             book.unattr_tokens += c.len() as i64;
         }
-        deem_span(&mut book, garden, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+        deem_span(&mut book, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
 
-        let g = compartment(&book, garden).unwrap();
-        let n = compartment(&book, neighbours).unwrap();
+        let g = compartment(&book, "garden").unwrap();
+        let n = compartment(&book, "neighbours").unwrap();
         assert_eq!(g.spans, vec![(0, 3), (6, 8)]); // interleaved, not merged
         assert_eq!(n.spans, vec![(3, 6)]);
 
-        let g_thread = read_compartment(&book, garden).unwrap().unwrap();
+        let g_thread = read_compartment(&book, "garden").unwrap().unwrap();
         assert_eq!(g_thread.len(), 5); // rows 0..3 + 6..8
         assert_eq!(g_thread[0].content, "soil");
         assert_eq!(g_thread[4].content, "mulch");
@@ -886,22 +916,21 @@ mod tests {
         let dir = tmpdir("watermark");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
-        let id = new_compartment(&mut book).unwrap();
 
-        assert!(deem_span(&mut book, id, &Bookmark::default()).unwrap().contains("no new turns"));
+        assert!(deem_span(&mut book, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap().contains("no new turns"));
         assert_eq!(book.watermark, 0);
 
         book.pending.push(msg("user", "one", book.next_row));
         book.next_row += 1;
         book.unattr_turns += 1;
         book.unattr_tokens += 3;
-        deem_span(&mut book, id, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap();
+        deem_span(&mut book, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap();
         assert_eq!(book.watermark, 1);
         assert_eq!(book.unattr_tokens, 0);
-        assert_eq!(compartment(&book, id).unwrap().spans, vec![(0, 1)]);
+        assert_eq!(compartment(&book, "t").unwrap().spans, vec![(0, 1)]);
 
         // Nothing new to deem now.
-        assert!(deem_span(&mut book, id, &Bookmark::default()).unwrap().contains("no new turns"));
+        assert!(deem_span(&mut book, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap().contains("no new turns"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -938,9 +967,38 @@ mod tests {
         for _ in 0..40 {
             e3.record_turn("user", "this is a long enough sentence to count as weight");
         }
-        let id = new_compartment(&mut e3.book).unwrap();
-        e3.deem(id, &Bookmark { topic: "x".into(), ..Default::default() }).unwrap();
+        e3.deem(&Bookmark { topic: "x".into(), ..Default::default() }).unwrap();
         assert_eq!(e3.take_prod(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_flushes_every_turn_so_turns_survive_without_deem() {
+        let dir = tmpdir("durable");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = open_engine(&dir).unwrap();
+
+        // Two turns, never deemed — the old gap lost them on exit.
+        e.record_turn("user", "remember our lisbon plans");
+        e.record_turn("assistant", "may is lovely");
+
+        // Simulate an exit: reopen from disk, no deem ever happened.
+        let book2 = open_book(&dir).unwrap();
+        assert_eq!(book2.next_row, 2);
+        let rows = read_stream(&book2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].content, "remember our lisbon plans");
+        assert_eq!(rows[1].content, "may is lovely");
+
+        // The segment counter resumes, so a later flush appends, never
+        // overwrites the existing segments.
+        let mut e2 = open_engine(&dir).unwrap();
+        e2.record_turn("user", "third turn");
+        let book3 = open_book(&dir).unwrap();
+        let rows = read_stream(&book3).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].content, "third turn");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
