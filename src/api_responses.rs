@@ -15,12 +15,15 @@
 // jobs are planted back here as a function_call + function_call_output
 // pair so the model sees the outcome and continues.
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::book;
 use crate::shop::Shop;
 use crate::tools;
 use crate::station::{Patience, Station};
@@ -41,6 +44,7 @@ pub(crate) async fn stream(
     station: &Station,
     messages: Vec<ApiMessage>,
     previous_response_id: Option<String>,
+    engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     let instructions: Option<&str> = messages
@@ -54,7 +58,8 @@ pub(crate) async fn stream(
         .collect();
 
     // First request: full conversation, or just the latest user turn when
-    // the session is pinned via previous_response_id.
+    // the session is pinned via previous_response_id. Established
+    // compartments' rendered bookmarks ride along as `system` input items.
     let mut prev_id = previous_response_id;
     let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
         conv_msgs
@@ -68,6 +73,7 @@ pub(crate) async fn stream(
             .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
             .collect()
     };
+    prepend_preamble(&mut input, &engine);
 
     // Plant any finished async jobs into the input as a check-call +
     // result pair, so the model sees the outcome and continues.
@@ -101,7 +107,7 @@ pub(crate) async fn stream(
         // Execute each tool call locally and build the follow-up input.
         let mut next_input = Vec::new();
         for call in calls {
-            let output = match tools::execute(&call.name, &call.arguments).await {
+            let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
@@ -115,9 +121,34 @@ pub(crate) async fn stream(
                 "output": output,
             }));
         }
+        // Re-pin the preamble: the model may have promoted a compartment
+        // to the preamble this round.
+        prepend_preamble(&mut next_input, &engine);
         prev_id = Some(new_id);
         input = next_input;
     }
+}
+
+/// Prepend the established compartments' rendered bookmarks and any
+/// book-writing prod as `system` input items, so the model always sees
+/// its memory at the top. (The Responses protocol drops system messages
+/// other than the first instructions, so the engine's preamble must be
+/// injected as real input items each round.)
+fn prepend_preamble(input: &mut Vec<serde_json::Value>, engine: &Arc<Mutex<book::Engine>>) {
+    let (preambles, prod) = if let Ok(mut e) = engine.lock() {
+        (e.preamble(), e.take_prod())
+    } else {
+        return;
+    };
+    let mut items: Vec<serde_json::Value> = preambles
+        .into_iter()
+        .map(|p| serde_json::json!({ "type": "system", "content": p }))
+        .collect();
+    if let Some(prod) = prod {
+        items.push(serde_json::json!({ "type": "system", "content": prod }));
+    }
+    items.append(input);
+    *input = items;
 }
 
 /// One request/response round. Streams content/brain/tool events to `tx`,

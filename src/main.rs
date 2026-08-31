@@ -19,6 +19,7 @@ mod api;
 mod api_chat;
 mod api_responses;
 mod app;
+mod book;
 mod demo;
 mod explore;
 mod input;
@@ -215,10 +216,11 @@ async fn run(
                     let shop = app.active_shop.clone();
                     let station = app.active_station.clone();
                     let client = client.clone();
+                    let engine = app.engine.clone();
                     let tx = tx.clone();
                     in_flight_task = Some(tokio::spawn(async move {
                         client
-                            .stream_completion(shop, station, msgs, prev_id, tx)
+                            .stream_completion(shop, station, msgs, prev_id, engine, tx)
                             .await;
                     }));
                 }

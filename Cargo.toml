@@ -24,6 +24,9 @@ serde_json = "1"
 toml = "0.8"
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+parquet = "53"
+arrow-array = "53"
+arrow-schema = "53"
 
 [profile.release]
 opt-level = 3

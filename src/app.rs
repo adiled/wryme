@@ -1,6 +1,9 @@
 // Application state. The UI is a pure function of this.
 
+use std::sync::{Arc, Mutex};
+
 use crate::api::ApiMessage;
+use crate::book;
 use crate::popup::Popup;
 use crate::shop::Shop;
 use crate::station::Station;
@@ -126,6 +129,21 @@ pub struct App {
     pub active_origin: Option<String>,
     /// The popup overlay state (closed, browsing, or entering a name).
     pub popup: Popup,
+    /// The book engine: wryme's memory, a columnar Parquet store of
+    /// open-ended compartments. Shared across turns as an Arc<Mutex<..>>
+    /// so the streaming protocol and the background delivery can both
+    /// reach it (the invisible `book` tool locks it in the flow).
+    pub engine: Arc<Mutex<book::Engine>>,
+}
+
+/// The book lives at `~/.config/wryme/book`, like the shops and
+/// stations files — one folder for everything wryme keeps.
+fn book_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home)
+        .join(".config")
+        .join("wryme")
+        .join("book")
 }
 
 impl App {
@@ -155,8 +173,12 @@ impl App {
             active_shop,
             active_origin,
             popup: Popup::default(),
+            engine: Arc::new(Mutex::new(
+                book::open_engine(&book_dir()).expect("open book"),
+            )),
         }
     }
+
 
     /// True when the active station differs from the saved entry it was
     /// loaded from. False when there is no origin (untitled / demo) or
@@ -191,6 +213,16 @@ impl App {
             current_tool: None,
             tool_results: Vec::new(),
         });
+        // The engine records every turn into the continuous stream, and
+        // re-checks whether an unattributed thread is weightful enough to
+        // prod the agent into deeming it.
+        if let Some(last) = self.messages.last() {
+            if last.role == Role::User {
+                if let Ok(mut e) = self.engine.lock() {
+                    e.record_turn("user", &last.content);
+                }
+            }
+        }
     }
 
     pub fn begin_assistant(&mut self) {
@@ -269,6 +301,18 @@ impl App {
             }
         }
 
+        // The engine records the finished assistant turn into the
+        // continuous stream (the user turn was already recorded at push
+        // time), so the whole thread lives in the book.
+        if let Some(i) = just_finished {
+            let m = &self.messages[i];
+            if m.role == Role::Assistant && !m.content.is_empty() {
+                if let Ok(mut e) = self.engine.lock() {
+                    e.record_turn("assistant", &m.content);
+                }
+            }
+        }
+
         // If that turn produced nothing visible at all (no content, no brain,
         // no tool indicator), drop it so the screen does not show a confusing
         // empty bubble. Server hiccups and pre-delta errors are common causes.
@@ -291,7 +335,10 @@ impl App {
         }
     }
 
-    /// Build the wire-format message list to send upstream.
+    /// Build the wire-format message list to send upstream. The base
+    /// system prompt, then the established compartments' rendered
+    /// bookmarks as one system message each — the preamble — then the
+    /// live turns.
     pub fn api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if let Some(sys) = &self.system {
@@ -299,6 +346,22 @@ impl App {
                 role: "system".into(),
                 content: sys.clone(),
             });
+        }
+        if let Ok(mut engine) = self.engine.lock() {
+            for preamble in engine.preamble() {
+                out.push(ApiMessage {
+                    role: "system".into(),
+                    content: preamble,
+                });
+            }
+            // The book-writing prod: a quiet system reminder the engine
+            // slips the agent once when an unattributed thread is weightful.
+            if let Some(prod) = engine.take_prod() {
+                out.push(ApiMessage {
+                    role: "system".into(),
+                    content: prod,
+                });
+            }
         }
         for m in &self.messages {
             // Skip an empty streaming placeholder. We send the history
