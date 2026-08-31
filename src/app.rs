@@ -62,6 +62,11 @@ pub struct Message {
     /// order. Rendered as a dim block under the header, above the final
     /// reply, so the user sees the machine doing the thing.
     pub tool_results: Vec<ToolResult>,
+    /// Logical turn this message belongs to. A single assistant reply can
+    /// span several messages (one per contiguous non-thinking cluster) —
+    /// they all share the same `turn_id` so the wire transcript and the
+    /// book record still treat them as one turn. User messages set 0.
+    pub turn_id: u64,
 }
 
 /// One local tool execution: which tool ran and what it returned.
@@ -134,6 +139,13 @@ pub struct App {
     /// so the streaming protocol and the background delivery can both
     /// reach it (the invisible `book` tool locks it in the flow).
     pub engine: Arc<Mutex<book::Engine>>,
+    /// Monotonic counter for logical turns; bumped by begin_assistant and
+    /// stamped onto every cluster of that turn.
+    turn_counter: u64,
+    /// True if the last thing streamed into the assistant was thinking
+    /// (a Brain delta). A content delta arriving right after this starts
+    /// a fresh cluster so each contiguous non-thinking run is its own entry.
+    last_stream_was_brain: bool,
 }
 
 /// The book lives at `~/.config/wryme/book`, like the shops and
@@ -176,6 +188,8 @@ impl App {
             engine: Arc::new(Mutex::new(
                 book::open_engine(&book_dir()).expect("open book"),
             )),
+            turn_counter: 0,
+            last_stream_was_brain: false,
         }
     }
 
@@ -212,6 +226,7 @@ impl App {
             phase: Phase::Streaming,
             current_tool: None,
             tool_results: Vec::new(),
+            turn_id: 0,
         });
         // The engine records every turn into the continuous stream, and
         // re-checks whether an unattributed thread is weightful enough to
@@ -226,6 +241,8 @@ impl App {
     }
 
     pub fn begin_assistant(&mut self) {
+        self.turn_counter += 1;
+        let tid = self.turn_counter;
         self.messages.push(Message {
             role: Role::Assistant,
             content: String::new(),
@@ -235,31 +252,82 @@ impl App {
             phase: Phase::Streaming,
             current_tool: None,
             tool_results: Vec::new(),
+            turn_id: tid,
         });
     }
 
     pub fn append_to_last_assistant(&mut self, delta: &str) {
-        if let Some(m) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.streaming)
-        {
-            m.content.push_str(delta);
-            m.phase = Phase::Writing;
+        if delta.is_empty() {
+            return;
         }
+        let idx = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::Assistant && m.streaming);
+        let Some(idx) = idx else { return };
+
+        // A writing delta right after thinking starts a fresh cluster, so
+        // each contiguous non-thinking run shows as its own assistant entry.
+        // (An empty placeholder that already holds the leading brain just
+        // absorbs the first content — that is still the first cluster.)
+        if self.last_stream_was_brain && !self.messages[idx].content.is_empty() {
+            let tid = self.messages[idx].turn_id;
+            // Close the previous cluster: only the LATEST cluster of a turn
+            // stays `streaming`, so the phase label, tool name and cursor
+            // show on the newest entry only. Older clusters render as
+            // finished text without live indicators.
+            self.messages[idx].streaming = false;
+            self.messages.push(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                brain: String::new(),
+                streaming: true,
+                timestamp: now_hhmm(),
+                phase: Phase::Streaming,
+                current_tool: None,
+                tool_results: Vec::new(),
+                turn_id: tid,
+            });
+        }
+        self.last_stream_was_brain = false;
+
+        let m = self.messages.last_mut().unwrap();
+        // Don't jam a chunk against the previous one: the model frequently
+        // splits "…." and the next word across two deltas, producing
+        // "sentence.Next" with no space. Insert one only when both sides
+        // are non-whitespace so we never double spaces or mangle markdown.
+        if !m.content.is_empty()
+            && !delta.starts_with(char::is_whitespace)
+            && !m.content.ends_with(char::is_whitespace)
+        {
+            m.content.push(' ');
+        }
+        m.content.push_str(delta);
+        m.phase = Phase::Writing;
     }
 
     pub fn append_to_last_brain(&mut self, delta: &str) {
+        // All reasoning of a turn lands on ONE message — the turn's first
+        // cluster — so the brain shows as a single UI entry per turn rather
+        // than a footnote on every cluster.
+        let tid = self.turn_counter;
+        if let Some(m) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.role == Role::Assistant && m.turn_id == tid)
+        {
+            m.brain.push_str(delta);
+        }
+        // The "thinking…" indicator belongs on the latest visual entry only.
         if let Some(m) = self
             .messages
             .iter_mut()
             .rev()
             .find(|m| m.role == Role::Assistant && m.streaming)
         {
-            m.brain.push_str(delta);
             m.phase = Phase::Thinking;
         }
+        self.last_stream_was_brain = true;
     }
 
     pub fn record_tool_call(&mut self, name: Option<String>) {
@@ -291,43 +359,49 @@ impl App {
     pub fn finish_streaming(&mut self) {
         self.in_flight = false;
 
-        // Find the streaming assistant message (most recent) and mark it done.
+        // Find the streaming assistant message (most recent) and its turn_id.
         let mut just_finished: Option<usize> = None;
         for i in (0..self.messages.len()).rev() {
             if self.messages[i].streaming {
-                self.messages[i].streaming = false;
                 just_finished = Some(i);
                 break;
             }
         }
 
-        // The engine records the finished assistant turn into the
-        // continuous stream (the user turn was already recorded at push
-        // time), so the whole thread lives in the book.
         if let Some(i) = just_finished {
-            let m = &self.messages[i];
-            if m.role == Role::Assistant && !m.content.is_empty() {
-                if let Ok(mut e) = self.engine.lock() {
-                    e.record_turn("assistant", &m.content);
+            let tid = self.messages[i].turn_id;
+
+            // Mark every cluster of this turn done.
+            for m in self.messages.iter_mut() {
+                if m.streaming && m.turn_id == tid {
+                    m.streaming = false;
                 }
             }
-        }
 
-        // If that turn produced nothing visible at all (no content, no brain,
-        // no tool indicator), drop it so the screen does not show a confusing
-        // empty bubble. Server hiccups and pre-delta errors are common causes.
-        // If the upstream sent an error, the status bar already explains
-        // what happened. If not, leave a short note so the user knows
-        // something landed but came back empty.
-        if let Some(i) = just_finished {
-            let m = &self.messages[i];
-            if m.role == Role::Assistant
-                && m.content.is_empty()
-                && m.brain.is_empty()
-                && m.current_tool.is_none()
-                && m.tool_results.is_empty()
-            {
-                self.messages.remove(i);
+            // Record the whole logical turn (all clusters) into the book once.
+            let joined: String = self.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.content.is_empty())
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !joined.is_empty() {
+                if let Ok(mut e) = self.engine.lock() {
+                    e.record_turn("assistant", &joined);
+                }
+            }
+
+            // Drop empty clusters of this turn so the screen does not show a
+            // confusing empty bubble. Server hiccups and pre-delta errors are
+            // common causes. If upstream sent an error, the status bar already
+            // explains what happened. If not, leave a short note.
+            let any_nonempty = self.messages
+                .iter()
+                .any(|m| m.role == Role::Assistant && m.turn_id == tid
+                    && (!m.content.is_empty() || !m.brain.is_empty()
+                        || m.current_tool.is_some() || !m.tool_results.is_empty()));
+            if !any_nonempty {
+                self.messages.retain(|m| !(m.role == Role::Assistant && m.turn_id == tid));
                 if self.status.is_empty() {
                     self.note("empty reply");
                 }
@@ -363,11 +437,34 @@ impl App {
                 });
             }
         }
+        let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
             // Skip an empty streaming placeholder. We send the history
             // BEFORE the assistant turn we're about to fill.
             if m.streaming && m.content.is_empty() {
                 continue;
+            }
+            // A cluster of an assistant turn still in flight: skip it too —
+            // we only send history up to the turn we're about to fill.
+            if m.role == Role::Assistant && m.streaming {
+                continue;
+            }
+            // Consecutive assistant clusters of the SAME logical turn merge
+            // into one ApiMessage, so the wire sees one assistant turn.
+            if m.role == Role::Assistant
+                && last_asst_turn == Some(m.turn_id)
+                && out.last().map(|a| a.role.as_str()) == Some("assistant")
+            {
+                let last = out.last_mut().unwrap();
+                if !last.content.is_empty() && !m.content.is_empty() {
+                    last.content.push('\n');
+                }
+                last.content.push_str(&m.content);
+                last_asst_turn = Some(m.turn_id);
+                continue;
+            }
+            if m.role == Role::Assistant {
+                last_asst_turn = Some(m.turn_id);
             }
             out.push(ApiMessage {
                 role: match m.role {
