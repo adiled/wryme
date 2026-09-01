@@ -129,13 +129,22 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         total_rows.div_ceil(viewport_h)
     };
     let page = app.current_page.min(n_pages.saturating_sub(1));
+    // Write the clamped page back so navigation can never accumulate
+    // phantom pages past the end (issue #6: scrolling past the last page
+    // then reversing used to cost the same amount of extra scrolling).
+    app.current_page = page;
 
     // Clamp the scroll offset to the last legal row so the user can't page
     // off into the empty void beyond the oldest line.
     let max_scroll = total_rows.saturating_sub(1);
     let scroll_offset = match app.view_mode {
         ViewMode::Page => page * viewport_h,
-        ViewMode::Scroll => app.scroll_row.min(max_scroll),
+        ViewMode::Scroll => {
+            // Same clamp-back as above: keep scroll_row inside the legal
+            // range so reversing direction never has to eat phantom rows.
+            app.scroll_row = app.scroll_row.min(max_scroll);
+            app.scroll_row
+        }
     };
     let scroll_y = scroll_offset.min(u16::MAX as usize) as u16;
 
