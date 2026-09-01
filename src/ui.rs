@@ -39,10 +39,6 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
 
     // ---- input bar (top) ----
     let prompt = "› ";
-    let input_line = Line::from(vec![
-        Span::styled(prompt, Style::default().fg(Color::Cyan)),
-        Span::raw(&input.text),
-    ]);
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(if app.in_flight {
@@ -55,13 +51,50 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         } else {
             " write. Enter to send, Ctrl-C to quit "
         });
-    let input_widget = Paragraph::new(input_line).block(input_block);
-    f.render_widget(input_widget, chunks[0]);
+
+    // The prompt stays fixed on the left; only the text scrolls, so the
+    // caret (and the letters being typed) stay pinned at the right edge
+    // instead of running past it, while old text slides out the left side.
+    let inner = ratatui::layout::Rect {
+        x: chunks[0].x + 1,
+        y: chunks[0].y + 1,
+        width: chunks[0].width.saturating_sub(2),
+        height: chunks[0].height.saturating_sub(2),
+    };
+    let visible_width = (inner.width as usize).saturating_sub(prompt.len());
+    let h_scroll = input.scroll_offset(visible_width);
+
+    // Draw the border + title.
+    f.render_widget(Paragraph::new(Line::from("")).block(input_block), chunks[0]);
+    // Draw the fixed prompt at the inner-left.
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            prompt,
+            Style::default().fg(Color::Cyan),
+        ))),
+        ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y,
+            width: prompt.len() as u16,
+            height: inner.height,
+        },
+    );
+    // Draw the text, scrolled so the caret hugs the right edge.
+    let text_area = ratatui::layout::Rect {
+        x: inner.x + prompt.len() as u16,
+        y: inner.y,
+        width: visible_width as u16,
+        height: inner.height,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::raw(&input.text))).scroll((0, h_scroll as u16)),
+        text_area,
+    );
 
     // Place the terminal cursor inside the input box.
-    let cursor_x = chunks[0].x + 1 + prompt.len() as u16 + input.display_col();
-    let cursor_y = chunks[0].y + 1;
-    if cursor_x < chunks[0].x + chunks[0].width.saturating_sub(1) {
+    let cursor_x = text_area.x + input.display_col() - h_scroll as u16;
+    let cursor_y = text_area.y;
+    if cursor_x < text_area.x + text_area.width {
         f.set_cursor_position(Position {
             x: cursor_x,
             y: cursor_y,
