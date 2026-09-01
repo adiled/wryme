@@ -129,6 +129,16 @@ impl Input {
         self.col = 0;
         out
     }
+
+    /// Horizontal scroll offset (in display columns) so that the caret stays
+    /// pinned at the right edge of a visible area of `visible_width` columns.
+    /// When the text is short, nothing scrolls and the caret sits naturally.
+    /// When it overruns, the offset pushes old text off the left side, keeping
+    /// the caret — and the letters the user is typing — at the right edge.
+    pub fn scroll_offset(&self, visible_width: usize) -> usize {
+        let caret = self.display_col() as usize;
+        caret.saturating_sub(visible_width.saturating_sub(1))
+    }
 }
 
 #[cfg(test)]
@@ -179,5 +189,18 @@ mod tests {
         assert_eq!(out, "ship it");
         assert_eq!(i.text, "");
         assert_eq!(i.col, 0);
+    }
+
+    #[test]
+    fn scroll_keeps_caret_at_right_edge() {
+        let mut i = Input::new();
+        i.insert_str("a");               // 1 col, caret at 1
+        assert_eq!(i.scroll_offset(10), 0);
+        i.insert_str("bcdefghijklmnop"); // caret now at 16
+        assert_eq!(i.scroll_offset(10), 7); // caret pinned at the right edge
+        i.home();
+        assert_eq!(i.scroll_offset(10), 0); // at home nothing is hidden
+        i.end();
+        assert_eq!(i.scroll_offset(10), 7);
     }
 }
