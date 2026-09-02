@@ -47,6 +47,9 @@ fi
 
 echo "$NEW_VERSION" > VERSION
 
+# Keep Cargo.toml's version in sync with VERSION
+sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
 git add -A
 git commit -m "Release v$NEW_VERSION" || true
 git tag -d "v$NEW_VERSION" 2>/dev/null || true
