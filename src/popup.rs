@@ -20,12 +20,24 @@ use crate::station::{Patience, Station};
 #[derive(Debug, Default)]
 pub struct Popup {
     pub mode: Mode,
+    /// Which BIOS-style tab the popup is showing. Station is the tuning
+    /// list; Help lists the shortcuts.
+    pub tab: Tab,
     /// Index of the currently-focused row when in Browse mode. The list
     /// of rows is rebuilt each frame from the current app state; the
     /// renderer clamps this to a legal value.
     pub selected: usize,
+    /// Vertical scroll offset for the popup body, in rows.
+    pub scroll: usize,
     /// Used while in SaveAs mode.
     pub name_input: Input,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum Tab {
+    #[default]
+    Station,
+    Help,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -96,8 +108,10 @@ pub fn toggle(app: &mut App) {
     match app.popup.mode {
         Mode::Closed => {
             app.popup.mode = Mode::Browse;
+            app.popup.tab = Tab::Station;
             // Land on the model row by default.
             app.popup.selected = first_selectable(app);
+            app.popup.scroll = 0;
         }
         Mode::Browse | Mode::SaveAs => {
             close(app);
@@ -107,8 +121,10 @@ pub fn toggle(app: &mut App) {
 
 pub fn close(app: &mut App) {
     app.popup.mode = Mode::Closed;
+    app.popup.tab = Tab::Station;
     app.popup.name_input = Input::new();
     app.popup.selected = 0;
+    app.popup.scroll = 0;
 }
 
 fn first_selectable(app: &App) -> usize {
@@ -385,4 +401,75 @@ pub fn verbosity_label(v: Option<u32>) -> String {
             }
         }
     }
+}
+
+/// Cycle the tab bar: Station <-> Help. Returns to Browse mode and
+/// snaps the selection to the top of the new tab.
+pub fn switch_tab(app: &mut App) {
+    app.popup.tab = match app.popup.tab {
+        Tab::Station => Tab::Help,
+        Tab::Help => Tab::Station,
+    };
+    app.popup.mode = Mode::Browse;
+    app.popup.name_input = Input::new();
+    app.popup.selected = 0;
+    app.popup.scroll = 0;
+}
+
+/// Open the popup with the Help tab selected (bound to F1). If the
+/// popup is already open, just switch to Help.
+pub fn open_help(app: &mut App) {
+    if app.popup.mode == Mode::Closed {
+        app.popup.mode = Mode::Browse;
+        app.popup.selected = 0;
+    }
+    app.popup.tab = Tab::Help;
+    app.popup.mode = Mode::Browse;
+    app.popup.name_input = Input::new();
+    app.popup.scroll = 0;
+}
+
+/// Scroll the popup body by `delta` rows. Clamped by the renderer each
+/// frame, but we keep the offset sane here too.
+pub fn scroll(app: &mut App, delta: i32) {
+    let r = if delta > 0 {
+        app.popup.scroll.saturating_add(delta as usize)
+    } else {
+        app.popup.scroll.saturating_sub((-delta) as usize)
+    };
+    app.popup.scroll = r;
+}
+
+/// Static shortcut list for the Help tab. One line per binding, kept in
+/// roughly the order they appear in keys.rs. The renderer shows this as
+/// a two-column table: key on the left, meaning on the right.
+pub fn help_rows() -> Vec<(String, String)> {
+    vec![
+        ("Enter".into(), "send input".into()),
+        ("Esc".into(), "stop a streaming reply / clear note".into()),
+        ("Ctrl-C".into(), "quit immediately".into()),
+        ("Ctrl-T".into(), "toggle page / scroll view".into()),
+        ("PgUp / PgDn".into(), "page or scroll up / down".into()),
+        ("← / →".into(), "move the input cursor".into()),
+        ("Home / End".into(), "jump to input start / end".into()),
+        ("Backspace / Delete".into(), "delete before / after cursor".into()),
+        ("Ctrl-A / Ctrl-E".into(), "jump to input start / end".into()),
+        ("Ctrl-U".into(), "kill to start of line".into()),
+        ("Ctrl-K".into(), "kill to end of line".into()),
+        ("Ctrl-W".into(), "kill previous word".into()),
+        ("Ctrl-S".into(), "open / close this popup".into()),
+        ("Tab / F1".into(), "switch Station / Help tab".into()),
+        ("Mouse wheel".into(), "scroll in page / scroll view".into()),
+        ("".into(), "".into()),
+        ("In the Station tab:".into(), "".into()),
+        ("↑ / ↓".into(), "move between selectable rows".into()),
+        ("← / →".into(), "adjust model / dials (also Enter)".into()),
+        ("Enter".into(), "load station / update / save-as".into()),
+        ("PgUp / PgDn".into(), "scroll the popup body".into()),
+        ("Esc".into(), "close popup".into()),
+        ("".into(), "".into()),
+        ("In the Help tab:".into(), "".into()),
+        ("Esc / Tab".into(), "leave Help back to Station".into()),
+        ("F1".into(), "open Help tab from anywhere".into()),
+    ]
 }
