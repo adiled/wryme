@@ -41,6 +41,12 @@ pub fn handle_key(
         return;
     }
 
+    // F1 opens the popup directly on the Help tab (even when closed).
+    if k.code == KeyCode::F(1) {
+        popup::open_help(app);
+        return;
+    }
+
     // When the station popup is open, it captures input.
     if app.popup.mode != popup::Mode::Closed {
         popup_key(k, app);
@@ -136,6 +142,15 @@ pub fn handle_key(
 /// three-tick accumulator (trackpad friendly); in Scroll mode it steps
 /// two rows per tick.
 pub fn handle_mouse(m: MouseEvent, app: &mut App) {
+    // When the station popup is open, the wheel scrolls the popup body
+    // (two rows per tick), not the chat view behind it.
+    if app.popup.mode != popup::Mode::Closed {
+        if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+            let delta = if matches!(m.kind, MouseEventKind::ScrollUp) { 1 } else { -1 };
+            popup::scroll(app, delta * 2);
+        }
+        return;
+    }
     match app.view_mode {
         ViewMode::Page => {
             const TICKS_PER_PAGE: i32 = 3;
@@ -200,6 +215,10 @@ fn popup_key(k: KeyEvent, app: &mut App) {
         popup::Mode::Closed => {}
         popup::Mode::Browse => match k.code {
             KeyCode::Esc => popup::close(app),
+            KeyCode::Tab => popup::switch_tab(app),
+            KeyCode::F(1) => popup::open_help(app),
+            KeyCode::PageUp => popup::scroll(app, 1),
+            KeyCode::PageDown => popup::scroll(app, -1),
             KeyCode::Up => popup::move_selection(app, -1),
             KeyCode::Down => popup::move_selection(app, 1),
             KeyCode::Left => popup::adjust(app, -1),

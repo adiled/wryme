@@ -153,6 +153,10 @@ When you're done, press **Ctrl-C** to close it.
 | `Esc`        | Stop a reply that's still coming in.          |
 | `Ctrl-C`     | Close the program.                            |
 | `Ctrl-T`     | Switch between paged and scrolling view.      |
+| `Ctrl-S`     | Open the station popup (a tabbed tuning menu).|
+| `F1`         | Open the popup directly on the Help tab.      |
+| `Tab`        | In the popup: switch between Station / Help.  |
+| `PgUp/PgDn`  | Scroll the popup body (also the mouse wheel). |
 | arrow keys   | Move the cursor inside your typing.           |
 | `Backspace`  | Delete the character before the cursor.       |
 
