@@ -65,12 +65,12 @@ pub(crate) async fn stream(
         conv_msgs
             .last()
             .into_iter()
-            .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
+            .flat_map(|m| json_msg(m))
             .collect()
     } else {
         conv_msgs
             .iter()
-            .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
+            .flat_map(|m| json_msg(m))
             .collect()
     };
     prepend_preamble(&mut input, &engine);
@@ -242,10 +242,33 @@ async fn stream_once(
     Ok((calls, new_id))
 }
 
-fn json_msg(role: &str, content: &str) -> serde_json::Value {
-    serde_json::json!({ "role": role, "content": content })
+fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
+    if m.images.is_empty() {
+        return vec![serde_json::json!({ "role": m.role, "content": m.content })];
+    }
+    // User message with images: the Responses protocol takes `input` items,
+    // so each image becomes its own `input_image` item (per OpenAI's
+    // /responses input_image schema) with a base64 data-URL `image_url`, and
+    // the text rides as a normal `message` item.
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if !m.content.is_empty() {
+        items.push(serde_json::json!({
+            "type": "message",
+            "role": m.role,
+            "content": [{ "type": "input_text", "text": m.content }],
+        }));
+    }
+    for path in &m.images {
+        if let Some((mime, b64)) = crate::api::image_data_url(path) {
+            items.push(serde_json::json!({
+                "type": "input_image",
+                "image_url": format!("data:{mime};base64,{b64}"),
+                "detail": "auto",
+            }));
+        }
+    }
+    items
 }
-
 /// Parse one SSE event body and emit matching StreamEvents. Function calls
 /// are accumulated into `calls`; the newest response id lands in `new_id`.
 fn handle_event(

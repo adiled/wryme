@@ -13,6 +13,31 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
+/// A dropped file lands in the input as its path. If the whole submitted
+/// line is exactly one existing image file path, return it as an image
+/// attachment so the model can see the picture. Anything else (typed text,
+/// a non-image file, several paths) is just plain text and gets no
+/// attachment.
+fn attached_images(text: &str) -> Vec<String> {
+    let t = text.trim();
+    if t.is_empty() || t.chars().any(|c| c.is_whitespace()) {
+        return Vec::new();
+    }
+    let p = std::path::Path::new(t);
+    if !p.is_file() {
+        return Vec::new();
+    }
+    let img = matches!(
+        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    );
+    if img {
+        vec![t.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 use crate::api::{Client, StreamEvent};
 use crate::app::{App, ViewMode};
 use crate::input::Input;
@@ -72,7 +97,8 @@ pub fn handle_key(
             if text.is_empty() {
                 return;
             }
-            app.push_user(text);
+            let images = attached_images(&text);
+            app.push_user(text, images);
             app.begin_assistant();
             app.in_flight = true;
             app.current_page = 0;
@@ -254,5 +280,45 @@ fn popup_key(k: KeyEvent, app: &mut App) {
             }
             _ => {}
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_path_attaches_single_file() {
+        // Create a temp png (any bytes; extension decides).
+        let dir = std::env::temp_dir();
+        let path = dir.join("wryme_test_img.png");
+        std::fs::write(&path, b"fakeimage").unwrap();
+        let got = attached_images(&path.to_string_lossy());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], path.to_string_lossy().to_string());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn non_image_or_text_is_not_attached() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("wryme_test.txt");
+        std::fs::write(&path, b"hi").unwrap();
+        assert_eq!(attached_images(&path.to_string_lossy()).len(), 0);
+        assert_eq!(attached_images("just some words").len(), 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn data_url_roundtrip() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("wryme_test2.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nabc").unwrap();
+        let (mime, b64) = crate::api::image_data_url(&path.to_string_lossy()).unwrap();
+        assert_eq!(mime, "image/png");
+        use base64::Engine;
+        let dec = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        assert_eq!(&dec[..8], b"\x89PNG\r\n\x1a\n");
+        std::fs::remove_file(&path).ok();
     }
 }

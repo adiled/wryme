@@ -40,6 +40,9 @@ pub enum ViewMode {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Image file paths attached to this user message. Sent upstream as
+    /// image inputs; rendered as a small attachment note.
+    pub images: Vec<String>,
     /// Reasoning / chain-of-thought from the model, if it sent any.
     /// Streamed before `content`, rendered below the reply (older in time)
     /// as a dimmer "brain" block.
@@ -216,10 +219,11 @@ impl App {
         self.status = msg.into();
     }
 
-    pub fn push_user(&mut self, content: String) {
+    pub fn push_user(&mut self, content: String, images: Vec<String>) {
         self.messages.push(Message {
             role: Role::User,
             content,
+            images,
             brain: String::new(),
             streaming: false,
             timestamp: now_hhmm(),
@@ -246,6 +250,7 @@ impl App {
         self.messages.push(Message {
             role: Role::Assistant,
             content: String::new(),
+            images: Vec::new(),
             brain: String::new(),
             streaming: true,
             timestamp: now_hhmm(),
@@ -280,6 +285,7 @@ impl App {
             self.messages.push(Message {
                 role: Role::Assistant,
                 content: String::new(),
+                images: Vec::new(),
                 brain: String::new(),
                 streaming: true,
                 timestamp: now_hhmm(),
@@ -419,6 +425,7 @@ impl App {
             out.push(ApiMessage {
                 role: "system".into(),
                 content: sys.clone(),
+                images: Vec::new(),
             });
         }
         if let Ok(mut engine) = self.engine.lock() {
@@ -426,6 +433,7 @@ impl App {
                 out.push(ApiMessage {
                     role: "system".into(),
                     content: preamble,
+                    images: Vec::new(),
                 });
             }
             // The book-writing prod: a quiet system reminder the engine
@@ -434,6 +442,7 @@ impl App {
                 out.push(ApiMessage {
                     role: "system".into(),
                     content: prod,
+                    images: Vec::new(),
                 });
             }
         }
@@ -473,6 +482,11 @@ impl App {
                 }
                 .into(),
                 content: m.content.clone(),
+                images: if m.role == Role::User {
+                    m.images.clone()
+                } else {
+                    Vec::new()
+                },
             });
         }
         out

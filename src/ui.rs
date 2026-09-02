@@ -348,6 +348,12 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
                 out.extend(crate::md::render(&msg.content, cursor_in_reply));
             }
             Role::User => {
+                for img in &msg.images {
+                    out.push(Line::from(Span::styled(
+                        format!("📷 attached: {img}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
                 let last_idx = msg.content.split('\n').count().saturating_sub(1);
                 for (i, raw) in msg.content.split('\n').enumerate() {
                     if i == last_idx && cursor_in_reply {
