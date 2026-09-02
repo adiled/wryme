@@ -42,7 +42,7 @@ pub(crate) async fn stream(
     // messages); tool calls and their results get appended here.
     let mut conv: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| json_msg(m.role.as_str(), m.content.as_str()))
+        .map(|m| json_msg(m))
         .collect();
 
     // Plant any finished async jobs back into the conversation as a
@@ -188,8 +188,34 @@ async fn stream_once(
     Ok((calls, assistant_content))
 }
 
-fn json_msg(role: &str, content: &str) -> serde_json::Value {
-    serde_json::json!({ "role": role, "content": content })
+fn json_msg(m: &ApiMessage) -> serde_json::Value {
+    if m.images.is_empty() {
+        return serde_json::json!({ "role": m.role, "content": m.content });
+    }
+    // User message with image attachments: content becomes an array of
+    // text + image_url parts, each image base64'd into a data URL.
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    if !m.content.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": m.content,
+        }));
+    }
+    for path in &m.images {
+        if let Some((mime, b64)) = crate::api::image_data_url(path) {
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{mime};base64,{b64}"),
+                    "detail": "auto",
+                },
+            }));
+        }
+    }
+    serde_json::json!({
+        "role": m.role,
+        "content": parts,
+    })
 }
 
 fn handle_event(

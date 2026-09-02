@@ -29,6 +29,9 @@ use crate::station::Station;
 pub struct ApiMessage {
     pub role: String,
     pub content: String,
+    /// Image file paths attached to this message. Read and base64-encoded
+    /// by the protocol builders when serializing to the wire.
+    pub images: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -146,4 +149,26 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         out.push_str("…");
         out
     }
+}
+
+/// Read an image file and return its media type + base64 data-URL payload.
+/// Only common image extensions are accepted; anything else yields None so
+/// the caller can fall back to plain text.
+pub fn image_data_url(path: &str) -> Option<(String, String)> {
+    let mime = match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => return None,
+    };
+    let bytes = std::fs::read(path).ok()?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some((mime.to_string(), b64))
 }

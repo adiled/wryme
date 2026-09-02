@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 futures-util = "0.3"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parquet = "53"
 arrow-array = "53"
