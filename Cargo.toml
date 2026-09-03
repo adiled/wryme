@@ -4,6 +4,12 @@ version = "1.1.1"
 edition = "2021"
 license = "MIT"
 description = "wryme • that small, calm window where agents come to meet you"
+repository = "https://github.com/adiled/wryme"
+homepage = "https://github.com/adiled/wryme"
+documentation = "https://github.com/adiled/wryme#readme"
+readme = "README.md"
+keywords = ["tui", "terminal", "chat", "ai", "agent", "cli"]
+categories = ["command-line-interface"]
 
 [[bin]]
 name = "wme"

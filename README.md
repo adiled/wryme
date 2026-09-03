@@ -19,11 +19,11 @@ whether you want it.
 
 ## Installing it
 
-In your terminal, run:
+You can install it either way:
 
 ```sh
 make build
-make install
+make install     # or: cargo install wryme
 ```
 
 That puts a program called `wme` in your `~/.local/bin` folder. If that folder
