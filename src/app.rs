@@ -61,22 +61,11 @@ pub struct Message {
     /// to the right of the phase indicator on the header line, just left
     /// of the timestamp. Only displayed while streaming.
     pub current_tool: Option<String>,
-    /// Results of tools we ran locally (myshell_explore) this turn, in
-    /// order. Rendered as a dim block under the header, above the final
-    /// reply, so the user sees the machine doing the thing.
-    pub tool_results: Vec<ToolResult>,
     /// Logical turn this message belongs to. A single assistant reply can
     /// span several messages (one per contiguous non-thinking cluster) —
     /// they all share the same `turn_id` so the wire transcript and the
     /// book record still treat them as one turn. User messages set 0.
     pub turn_id: u64,
-}
-
-/// One local tool execution: which tool ran and what it returned.
-#[derive(Debug, Clone)]
-pub struct ToolResult {
-    pub name: String,
-    pub output: String,
 }
 
 fn now_hhmm() -> String {
@@ -229,7 +218,6 @@ impl App {
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
             current_tool: None,
-            tool_results: Vec::new(),
             turn_id: 0,
         });
         // The engine records every turn into the continuous stream, and
@@ -256,7 +244,6 @@ impl App {
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
             current_tool: None,
-            tool_results: Vec::new(),
             turn_id: tid,
         });
     }
@@ -291,7 +278,6 @@ impl App {
                 timestamp: now_hhmm(),
                 phase: Phase::Streaming,
                 current_tool: None,
-                tool_results: Vec::new(),
                 turn_id: tid,
             });
         }
@@ -350,18 +336,6 @@ impl App {
         }
     }
 
-    pub fn append_tool_result(&mut self, name: String, output: String) {
-        if let Some(m) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.streaming)
-        {
-            m.phase = Phase::Tinkering;
-            m.tool_results.push(ToolResult { name, output });
-        }
-    }
-
     pub fn finish_streaming(&mut self) {
         self.in_flight = false;
 
@@ -405,7 +379,7 @@ impl App {
                 .iter()
                 .any(|m| m.role == Role::Assistant && m.turn_id == tid
                     && (!m.content.is_empty() || !m.brain.is_empty()
-                        || m.current_tool.is_some() || !m.tool_results.is_empty()));
+                        || m.current_tool.is_some()));
             if !any_nonempty {
                 self.messages.retain(|m| !(m.role == Role::Assistant && m.turn_id == tid));
                 if self.status.is_empty() {

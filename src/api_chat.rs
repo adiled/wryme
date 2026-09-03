@@ -97,10 +97,6 @@ pub(crate) async fn stream(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };
-            let _ = tx.send(StreamEvent::ToolResult {
-                name: c.name.clone(),
-                output: output.clone(),
-            });
             conv.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": c.id,

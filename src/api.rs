@@ -12,19 +12,15 @@
 //   Delta { text }      content delta
 //   Brain { text }      reasoning / thinking delta
 //   ToolCall { name }   model is calling a tool; drives "tinkering"
-//   ToolResult { name, output }  a tool we ran locally; surfaced + fed back
 //   ResponseId { id }   captured from response.created, replayed as
 //                       previous_response_id next turn for session pinning
 //   Done                clean end of stream
 //   Error { message }   anything we couldn't classify as success
-
 use anyhow::{Context, Result};
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
-
 use crate::shop::{Protocol, Shop};
 use crate::station::Station;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiMessage {
     pub role: String,
@@ -33,25 +29,19 @@ pub struct ApiMessage {
     /// by the protocol builders when serializing to the wire.
     pub images: Vec<String>,
 }
-
 #[derive(Debug)]
 pub enum StreamEvent {
     Delta { text: String },
     Brain { text: String },
     ToolCall { name: Option<String> },
-    /// A tool call we actually ran locally (myshell_explore). The output
-    /// is surfaced in the UI and fed back to the model.
-    ToolResult { name: String, output: String },
     ResponseId { id: String },
     Done,
     Error { message: String },
 }
-
 #[derive(Clone)]
 pub struct Client {
     pub(crate) http: reqwest::Client,
 }
-
 impl Client {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -60,7 +50,6 @@ impl Client {
             .context("building http client")?;
         Ok(Self { http })
     }
-
     /// Open a streaming completion against the given shop with the given
     /// station's model + dials. Each StreamEvent is sent on `tx` as it
     /// arrives; returns when the upstream stream closes or errors.
@@ -110,14 +99,11 @@ impl Client {
         let _ = tx.send(StreamEvent::Done);
     }
 }
-
 // ---- SSE framing helpers used by both protocol files ----
-
 pub(crate) struct Boundary {
     pub body_len: usize,
     pub end: usize,
 }
-
 pub(crate) fn find_event_boundary(buf: &[u8]) -> Option<Boundary> {
     for i in 0..buf.len().saturating_sub(1) {
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
@@ -140,7 +126,6 @@ pub(crate) fn find_event_boundary(buf: &[u8]) -> Option<Boundary> {
     }
     None
 }
-
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -150,7 +135,6 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         out
     }
 }
-
 /// Read an image file and return its media type + base64 data-URL payload.
 /// Only common image extensions are accepted; anything else yields None so
 /// the caller can fall back to plain text.

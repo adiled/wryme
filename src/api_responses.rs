@@ -111,10 +111,6 @@ pub(crate) async fn stream(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
-            let _ = tx.send(StreamEvent::ToolResult {
-                name: call.name.clone(),
-                output: output.clone(),
-            });
             next_input.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": call.call_id,
