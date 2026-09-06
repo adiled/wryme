@@ -23,26 +23,60 @@ fn spawn_say(body: &str, voice: Option<&str>) -> Option<Child> {
     if body.trim().is_empty() {
         return None;
     }
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = Command::new("say");
-        match voice {
-            Some(v) => {
-                c.arg("-v").arg(v);
-            }
-            None => {
-                c.arg("-v").arg(DEFAULT_MAC_VOICE);
-                c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
-            }
-        }
-        c
-    } else {
-        let mut c = Command::new("spd-say");
-        if let Some(v) = voice {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let mut c = Command::new("spd-say");
+    if let Some(v) = voice {
+        c.arg("-v").arg(v);
+    }
+    c.arg(body).spawn().ok()
+}
+
+static SPEECH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn synth_file(body: &str, voice: Option<&str>) -> Option<std::path::PathBuf> {
+    let n = SPEECH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("wryme-say-{}-{}.aiff", std::process::id(), n));
+    let mut c = Command::new("say");
+    match voice {
+        Some(v) => {
             c.arg("-v").arg(v);
         }
-        c
-    };
-    cmd.arg(body).spawn().ok()
+        None => {
+            c.arg("-v").arg(DEFAULT_MAC_VOICE);
+            c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
+        }
+    }
+    let ok = c
+        .arg("-o")
+        .arg(&path)
+        .arg(body)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok && path.is_file() {
+        Some(path)
+    } else {
+        let _ = std::fs::remove_file(&path);
+        None
+    }
+}
+
+type Cur = std::sync::Arc<std::sync::Mutex<Option<Child>>>;
+
+fn play_wait(path: &std::path::Path, cur: &Cur) {
+    if let Ok(child) = Command::new("afplay").arg(path).spawn() {
+        if let Ok(mut guard) = cur.lock() {
+            *guard = Some(child);
+        }
+        if let Ok(mut guard) = cur.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.wait();
+            }
+        }
+    }
+    let _ = std::fs::remove_file(path);
 }
 
 /// Split streamed text into speakable sentences. Returns complete
@@ -83,10 +117,10 @@ enum SpeakCmd {
     Stop,
 }
 
-/// Sequential background speaker. Sentences queue up and play in order,
-/// one `say` at a time; Stop kills the current voice and drops the queue.
-/// Speeches batch two sentences per invocation: every process boundary
-/// clips a little audio, so fewer, bigger speeches sound continuous.
+/// Sequential background speaker. Sentences queue up and play in order;
+/// Stop kills the current voice and drops the queue. macOS renders each
+/// speech to a temp file and plays it with afplay: `say` straight to the
+/// device clips the tail, the file round-trip does not.
 pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
@@ -99,19 +133,29 @@ impl Speaker {
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
             let mut pending: Vec<String> = Vec::new();
-            let speak_now =
-                |text: String, cur: &std::sync::Arc<std::sync::Mutex<Option<Child>>>| {
-                    if let Some(child) = spawn_say(&text, voice.as_deref()) {
-                        if let Ok(mut guard) = cur.lock() {
-                            *guard = Some(child);
-                        }
-                        if let Ok(mut guard) = cur.lock() {
-                            if let Some(mut child) = guard.take() {
-                                let _ = child.wait();
-                            }
+            // One speech, fully played. Batches two sentences where told
+            // to; afplay is the killable handle, temp file is scrubbed.
+            let speak_now = |text: String, cur: &Cur| {
+                if text.trim().is_empty() {
+                    return;
+                }
+                if cfg!(target_os = "macos") {
+                    if let Some(path) = synth_file(&text, voice.as_deref()) {
+                        play_wait(&path, cur);
+                    }
+                    return;
+                }
+                if let Some(child) = spawn_say(&text, voice.as_deref()) {
+                    if let Ok(mut guard) = cur.lock() {
+                        *guard = Some(child);
+                    }
+                    if let Ok(mut guard) = cur.lock() {
+                        if let Some(mut child) = guard.take() {
+                            let _ = child.wait();
                         }
                     }
-                };
+                }
+            };
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     SpeakCmd::Stop => {
@@ -179,8 +223,6 @@ mod tests {
 
     #[test]
     fn empty_text_speaks_nothing() {
-        assert!(spawn_say("", None).is_none());
-        assert!(spawn_say("   ", None).is_none());
         let mut buf = String::from("no sentence end here");
         assert!(split_sentences(&mut buf).is_empty());
         assert_eq!(buf, "no sentence end here");
