@@ -280,6 +280,21 @@ fn handle_event(
         }
         match serde_json::from_str::<ChatChunk>(payload) {
             Ok(chunk) => {
+                // Token usage rides the final chunk (empty choices) when
+                // `stream_options.include_usage` is set.
+                if let Some(u) = chunk.usage.as_ref() {
+                    let input = u.get("prompt_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let output = u
+                        .get("completion_tokens")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let total = u.get("total_tokens").and_then(|n| n.as_u64());
+                    if input + output > 0 {
+                        let _ = tx.send(StreamEvent::Usage { input, output });
+                    } else if let Some(t) = total.filter(|t| *t > 0) {
+                        let _ = tx.send(StreamEvent::Usage { input: t, output: 0 });
+                    }
+                }
                 for choice in chunk.choices {
                     // Terminal reason for this choice. Surfaces truncation
                     // and content-filter cutoffs that are otherwise silent
@@ -375,10 +390,8 @@ struct ChatChunk {
     #[serde(default)]
     choices: Vec<Choice>,
     // Present (with empty choices) on the final usage chunk when
-    // `stream_options.include_usage` is set. No UI sink for token
-    // telemetry yet; kept so the shape stays explicit.
+    // `stream_options.include_usage` is set. Parsed into a Usage event.
     #[serde(default)]
-    #[allow(dead_code)]
     usage: Option<serde_json::Value>,
 }
 
@@ -504,6 +517,22 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "zsh");
         assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn usage_chunk_emits_usage_event() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":300,\"total_tokens\":1500}}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Usage { input: 1200, output: 300 }));
     }
 
     #[test]

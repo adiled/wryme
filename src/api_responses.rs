@@ -374,10 +374,26 @@ fn handle_event(
         };
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
-            // Terminal states. Usage rides `response.completed` but has no
-            // UI sink yet; failures and cutoffs surface as errors instead
-            // of a stream that just stops.
-            "response.completed" => {}
+            // Terminal states. Usage feeds the status-bar meter; failures
+            // and cutoffs surface as errors instead of a stream that just
+            // stops.
+            "response.completed" => {
+                let usage = v.get("response").and_then(|r| r.get("usage"));
+                let input = usage
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+                let output = usage
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+                let total = usage.and_then(|u| u.get("total_tokens")).and_then(|n| n.as_u64());
+                if input + output > 0 {
+                    let _ = tx.send(StreamEvent::Usage { input, output });
+                } else if let Some(t) = total.filter(|t| *t > 0) {
+                    let _ = tx.send(StreamEvent::Usage { input: t, output: 0 });
+                }
+            }
             "response.failed" => {
                 let msg = v
                     .get("response")
@@ -606,6 +622,24 @@ mod tests {
         assert_eq!(items[0]["type"], "function_call_output");
         assert_eq!(items[0]["call_id"], "c1");
         assert_eq!(items[0]["output"], "out");
+    }
+
+    #[test]
+    fn completed_event_emits_usage() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut id = None;
+        handle_event(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":345,\"output_tokens\":69,\"total_tokens\":414}}}\n\n",
+            &tx,
+            &mut calls,
+            &mut reasoning,
+            &mut id,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Usage { input: 345, output: 69 }));
     }
 
     #[test]

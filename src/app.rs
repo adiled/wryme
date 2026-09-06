@@ -117,11 +117,17 @@ pub struct App {
     /// in scroll mode.
     pub last_viewport_h: usize,
     /// Most recent response.id seen from a Responses-protocol station.
-    /// Used as `previous_response_id` on the next request so the server
-    /// pins us to the same warm session (matters for stations that keep
-    /// per-session state like cached tool results or MCP server state).
-    /// Reset to None on launch; we don't persist across runs.
+    /// Captured for the UI; never replayed — requests are stateless
+    /// (`store: false`, full transcript every turn). Reset to None on
+    /// launch; we don't persist across runs.
     pub last_response_id: Option<String>,
+    /// Running token usage for this window. `usage_ctx` is the latest
+    /// reported prompt size (replaced each turn — every request re-reports
+    /// the whole transcript, so summing it would explode past the real
+    /// context). `usage_out` accumulates generated tokens across turns.
+    /// Rendered as a gray K-count, bottom-right.
+    pub usage_ctx: u64,
+    pub usage_out: u64,
     /// All shops loaded at startup. Read-only after that. Used by the
     /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
@@ -187,6 +193,8 @@ impl App {
             view_mode: ViewMode::Page,
             last_viewport_h: 0,
             last_response_id: None,
+            usage_ctx: 0,
+            usage_out: 0,
             shops,
             stations,
             active_station,

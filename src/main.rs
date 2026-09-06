@@ -193,6 +193,13 @@ async fn run(
                     StreamEvent::ResponseId { id } => {
                         app.last_response_id = Some(id);
                     }
+                    StreamEvent::Usage { input, output } => {
+                        // Latest prompt size replaces (each request
+                        // re-reports the full transcript); generated
+                        // tokens accumulate across the window.
+                        app.usage_ctx = input;
+                        app.usage_out += output;
+                    }
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if let Some(t) = in_flight_task.take() {

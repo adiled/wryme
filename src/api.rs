@@ -59,6 +59,9 @@ pub enum StreamEvent {
         output: String,
     },
     ResponseId { id: String },
+    /// Token usage for the finished turn (prompt + completion), when the
+    /// server reports it: chat usage chunk, or responses completed event.
+    Usage { input: u64, output: u64 },
     Done,
     Error { message: String },
 }

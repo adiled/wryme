@@ -217,6 +217,22 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Color::Gray
         }),
     ));
+    let used = app.usage_ctx + app.usage_out;
+    if used > 0 {
+        let label = format_k(used);
+        let left_w: usize = pieces
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let bar_w = chunks[2].width as usize;
+        let uw = UnicodeWidthStr::width(label.as_str());
+        if bar_w > left_w + uw + 2 {
+            pieces.push(Span::raw(" ".repeat(bar_w - left_w - uw)));
+        } else {
+            pieces.push(Span::raw("  "));
+        }
+        pieces.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+    }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
 
@@ -233,6 +249,20 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     if app.popup.mode != popup::Mode::Closed {
         crate::popup_ui::draw(f, app);
     }
+}
+
+/// K-terms formatting for the usage meter: 950 -> "950", 12400 ->
+/// "12.4K", 2_300_000 -> "2.3M".
+fn format_k(n: u64) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+    let f = n as f64;
+    if n < 1_000_000 {
+        let k = f / 1000.0;
+        return format!("{:.1}K", (k * 10.0).round() / 10.0);
+    }
+    format!("{:.1}M", ((f / 1_000_000.0) * 10.0).round() / 10.0)
 }
 
 /// True when the status bar carries an error worth the red treatment
@@ -538,6 +568,15 @@ mod tests {
         for r in &rows {
             assert!(UnicodeWidthStr::width(r.trim_end_matches('-').to_string().as_str()) <= 10);
         }
+    }
+
+    #[test]
+    fn usage_formats_in_k_terms() {
+        assert_eq!(format_k(0), "0");
+        assert_eq!(format_k(950), "950");
+        assert_eq!(format_k(1000), "1.0K");
+        assert_eq!(format_k(12400), "12.4K");
+        assert_eq!(format_k(2_300_000), "2.3M");
     }
 
     #[test]
