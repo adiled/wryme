@@ -40,6 +40,10 @@ struct FuncCall {
     arguments: String,
 }
 
+/// Server-side per-turn cap on stacked tool calls: bounds spend when a
+/// model keeps calling instead of answering.
+const MAX_TOOL_CALLS: u32 = 10;
+
 pub(crate) async fn stream(
     client: &Client,
     shop: &Shop,
@@ -204,6 +208,12 @@ async fn stream_once(
         // store:false.
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<&'a str>>,
+        // Runaway guard: most tool calls the model may stack up in one
+        // turn before the server cuts it off.
+        max_tool_calls: u32,
+        // Oversize input trims from the conversation head instead of
+        // 400ing. Matters on long stateless replays.
+        truncation: &'a str,
         tools: &'a [serde_json::Value],
     }
 
@@ -236,6 +246,8 @@ async fn stream_once(
         max_output_tokens: station.dials.verbosity,
         reasoning,
         include,
+        max_tool_calls: MAX_TOOL_CALLS,
+        truncation: "auto",
         tools: &tools,
     };
 

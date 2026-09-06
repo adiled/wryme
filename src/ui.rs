@@ -13,10 +13,10 @@
 //   └──────────────────────────────────────┘
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Position},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -211,16 +211,23 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     pieces.push(Span::raw(dot));
     pieces.push(Span::styled(
         app.status.clone(),
-        Style::default().fg(
-            if app.status.starts_with("error") || app.status.starts_with("upstream") {
-                Color::Red
-            } else {
-                Color::Gray
-            },
-        ),
+        Style::default().fg(if is_error_status(&app.status) {
+            Color::Red
+        } else {
+            Color::Gray
+        }),
     ));
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
+
+    // ---- error overlay (bottom-right half, wrapped) ----
+    // Long upstream errors used to bleed past the right edge on the
+    // single-line status bar. When the status is an error, also pop a
+    // wrapped red box over the bottom-right half so the whole message
+    // reads, even if it runs multiline.
+    if is_error_status(&app.status) {
+        draw_error_overlay(f, area, chunks[2], &app.status);
+    }
 
     // ---- station popup overlay ----
     if app.popup.mode != popup::Mode::Closed {
@@ -228,6 +235,108 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     }
 }
 
+/// True when the status bar carries an error worth the red treatment
+/// (and the wrapped overlay below).
+fn is_error_status(s: &str) -> bool {
+    s.starts_with("error")
+        || s.starts_with("upstream")
+        || s.starts_with("stopped:")
+        || s.starts_with("save failed")
+        || s.starts_with("update failed")
+}
+
+/// Wrapped error box over the bottom-right half of the screen, stacked
+/// just above the status bar. Height fits the wrapped text (capped), so
+/// short errors stay a small flag and long ones read multiline instead
+/// of bleeding off the right edge.
+fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) {
+    let box_w = (area.width / 2).clamp(24, area.width.max(24)) as usize;
+    let inner_w = box_w.saturating_sub(4).max(10);
+    let mut rows = wrap_words(msg, inner_w);
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    // Cap the box so it never eats the whole window; extra lines clip.
+    let max_rows = 8usize;
+    rows.truncate(max_rows);
+    let box_h = (rows.len() + 2) as u16;
+    let x = area.width.saturating_sub(box_w as u16);
+    // Stack above the status bar; clamp into the window on short screens.
+    let y = status_chunk.y.saturating_sub(box_h).max(area.y);
+    let err_area = Rect {
+        x,
+        y,
+        width: box_w as u16,
+        height: box_h.min(status_chunk.y.saturating_sub(area.y).max(3)),
+    };
+    if err_area.width < 12 || err_area.height < 3 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(Span::styled(" error ", Style::default().fg(Color::Red)));
+    let text = Text::from(
+        rows.into_iter()
+            .map(|r| Line::from(Span::styled(r, Style::default().fg(Color::Red))))
+            .collect::<Vec<_>>(),
+    );
+    f.render_widget(Clear, err_area);
+    f.render_widget(Paragraph::new(text).block(block), err_area);
+}
+
+/// Greedy word wrap for the error box. Long words hard-break so a wall
+/// of URL never overflows the box.
+fn wrap_words(s: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let push = |out: &mut Vec<String>, cur: &mut String| {
+        if !cur.is_empty() {
+            out.push(std::mem::take(cur));
+        }
+    };
+    for word in s.split_whitespace() {
+        // Hard-break words wider than the box first.
+        let mut w = word;
+        while unicode_width::UnicodeWidthStr::width(w) > width {
+            let cut = cut_at_width(w, width.saturating_sub(1));
+            if !cur.is_empty() {
+                push(&mut out, &mut cur);
+            }
+            out.push(format!("{cut}-"));
+            w = &w[cut.len()..];
+        }
+        let sep = if cur.is_empty() { 0 } else { 1 };
+        if unicode_width::UnicodeWidthStr::width(cur.as_str())
+            + sep
+            + unicode_width::UnicodeWidthStr::width(w)
+            > width
+        {
+            push(&mut out, &mut cur);
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(w);
+    }
+    push(&mut out, &mut cur);
+    out
+}
+
+/// Byte index where the next `width` display columns end.
+fn cut_at_width(s: &str, width: usize) -> &str {
+    let mut w = 0usize;
+    let mut end = 0usize;
+    for (i, c) in s.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        w += cw;
+        end = i + c.len_utf8();
+    }
+    &s[..end]
+}
 
 fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     let (role_color, role_text) = match msg.role {
@@ -237,9 +346,7 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
 
     let mut header: Vec<Span<'static>> = vec![Span::styled(
         role_text.to_string(),
-        Style::default()
-            .fg(role_color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     )];
     if msg.streaming {
         // Hidden tools (the bookkeeper and the phantom async checker) are
@@ -301,10 +408,7 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     } else {
         None
     };
-    let ts_span = Span::styled(
-        msg.timestamp.clone(),
-        Style::default().fg(Color::DarkGray),
-    );
+    let ts_span = Span::styled(msg.timestamp.clone(), Style::default().fg(Color::DarkGray));
 
     // Width math. Pad with spaces between the header's left content and the
     // right cluster (tool name + timestamp).
@@ -410,4 +514,38 @@ fn wrapped_row_count(lines: &[Line<'_>], area_width: u16) -> usize {
         total += if w == 0 { 1 } else { w.div_ceil(aw) };
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_box_wraps_inside_width() {
+        let rows = wrap_words("upstream 400: this is a long error message", 12);
+        assert!(rows.len() > 1);
+        for r in &rows {
+            assert!(UnicodeWidthStr::width(r.as_str()) <= 12, "overflow: {r}");
+        }
+        // Joined words survive intact, space-separated.
+        assert_eq!(rows.join(" "), "upstream 400: this is a long error message");
+    }
+
+    #[test]
+    fn error_box_hard_breaks_long_words() {
+        let rows = wrap_words("https://example.com/very/long/path", 10);
+        assert!(rows.len() > 1);
+        for r in &rows {
+            assert!(UnicodeWidthStr::width(r.trim_end_matches('-').to_string().as_str()) <= 10);
+        }
+    }
+
+    #[test]
+    fn error_status_detection() {
+        assert!(is_error_status("upstream 500: x"));
+        assert!(is_error_status("stopped: length"));
+        assert!(is_error_status("error: y"));
+        assert!(!is_error_status("saved station 'a'"));
+        assert!(!is_error_status(""));
+    }
 }

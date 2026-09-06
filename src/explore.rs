@@ -47,6 +47,7 @@ available and how to use it. Once you know what to run, execute it with \
 your shell tool (the one named after your shell, e.g. zsh or bash).";
 
 /// The JSON parameters schema advertised with the tool.
+/// Strict-mode clean: single required property, no additional properties.
 pub fn tool_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -56,7 +57,8 @@ pub fn tool_parameters() -> serde_json::Value {
                 "description": "comma-separated words or short phrases you think could be tools"
             }
         },
-        "required": ["csv"]
+        "required": ["csv"],
+        "additionalProperties": false
     })
 }
 
