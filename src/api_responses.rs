@@ -219,14 +219,18 @@ async fn stream_once(
 
     #[derive(Serialize)]
     struct Reasoning {
-        effort: &'static str,
-        // Without `summary: auto` the server may emit no
-        // reasoning_summary_text deltas — our only Brain source.
+        // Depth knob, only when the station sets patience. Omitted
+        // otherwise so the model's native thinking depth is untouched.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<&'static str>,
+        // Always on: without `summary: auto` most servers emit no
+        // reasoning stream at all, and the UI's thinking display goes
+        // dark (ds4 does exactly this). Display-only, no depth change.
         summary: &'static str,
     }
 
-    let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
-        effort: p.as_wire(),
+    let reasoning = Some(Reasoning {
+        effort: station.dials.patience.map(|p: Patience| p.as_wire()),
         summary: "auto",
     });
     let include = reasoning
