@@ -223,8 +223,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     // ---- usage meter (bottom-right, gray, K terms) ----
     // Tokens burned across this whole window, accumulated as servers
     // report them. Right-aligned so it never fights the status text.
-    if app.usage_total != (0, 0) {
-        let label = format!("{} used", format_k(app.usage_total.0 + app.usage_total.1));
+    if app.usage_ctx + app.usage_out > 0 {
+        let label = format!("{} used", format_k(app.usage_ctx + app.usage_out));
         let bar_w = chunks[2].width as usize;
         let w = UnicodeWidthStr::width(label.as_str()).min(bar_w);
         let x = chunks[2].x + (bar_w.saturating_sub(w) as u16);

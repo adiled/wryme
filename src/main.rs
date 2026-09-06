@@ -194,8 +194,11 @@ async fn run(
                         app.last_response_id = Some(id);
                     }
                     StreamEvent::Usage { input, output } => {
-                        app.usage_total.0 += input;
-                        app.usage_total.1 += output;
+                        // Latest prompt size replaces (each request
+                        // re-reports the full transcript); generated
+                        // tokens accumulate across the window.
+                        app.usage_ctx = input;
+                        app.usage_out += output;
                     }
                     StreamEvent::Done => {
                         app.finish_streaming();
