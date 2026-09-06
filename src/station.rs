@@ -160,7 +160,12 @@ impl StationDef {
             model: self.model,
             dials: Dials {
                 boldness: self.boldness,
-                patience: self.patience.and_then(|p| p.into_patience()),
+                // Missing key falls back to the default (steady); only an
+                // explicitly unparseable value reads as unset.
+                patience: self
+                    .patience
+                    .map(|p| p.into_patience())
+                    .unwrap_or_else(|| Dials::default().patience),
                 verbosity: self.verbosity,
             },
             voice: self.voice,
