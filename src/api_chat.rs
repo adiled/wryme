@@ -133,6 +133,7 @@ async fn stream_once(
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_tokens: Option<u32>,
+        tool_choice: &'a str,
         tools: &'a [serde_json::Value],
     }
 
@@ -145,6 +146,7 @@ async fn stream_once(
         stream: true,
         temperature: station.dials.boldness,
         max_tokens: station.dials.verbosity,
+        tool_choice: "auto",
         tools: &tools,
     };
 
