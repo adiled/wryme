@@ -134,7 +134,7 @@ pub fn split_sentences(buffer: &mut String) -> Vec<String> {
 }
 
 enum SpeakCmd {
-    Say(String),
+    Say(u64, String),
     Flush,
     Stop,
 }
@@ -147,6 +147,7 @@ pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
     queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub name: Option<String>,
 }
 
@@ -154,8 +155,10 @@ impl Speaker {
     pub fn new(voice: Option<String>) -> Self {
         let current = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
         let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cur = current.clone();
         let cnt = queued.clone();
+        let thread_gen = gen.clone();
         let thread_voice = voice.clone();
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
@@ -195,8 +198,14 @@ impl Speaker {
                             }
                         }
                         while rx.try_recv().is_ok() {}
+                        // Anything sent before this Stop is now stale;
+                        // drop it on read via the generation check below.
                     }
-                    SpeakCmd::Say(text) => {
+                    SpeakCmd::Say(g, text) => {
+                        cnt.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        if g != thread_gen.load(std::sync::atomic::Ordering::Relaxed) {
+                            continue;
+                        }
                         pending.push(text);
                         while pending.len() >= 2 {
                             let pair = format!("{} {}", pending.remove(0), pending.remove(0));
@@ -247,6 +256,7 @@ impl Speaker {
     }
 
     pub fn stop(&mut self) {
+        self.gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Stop);
         }
