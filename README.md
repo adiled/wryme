@@ -60,12 +60,12 @@ Make the file `~/.config/wryme/shops.toml` and put one block in it for the
 AI service you have an account with:
 
 ```toml
-# OpenAI
+# OpenAI (responses is the default protocol; add
+# protocol = "chat-completions" only for servers with no /responses)
 [[shop]]
 name = "openai"
 url = "https://api.openai.com/v1"
 key_env = "OPENAI_API_KEY"
-protocol = "responses"
 models = ["gpt-4o-mini", "o1-mini", "gpt-4o"]
 ```
 
