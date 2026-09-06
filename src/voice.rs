@@ -164,7 +164,7 @@ impl Speaker {
                     return;
                 }
                 if cfg!(target_os = "macos") {
-                    if let Some(path) = synth_file(&text, thread_voice.as_deref()) {
+                    if let Some(path) = synth_file(&text, thread_voice.as_deref(), cur) {
                         play_wait(&path, cur);
                     }
                     return;
