@@ -221,10 +221,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     f.render_widget(status, chunks[2]);
 
     // ---- usage meter (bottom-right, gray, K terms) ----
-    // Tokens burned by the last finished turn, when the server reported
-    // them. Right-aligned so it never fights the status text on the left.
-    if let Some((input, output)) = app.last_usage {
-        let label = format!("{} used", format_k(input + output));
+    // Tokens burned across this whole window, accumulated as servers
+    // report them. Right-aligned so it never fights the status text.
+    if app.usage_total != (0, 0) {
+        let label = format!("{} used", format_k(app.usage_total.0 + app.usage_total.1));
         let bar_w = chunks[2].width as usize;
         let w = UnicodeWidthStr::width(label.as_str()).min(bar_w);
         let x = chunks[2].x + (bar_w.saturating_sub(w) as u16);

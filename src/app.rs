@@ -121,9 +121,10 @@ pub struct App {
     /// (`store: false`, full transcript every turn). Reset to None on
     /// launch; we don't persist across runs.
     pub last_response_id: Option<String>,
-    /// Token usage of the last finished turn (prompt, completion), when
-    /// the server reported it. Rendered as a gray K-count, bottom-right.
-    pub last_usage: Option<(u64, u64)>,
+    /// Running token usage for this window (prompt, completion),
+    /// accumulated across turns as servers report it. Rendered as a gray
+    /// K-count, bottom-right.
+    pub usage_total: (u64, u64),
     /// All shops loaded at startup. Read-only after that. Used by the
     /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
@@ -189,7 +190,7 @@ impl App {
             view_mode: ViewMode::Page,
             last_viewport_h: 0,
             last_response_id: None,
-            last_usage: None,
+            usage_total: (0, 0),
             shops,
             stations,
             active_station,

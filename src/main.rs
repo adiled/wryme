@@ -194,7 +194,8 @@ async fn run(
                         app.last_response_id = Some(id);
                     }
                     StreamEvent::Usage { input, output } => {
-                        app.last_usage = Some((input, output));
+                        app.usage_total.0 += input;
+                        app.usage_total.1 += output;
                     }
                     StreamEvent::Done => {
                         app.finish_streaming();
