@@ -48,10 +48,12 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         })
         .title(if app.in_flight {
             if app.voice_is_active() {
-                " streaming + speaking… (Esc quiet / Esc interrupt) "
+                " streaming + speaking… (Esc to quiet) "
             } else {
-                " streaming… (Esc cancel) "
+                " streaming… (Esc to interrupt) "
             }
+        } else if app.voice_is_active() {
+            " speaking… (Esc to quiet) "
         } else {
             " write. Enter to send, Ctrl-C to quit "
         });
