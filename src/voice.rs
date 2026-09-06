@@ -35,7 +35,9 @@ fn spawn_say(body: &str, voice: Option<&str>) -> Option<Child> {
 
 static SPEECH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn synth_file(body: &str, voice: Option<&str>) -> Option<std::path::PathBuf> {
+type Cur = std::sync::Arc<std::sync::Mutex<Option<Child>>>;
+
+fn synth_file(body: &str, voice: Option<&str>, cur: &Cur) -> Option<std::path::PathBuf> {
     let n = SPEECH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("wryme-say-{}-{}.aiff", std::process::id(), n));
     let mut c = Command::new("say");
@@ -48,13 +50,15 @@ fn synth_file(body: &str, voice: Option<&str>) -> Option<std::path::PathBuf> {
             c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
         }
     }
-    let ok = c
-        .arg("-o")
-        .arg(&path)
-        .arg(body)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let spawned = c.arg("-o").arg(&path).arg(body).spawn();
+    let Ok(child) = spawned else {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    };
+    if let Ok(mut guard) = cur.lock() {
+        *guard = Some(child);
+    }
+    let ok = wait_releasable(cur);
     if ok && path.is_file() {
         Some(path)
     } else {
@@ -63,18 +67,36 @@ fn synth_file(body: &str, voice: Option<&str>) -> Option<std::path::PathBuf> {
     }
 }
 
-type Cur = std::sync::Arc<std::sync::Mutex<Option<Child>>>;
+/// Wait for the current child without holding the lock: polls so Stop
+/// can take + kill mid-speech. False when the child was taken (=killed)
+/// or failed.
+fn wait_releasable(cur: &Cur) -> bool {
+    loop {
+        let done = if let Ok(mut guard) = cur.lock() {
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => Some(status.success()),
+                    Ok(None) => None,
+                    Err(_) => Some(false),
+                },
+                None => Some(false),
+            }
+        } else {
+            None
+        };
+        match done {
+            Some(ok) => return ok,
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
 
 fn play_wait(path: &std::path::Path, cur: &Cur) {
     if let Ok(child) = Command::new("afplay").arg(path).spawn() {
         if let Ok(mut guard) = cur.lock() {
             *guard = Some(child);
         }
-        if let Ok(mut guard) = cur.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.wait();
-            }
-        }
+        wait_releasable(cur);
     }
     let _ = std::fs::remove_file(path);
 }

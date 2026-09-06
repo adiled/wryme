@@ -88,6 +88,14 @@ pub fn handle_key(
         return;
     }
 
+    // Ctrl-G stops the voice without touching the streaming turn.
+    if ctrl && matches!(k.code, KeyCode::Char('g')) {
+        app.stop_voice();
+        return;
+    }
+        return;
+    }
+
     // When the station popup is open, it captures input.
     if app.popup.mode != popup::Mode::Closed {
         popup_key(k, app);
