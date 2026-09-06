@@ -93,8 +93,6 @@ pub fn handle_key(
         app.stop_voice();
         return;
     }
-        return;
-    }
 
     // When the station popup is open, it captures input.
     if app.popup.mode != popup::Mode::Closed {
