@@ -17,14 +17,90 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
 
-  release:
+  desktop:
     needs: [publish-crates]
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+            package: desktop/package-macos.sh
+            artifact: wryme-darwin-x86_64.zip
+          - os: macos-14
+            target: aarch64-apple-darwin
+            package: desktop/package-macos.sh
+            artifact: wryme-darwin-aarch64.zip
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: desktop/package-windows.sh
+            artifact: wryme-windows-x86_64.zip
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            package: desktop/package-linux.sh
+            artifact: wryme-linux-x86_64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Locate built binary
+        id: binary
+        run: |
+          bin="target/${{ matrix.target }}/release/wme"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then bin="$bin.exe"; fi
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+          [[ -f "$bin" ]] || { echo "missing $bin" >&2; exit 1; }
+
+      - name: Package desktop bundle
+        run: |
+          bash "${{ matrix.package }}" "${GITHUB_REF_NAME#v}"
+          ls -la *.zip *.tar.gz 2>/dev/null || true
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            *.zip
+            *.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [publish-crates, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create GitHub release
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" --title "$TAG" --generate-notes
+
+      - name: Download all bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles
+          merge-multiple: true
+
+      - name: Create GitHub release with bundles
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          FILES=()
+          for f in bundles/*.zip bundles/*.tar.gz; do
+            [[ -f "$f" ]] && FILES+=("$f")
+          done
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            "${FILES[@]}"

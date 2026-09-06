@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=wryme
+GenericName=AI Chat
+Comment=Small calm window to chat with an AI
+Exec="%INSERT_ABS_PATH%/wryme-launcher.sh"
+Icon=utilities-terminal
+Terminal=false
+Categories=Network;Utility;Chat;
+StartupNotify=true
+StartupWMClass=wryme
+X-GNOME-UsesNotifications=false
