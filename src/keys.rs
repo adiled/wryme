@@ -102,6 +102,13 @@ pub fn handle_key(
 
     match k.code {
         KeyCode::Esc => {
+            // Two-stage when the voice is speaking: first Esc quiets the
+            // voice and keeps streaming; the next Esc interrupts the turn.
+            if app.voice_is_active() {
+                app.stop_voice();
+                app.note("quiet");
+                return;
+            }
             app.stop_voice();
             if let Some(t) = in_flight.take() {
                 t.abort();

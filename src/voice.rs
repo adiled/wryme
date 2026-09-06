@@ -146,13 +146,16 @@ enum SpeakCmd {
 pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
+    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub name: Option<String>,
 }
 
 impl Speaker {
     pub fn new(voice: Option<String>) -> Self {
         let current = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
+        let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cur = current.clone();
+        let cnt = queued.clone();
         let thread_voice = voice.clone();
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
@@ -184,6 +187,7 @@ impl Speaker {
                 match cmd {
                     SpeakCmd::Stop => {
                         pending.clear();
+                        cnt.store(0, std::sync::atomic::Ordering::Relaxed);
                         if let Ok(mut guard) = cur.lock() {
                             if let Some(mut child) = guard.take() {
                                 let _ = child.kill();
@@ -196,12 +200,14 @@ impl Speaker {
                         pending.push(text);
                         while pending.len() >= 2 {
                             let pair = format!("{} {}", pending.remove(0), pending.remove(0));
+                            cnt.fetch_sub(2, std::sync::atomic::Ordering::Relaxed);
                             speak_now(pair, &cur);
                         }
                     }
                     SpeakCmd::Flush => {
                         if !pending.is_empty() {
                             let rest = pending.join(" ");
+                            cnt.store(0, std::sync::atomic::Ordering::Relaxed);
                             pending.clear();
                             speak_now(rest, &cur);
                         }
@@ -212,14 +218,26 @@ impl Speaker {
         Self {
             tx: Some(tx),
             current,
+            queued,
             name: voice,
         }
     }
 
     pub fn say(&self, text: String) {
+        if self.tx.is_some() {
+            self.queued
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Say(text));
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        if self.queued.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            return true;
+        }
+        self.current.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
     pub fn flush(&self) {

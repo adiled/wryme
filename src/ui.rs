@@ -47,7 +47,11 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Style::default().fg(Color::Cyan)
         })
         .title(if app.in_flight {
-            " streaming… (Esc cancel) "
+            if app.voice_is_active() {
+                " streaming + speaking… (Esc quiet / Esc interrupt) "
+            } else {
+                " streaming… (Esc cancel) "
+            }
         } else {
             " write. Enter to send, Ctrl-C to quit "
         });

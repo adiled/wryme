@@ -245,6 +245,13 @@ impl App {
         self.voice_buffer.clear();
     }
 
+    pub fn voice_is_active(&self) -> bool {
+        self.voice_speaker
+            .as_ref()
+            .map(|s| s.is_active())
+            .unwrap_or(false)
+    }
+
     pub fn shutdown_voice(&mut self) {
         if let Some(mut speaker) = self.voice_speaker.take() {
             speaker.shutdown();
