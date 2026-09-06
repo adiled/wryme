@@ -93,7 +93,10 @@ fn extract_csv(arguments: &str) -> String {
 pub async fn explore(csv: &str) -> String {
     let terms = split_csv(csv);
     if terms.is_empty() {
-        return "myshell_explore: no terms given".to_string();
+        return format!(
+            "{}: no terms given — call again with {{\"csv\": \"word1, word2\"}}",
+            tool_name()
+        );
     }
     let bins = path_bins();
     let rc = rc_entries();

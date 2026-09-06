@@ -475,6 +475,23 @@ fn handle_event(
                     }
                 }
             }
+            // Authoritative full arguments. Some servers send few or no
+            // deltas and put everything here — without this arm those
+            // calls execute with empty arguments.
+            "response.function_call_arguments.done" => {
+                let item_id = v
+                    .get("item_id")
+                    .and_then(|i| i.as_str())
+                    .or_else(|| v.get("output_item_id").and_then(|i| i.as_str()))
+                    .unwrap_or("");
+                if let Some(args) = v.get("arguments").and_then(arg_string) {
+                    if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
+                        if c.arguments.is_empty() || !args.is_empty() {
+                            c.arguments = args;
+                        }
+                    }
+                }
+            }
             "response.output_item.done" => {
                 let item = v.get("output_item");
                 let item_type = item
@@ -494,12 +511,13 @@ fn handle_event(
                         .and_then(|i| i.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if let Some(arguments) = item
-                        .and_then(|i| i.get("arguments"))
-                        .and_then(|a| a.as_str())
+                    if let Some(arguments) =
+                        item.and_then(|i| i.get("arguments")).and_then(arg_string)
                     {
                         if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
-                            c.arguments = arguments.to_string();
+                            if c.arguments.is_empty() || !arguments.is_empty() {
+                                c.arguments = arguments;
+                            }
                         }
                     }
                 }
@@ -513,6 +531,19 @@ fn handle_event(
         }
     }
     Ok(())
+}
+
+/// Function-call arguments as a string. Spec says string, but compat
+/// servers sometimes emit a JSON object — serialize it rather than
+/// dropping the call's arguments on the floor.
+fn arg_string(v: &serde_json::Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if v.is_object() || v.is_array() {
+        return serde_json::to_string(v).ok();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -591,8 +622,37 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_done_item_is_captured() {
+    fn arguments_done_event_fills_empty_args() {
+        // Servers that send no deltas put everything in
+        // function_call_arguments.done — must not execute empty.
         let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut id = None;
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"\"}}\n\n",
+            &tx, &mut calls, &mut reasoning, &mut id,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
+            &tx, &mut calls, &mut reasoning, &mut id,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn object_arguments_serialize_instead_of_dropping() {
+        assert_eq!(
+            arg_string(&serde_json::json!({"command": "ls"})).as_deref(),
+            Some("{\"command\":\"ls\"}")
+        );
+    }
+
+    #[test]
+    fn reasoning_done_item_is_captured() {        let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut id = None;

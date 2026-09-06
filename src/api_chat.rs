@@ -336,9 +336,27 @@ fn handle_event(
                                         c.name.push_str(&n);
                                     }
                                     if let Some(a) = f.arguments {
-                                        c.arguments.push_str(&a);
+                                        c.arguments.push_str(&arg_string(&a));
                                     }
                                 }
+                            }
+                        }
+                        // Legacy single-call shape some compat servers still
+                        // emit. Folds into call 0 like a normal delta.
+                        if let Some(f) = delta.function_call {
+                            while calls.is_empty() {
+                                calls.push(ChatToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                });
+                            }
+                            let c = &mut calls[0];
+                            if let Some(n) = f.name {
+                                c.name.push_str(&n);
+                            }
+                            if let Some(a) = f.arguments {
+                                c.arguments.push_str(&arg_string(&a));
                             }
                         }
                     }
@@ -382,6 +400,9 @@ struct Delta {
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
+    // Deprecated single-call shape; some compat servers still emit it.
+    #[serde(default)]
+    function_call: Option<DeltaFunction>,
 }
 
 #[derive(Deserialize)]
@@ -398,8 +419,20 @@ struct DeltaToolCall {
 struct DeltaFunction {
     #[serde(default)]
     name: Option<String>,
+    // Spec says string, but compat servers sometimes emit an object for
+    // one-shot calls. Kept as Value so one odd field can't sink the
+    // whole chunk (serde would drop the entire delta otherwise).
     #[serde(default)]
-    arguments: Option<String>,
+    arguments: Option<serde_json::Value>,
+}
+
+/// Arguments to string: verbatim when already a string, serialized when
+/// a server sent an object instead.
+fn arg_string(v: &serde_json::Value) -> String {
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    serde_json::to_string(v).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -457,8 +490,24 @@ mod tests {
     }
 
     #[test]
-    fn usage_chunk_parses_cleanly() {
+    fn legacy_function_call_delta_accumulates() {
         let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "zsh");
+        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn usage_chunk_parses_cleanly() {        let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
         handle_event(
