@@ -14,7 +14,20 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// Which wire protocol this shop speaks.
+/// How a Responses shop carries the window between turns.
+///
+/// `Full` (default): stateless. Every request carries the whole
+/// transcript with `store: false`; works against any shop, but the
+/// server re-prefills everything each tool round, so long windows get
+/// slow. `Warm`: the server keeps the window warm; follow-ups send only
+/// the new items against `previous_response_id` with `store: true`.
+/// Fast, but only shops that actually retain windows (OpenAI, our ds4).
+/// Set `window = "warm"` per shop to opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    Full,
+    Warm,
+}
 ///
 /// `Demo` is our local canned-replies generator. No network.
 /// `Responses` is the default: the newer typed-event protocol at
@@ -38,6 +51,7 @@ pub struct Shop {
     pub url: String,
     pub key: String,
     pub protocol: Protocol,
+    pub window: WindowMode,
     /// Models this shop advertises. Convention: list newest-first. The
     /// first model is what wryme picks when synthesizing a default
     /// station for a fresh launch with no saved stations.
@@ -51,6 +65,7 @@ impl Shop {
             url: String::new(),
             key: String::new(),
             protocol: Protocol::Demo,
+            window: WindowMode::Full,
             models: vec!["canned replies".into()],
         }
     }
@@ -75,6 +90,9 @@ struct ShopDef {
     /// "responses" (default) or "chat-completions".
     #[serde(default)]
     protocol: Option<String>,
+    /// "full" (default) or "warm". Warm keeps the window server-side.
+    #[serde(default)]
+    window: Option<String>,
     #[serde(default)]
     models: Vec<String>,
 }
@@ -90,11 +108,16 @@ impl ShopDef {
             Some("chat-completions") => Protocol::ChatCompletions,
             _ => Protocol::Responses,
         };
+        let window = match self.window.as_deref() {
+            Some("warm") => WindowMode::Warm,
+            _ => WindowMode::Full,
+        };
         Shop {
             name: self.name,
             url: self.url,
             key,
             protocol,
+            window,
             models: self.models,
         }
     }
@@ -129,9 +152,15 @@ fn from_env() -> Option<Shop> {
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
         .unwrap_or_default();
     let protocol = std::env::var("WME_DEFAULT_SHOP_PROTOCOL").ok();
+    let window = std::env::var("WME_DEFAULT_SHOP_WINDOW").ok();
     let models = std::env::var("WME_DEFAULT_SHOP_MODELS").ok();
 
-    if name.is_none() && url.is_none() && key.is_empty() && protocol.is_none() && models.is_none()
+    if name.is_none()
+        && url.is_none()
+        && key.is_empty()
+        && protocol.is_none()
+        && window.is_none()
+        && models.is_none()
     {
         return None;
     }
@@ -139,6 +168,10 @@ fn from_env() -> Option<Shop> {
     let protocol = match protocol.as_deref() {
         Some("chat-completions") => Protocol::ChatCompletions,
         _ => Protocol::Responses,
+    };
+    let window = match window.as_deref() {
+        Some("warm") => WindowMode::Warm,
+        _ => WindowMode::Full,
     };
     let models: Vec<String> = models
         .map(|s| s.split(',').map(|m| m.trim().to_string()).collect())
@@ -149,6 +182,7 @@ fn from_env() -> Option<Shop> {
         url: url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
         key,
         protocol,
+        window,
         models,
     })
 }
@@ -242,6 +276,7 @@ mod tests {
             key: None,
             key_env: None,
             protocol,
+            window: None,
             models: vec![],
         };
         assert_eq!(def(None).resolve().protocol, Protocol::Responses);
@@ -252,12 +287,32 @@ mod tests {
     }
 
     #[test]
-    fn find_for_model_picks_first_matching() {        let shops = vec![
+    fn window_defaults_to_full_and_opts_into_warm() {
+        let def = |window: Option<String>| ShopDef {
+            name: "x".into(),
+            url: "u".into(),
+            key: None,
+            key_env: None,
+            protocol: None,
+            window,
+            models: vec![],
+        };
+        assert_eq!(def(None).resolve().window, WindowMode::Full);
+        assert_eq!(
+            def(Some("warm".into())).resolve().window,
+            WindowMode::Warm
+        );
+    }
+
+    #[test]
+    fn find_for_model_picks_first_matching() {
+        let shops = vec![
             Shop {
                 name: "a".into(),
                 url: "u1".into(),
                 key: "".into(),
                 protocol: Protocol::ChatCompletions,
+                window: WindowMode::Full,
                 models: vec!["m1".into(), "m2".into()],
             },
             Shop {
@@ -265,6 +320,7 @@ mod tests {
                 url: "u2".into(),
                 key: "".into(),
                 protocol: Protocol::Responses,
+                window: WindowMode::Warm,
                 models: vec!["m2".into(), "m3".into()],
             },
         ];

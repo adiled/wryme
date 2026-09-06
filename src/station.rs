@@ -235,6 +235,7 @@ mod tests {
             url: "u".into(),
             key: "".into(),
             protocol: Protocol::ChatCompletions,
+            window: crate::shop::WindowMode::Full,
             models: models.iter().map(|s| s.to_string()).collect(),
         }
     }

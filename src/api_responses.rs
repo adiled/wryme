@@ -3,11 +3,9 @@
 // POSTs to `<shop.url>/responses` with `stream: true`. Body uses `input`
 // instead of `messages`, lifts the system prompt to a top-level
 // `instructions` field, carries the model (from station) and translatable
-// dials. Stateless by design: `store: false` on every request and the full
-// conversation (including tool history as function_call /
-// function_call_output items) is replayed each turn, so we never depend on
-// the shop retaining server-side session state (`previous_response_id` is
-// accepted but unused).
+// dials. Two window modes (shop `window`): `Full` replays the whole
+// transcript statelessly (`store: false`); `Warm` pins follow-ups to
+// `previous_response_id` (`store: true`) for shops that retain windows.
 //
 // Tools: we advertise the shell tool (named after the user's real shell,
 // e.g. `zsh`), its discovery companion (`zsh_explore`), and the async-job
@@ -26,7 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
 use crate::book;
-use crate::shop::Shop;
+use crate::shop::{Shop, WindowMode};
 use crate::tools;
 use crate::station::{Patience, Station};
 
@@ -49,7 +47,35 @@ pub(crate) async fn stream(
     shop: &Shop,
     station: &Station,
     messages: Vec<ApiMessage>,
-    _previous_response_id: Option<String>,
+    previous_response_id: Option<String>,
+    engine: Arc<Mutex<book::Engine>>,
+    tx: &UnboundedSender<StreamEvent>,
+) -> Result<()> {
+    if shop.window == WindowMode::Warm {
+        return stream_warm(
+            client,
+            shop,
+            station,
+            messages,
+            previous_response_id,
+            engine,
+            tx,
+        )
+        .await;
+    }
+    stream_full(client, shop, station, messages, engine, tx).await
+}
+
+/// Warm window: the server retains the conversation (`store: true`).
+/// First request carries the full transcript; follow-ups send only the
+/// new tool outputs against `previous_response_id`. Fast on long
+/// windows; only for shops that actually keep windows.
+async fn stream_warm(
+    client: &Client,
+    shop: &Shop,
+    station: &Station,
+    messages: Vec<ApiMessage>,
+    previous_response_id: Option<String>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
@@ -63,16 +89,106 @@ pub(crate) async fn stream(
         .filter(|m| m.role != "system")
         .collect();
 
-    // Stateless: always the full conversation. Tool history rides as
-    // function_call / function_call_output items (see json_msg), so a
-    // shop that stores nothing still sees the whole transcript.
-    // `_previous_response_id` is deliberately unused.
+    let mut prev_id = previous_response_id;
+    let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
+        conv_msgs
+            .last()
+            .into_iter()
+            .flat_map(|m| json_msg(m))
+            .collect()
+    } else {
+        conv_msgs
+            .iter()
+            .flat_map(|m| json_msg(m))
+            .collect()
+    };
+    prepend_preamble_counted(&mut input, &engine, 0);
+
+    let due = crate::jobs::claim_due();
+    if !due.is_empty() {
+        let check = crate::tools::check_name();
+        for (id, output) in due {
+            let call_id = format!("check_{id}");
+            input.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": call_id,
+                "name": check,
+                "arguments": format!("{{\"id\":{id}}}"),
+            }));
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            }));
+        }
+    }
+
+    loop {
+        let (calls, new_id, _) = stream_once(
+            client,
+            shop,
+            station,
+            &input,
+            prev_id.as_deref(),
+            true,
+            instructions,
+            tx,
+        )
+        .await?;
+        if calls.is_empty() {
+            return Ok(());
+        }
+
+        let mut next_input = Vec::new();
+        for call in calls {
+            let output = match tools::execute(&engine, &call.name, &call.arguments).await {
+                Some(o) => o,
+                None => format!("unknown tool '{}'", call.name),
+            };
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: call.call_id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                output: output.clone(),
+            });
+            next_input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": output,
+            }));
+        }
+        prepend_preamble_counted(&mut next_input, &engine, 0);
+        prev_id = Some(new_id);
+        input = next_input;
+    }
+}
+
+/// Full window: stateless (`store: false`). The whole transcript,
+/// including tool history, rides every request, so any shop works.
+/// Costs a full prefill per tool round on long windows.
+async fn stream_full(
+    client: &Client,
+    shop: &Shop,
+    station: &Station,
+    messages: Vec<ApiMessage>,
+    engine: Arc<Mutex<book::Engine>>,
+    tx: &UnboundedSender<StreamEvent>,
+) -> Result<()> {
+    let instructions: Option<&str> = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.as_str());
+
+    let conv_msgs: Vec<&ApiMessage> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .collect();
+
     let mut input: Vec<serde_json::Value> = conv_msgs
         .iter()
         .flat_map(|m| json_msg(m))
         .collect();
-    let mut preamble_len = 0usize;
-    preamble_len = prepend_preamble_counted(&mut input, &engine, preamble_len);
+    let mut preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
     // Plant any finished async jobs into the input as a check-call +
     // result pair, so the model sees the outcome and continues.
@@ -97,7 +213,7 @@ pub(crate) async fn stream(
 
     loop {
         let (calls, _new_id, reasoning_items) =
-            stream_once(client, shop, station, &input, None, instructions, tx).await?;
+            stream_once(client, shop, station, &input, None, false, instructions, tx).await?;
         if calls.is_empty() {
             return Ok(());
         }
@@ -183,7 +299,8 @@ async fn stream_once(
     shop: &Shop,
     station: &Station,
     input: &[serde_json::Value],
-    _previous_response_id: Option<&str>,
+    previous_response_id: Option<&str>,
+    store: bool,
     instructions: Option<&str>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<(Vec<FuncCall>, String, Vec<serde_json::Value>)> {
@@ -192,11 +309,13 @@ async fn stream_once(
         model: &'a str,
         input: &'a [serde_json::Value],
         stream: bool,
-        // Stateless: the full transcript rides every request, so the shop
-        // must retain nothing. Never send previous_response_id.
+        // Warm windows retain server-side; full windows carry everything
+        // and retain nothing. Never sends a previous id it wasn't given.
         store: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        previous_response_id: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,17 +339,21 @@ async fn stream_once(
     #[derive(Serialize)]
     struct Reasoning {
         // Depth knob, only when the station sets patience. Omitted
-        // otherwise so the model's native thinking depth is untouched.
+        // otherwise so trivial turns stay fast and the model's native
+        // thinking depth is untouched.
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<&'static str>,
-        // Always on: without `summary: auto` most servers emit no
-        // reasoning stream at all, and the UI's thinking display goes
-        // dark (ds4 does exactly this). Display-only, no depth change.
+        // Asked whenever we ask for thinking at all: without a summary
+        // most servers emit no reasoning stream, and the Brain display
+        // goes dark.
         summary: &'static str,
     }
 
-    let reasoning = Some(Reasoning {
-        effort: station.dials.patience.map(|p: Patience| p.as_wire()),
+    // Thinking is opt-in via the patience dial, never forced: requesting
+    // reasoning makes even trivial turns think out loud (slow). The Brain
+    // display shows whatever the server volunteers regardless.
+    let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
+        effort: Some(p.as_wire()),
         summary: "auto",
     });
     let include = reasoning
@@ -244,8 +367,9 @@ async fn stream_once(
         model: &station.model,
         input,
         stream: true,
-        store: false,
+        store,
         instructions,
+        previous_response_id,
         temperature: station.dials.boldness,
         max_output_tokens: station.dials.verbosity,
         reasoning,

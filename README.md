@@ -61,7 +61,9 @@ AI service you have an account with:
 
 ```toml
 # OpenAI (responses is the default protocol; add
-# protocol = "chat-completions" only for servers with no /responses)
+# protocol = "chat-completions" only for servers with no /responses.
+# Add window = "warm" per shop if it retains windows server-side —
+# follow-ups then send deltas only, much faster on long windows.)
 [[shop]]
 name = "openai"
 url = "https://api.openai.com/v1"
