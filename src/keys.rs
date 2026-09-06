@@ -97,10 +97,10 @@ pub fn handle_key(
 
     match k.code {
         KeyCode::Esc => {
-            // Two-stage when the voice is speaking: first Esc quiets the
-            // voice for the rest of the turn and keeps streaming; the
-            // next Esc interrupts the turn.
-            if app.voice_is_active() {
+            // First Esc while a voiced turn streams quiets the voice for
+            // the rest of the turn (mute sticks, not momentary activity);
+            // the next Esc interrupts the turn itself.
+            if app.voice_on && !app.voice_muted && app.in_flight {
                 app.mute_voice();
                 app.note("quiet");
                 return;
