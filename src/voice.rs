@@ -79,11 +79,14 @@ pub fn split_sentences(buffer: &mut String) -> Vec<String> {
 
 enum SpeakCmd {
     Say(String),
+    Flush,
     Stop,
 }
 
 /// Sequential background speaker. Sentences queue up and play in order,
 /// one `say` at a time; Stop kills the current voice and drops the queue.
+/// Speeches batch two sentences per invocation: every process boundary
+/// clips a little audio, so fewer, bigger speeches sound continuous.
 pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
@@ -95,9 +98,24 @@ impl Speaker {
         let cur = current.clone();
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
+            let mut pending: Vec<String> = Vec::new();
+            let speak_now =
+                |text: String, cur: &std::sync::Arc<std::sync::Mutex<Option<Child>>>| {
+                    if let Some(child) = spawn_say(&text, voice.as_deref()) {
+                        if let Ok(mut guard) = cur.lock() {
+                            *guard = Some(child);
+                        }
+                        if let Ok(mut guard) = cur.lock() {
+                            if let Some(mut child) = guard.take() {
+                                let _ = child.wait();
+                            }
+                        }
+                    }
+                };
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     SpeakCmd::Stop => {
+                        pending.clear();
                         if let Ok(mut guard) = cur.lock() {
                             if let Some(mut child) = guard.take() {
                                 let _ = child.kill();
@@ -107,15 +125,17 @@ impl Speaker {
                         while rx.try_recv().is_ok() {}
                     }
                     SpeakCmd::Say(text) => {
-                        if let Some(child) = spawn_say(&text, voice.as_deref()) {
-                            if let Ok(mut guard) = cur.lock() {
-                                *guard = Some(child);
-                            }
-                            if let Ok(mut guard) = cur.lock() {
-                                if let Some(mut child) = guard.take() {
-                                    let _ = child.wait();
-                                }
-                            }
+                        pending.push(text);
+                        while pending.len() >= 2 {
+                            let pair = format!("{} {}", pending.remove(0), pending.remove(0));
+                            speak_now(pair, &cur);
+                        }
+                    }
+                    SpeakCmd::Flush => {
+                        if !pending.is_empty() {
+                            let rest = pending.join(" ");
+                            pending.clear();
+                            speak_now(rest, &cur);
                         }
                     }
                 }
@@ -130,6 +150,12 @@ impl Speaker {
     pub fn say(&self, text: String) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Say(text));
+        }
+    }
+
+    pub fn flush(&self) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(SpeakCmd::Flush);
         }
     }
 

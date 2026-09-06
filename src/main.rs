@@ -218,14 +218,15 @@ async fn run(
                         if app.voice_on {
                             let tail = app.voice_buffer.trim().to_string();
                             app.voice_buffer.clear();
-                            if !tail.is_empty() {
-                                if app.voice_speaker.is_none() {
-                                    let voice = app.active_station.voice.clone();
-                                    app.voice_speaker = Some(crate::voice::Speaker::new(voice));
-                                }
-                                if let Some(sp) = &app.voice_speaker {
+                            if app.voice_speaker.is_none() && !tail.is_empty() {
+                                let voice = app.active_station.voice.clone();
+                                app.voice_speaker = Some(crate::voice::Speaker::new(voice));
+                            }
+                            if let Some(sp) = &app.voice_speaker {
+                                if !tail.is_empty() {
                                     sp.say(tail);
                                 }
+                                sp.flush();
                             }
                             app.voice_speaker = None;
                         }
