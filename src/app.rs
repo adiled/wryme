@@ -129,6 +129,7 @@ pub struct App {
     pub usage_ctx: u64,
     pub usage_out: u64,
     pub voice_on: bool,
+    pub voice_muted: bool,
     pub voice_speaker: Option<crate::voice::Speaker>,
     pub voice_buffer: String,
     /// All shops loaded at startup. Read-only after that. Used by the
@@ -199,6 +200,7 @@ impl App {
             usage_ctx: 0,
             usage_out: 0,
             voice_on: false,
+            voice_muted: false,
             voice_speaker: None,
             voice_buffer: String::new(),
             shops,
@@ -243,6 +245,17 @@ impl App {
             speaker.stop();
         }
         self.voice_buffer.clear();
+    }
+
+    /// Quiet for the rest of this turn: kills current speech and drops
+    /// anything queued, and new deltas stay silent until the next turn.
+    pub fn mute_voice(&mut self) {
+        self.stop_voice();
+        self.voice_muted = true;
+    }
+
+    pub fn unmute_voice(&mut self) {
+        self.voice_muted = false;
     }
 
     pub fn voice_is_active(&self) -> bool {

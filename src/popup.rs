@@ -450,7 +450,6 @@ pub fn help_rows() -> Vec<(String, String)> {
         ("Ctrl-C".into(), "quit immediately".into()),
         ("Ctrl-T".into(), "toggle page / scroll view".into()),
         ("Ctrl-V".into(), "read replies aloud on / off".into()),
-        ("Ctrl-G".into(), "stop the voice (keeps streaming)".into()),
         ("PgUp / PgDn".into(), "page or scroll up / down".into()),
         ("← / →".into(), "move the input cursor".into()),
         ("Home / End".into(), "jump to input start / end".into()),

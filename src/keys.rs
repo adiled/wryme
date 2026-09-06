@@ -81,16 +81,11 @@ pub fn handle_key(
             app.note("voice off");
         } else if crate::voice::available() {
             app.voice_on = true;
+            app.unmute_voice();
             app.note("voice on");
         } else {
             app.note("voice unavailable: no say/spd-say on PATH");
         }
-        return;
-    }
-
-    // Ctrl-G stops the voice without touching the streaming turn.
-    if ctrl && matches!(k.code, KeyCode::Char('g')) {
-        app.stop_voice();
         return;
     }
 
@@ -103,9 +98,10 @@ pub fn handle_key(
     match k.code {
         KeyCode::Esc => {
             // Two-stage when the voice is speaking: first Esc quiets the
-            // voice and keeps streaming; the next Esc interrupts the turn.
+            // voice for the rest of the turn and keeps streaming; the
+            // next Esc interrupts the turn.
             if app.voice_is_active() {
-                app.stop_voice();
+                app.mute_voice();
                 app.note("quiet");
                 return;
             }
@@ -131,6 +127,7 @@ pub fn handle_key(
             app.push_user(text, images);
             app.begin_assistant();
             app.stop_voice();
+            app.unmute_voice();
             app.in_flight = true;
             app.current_page = 0;
             app.scroll_row = 0;

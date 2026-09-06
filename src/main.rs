@@ -181,7 +181,7 @@ async fn run(
                 match stream_ev {
                     StreamEvent::Delta { text } => {
                         app.append_to_last_assistant(&text);
-                        if app.voice_on {
+                        if app.voice_on && !app.voice_muted {
                             let voice = app.active_station.voice.clone();
                             app.ensure_speaker(voice);
                             app.voice_buffer.push_str(&text);
@@ -213,7 +213,7 @@ async fn run(
                     }
                     StreamEvent::Done => {
                         app.finish_streaming();
-                        if app.voice_on {
+                        if app.voice_on && !app.voice_muted {
                             let tail = app.voice_buffer.trim().to_string();
                             app.voice_buffer.clear();
                             let voice = app.active_station.voice.clone();
