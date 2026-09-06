@@ -183,6 +183,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
     ];
+    if app.voice_on {
+        pieces.push(Span::raw(dot));
+        pieces.push(Span::styled("voice", Style::default().fg(Color::Cyan)));
+    }
     if !app.messages.is_empty() {
         pieces.push(Span::raw(dot));
         match app.view_mode {

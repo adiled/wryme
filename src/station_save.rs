@@ -38,12 +38,11 @@ pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
 /// Errors if no block with that name is found, so the caller can decide
 /// whether to fall back to appending or surface a message.
 pub fn update_in_file(path: &PathBuf, station: &Station) -> Result<()> {
-    let original = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let original =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let updated = replace_station_block(&original, station)
         .with_context(|| format!("no station '{}' in {}", station.name, path.display()))?;
-    std::fs::write(path, updated)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, updated).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -72,9 +71,7 @@ fn replace_station_block(content: &str, station: &Station) -> Result<String> {
                 // trailing newlines so the surrounding spacing is owned
                 // by the file, not by our serializer.
                 let serialized = serialize_block(station);
-                let trimmed = serialized
-                    .trim_start_matches('\n')
-                    .trim_end_matches('\n');
+                let trimmed = serialized.trim_start_matches('\n').trim_end_matches('\n');
                 out.push(trimmed.to_string());
                 replaced = true;
             } else {
@@ -121,6 +118,9 @@ fn serialize_block(station: &Station) -> String {
     }
     if let Some(v) = station.dials.verbosity {
         block.push_str(&format!("verbosity = {}\n", v));
+    }
+    if let Some(voice) = &station.voice {
+        block.push_str(&format!("voice = {}\n", toml_str(voice)));
     }
     block
 }
@@ -173,6 +173,7 @@ model = \"m3\"
                 patience: Some(Patience::Slow),
                 verbosity: None,
             },
+            voice: None,
         };
         let updated = replace_station_block(original, &target).unwrap();
         assert!(updated.contains("name = \"alpha\""));
@@ -197,6 +198,7 @@ model = \"m1\"
             name: "nonexistent".into(),
             model: "m".into(),
             dials: Dials::default(),
+            voice: None,
         };
         assert!(replace_station_block(original, &target).is_err());
     }

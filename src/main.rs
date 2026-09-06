@@ -33,6 +33,7 @@ mod shop;
 mod station;
 mod station_save;
 mod ui;
+mod voice;
 
 use api::{Client, StreamEvent};
 use app::App;
@@ -202,6 +203,15 @@ async fn run(
                     }
                     StreamEvent::Done => {
                         app.finish_streaming();
+                        if app.voice_on {
+                            let text = app.last_turn_text();
+                            let voice = app.active_station.voice.clone();
+                            app.stop_voice();
+                            app.voice_child = crate::voice::speak(&text, voice.as_deref());
+                            if app.voice_child.is_none() && !text.trim().is_empty() {
+                                app.note("voice unavailable: no say/spd-say on PATH");
+                            }
+                        }
                         if let Some(t) = in_flight_task.take() {
                             drop(t);
                         }

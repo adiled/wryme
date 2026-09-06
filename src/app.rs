@@ -128,6 +128,8 @@ pub struct App {
     /// Rendered as a gray K-count, bottom-right.
     pub usage_ctx: u64,
     pub usage_out: u64,
+    pub voice_on: bool,
+    pub voice_child: Option<std::process::Child>,
     /// All shops loaded at startup. Read-only after that. Used by the
     /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
@@ -195,6 +197,8 @@ impl App {
             last_response_id: None,
             usage_ctx: 0,
             usage_out: 0,
+            voice_on: false,
+            voice_child: None,
             shops,
             stations,
             active_station,
@@ -225,10 +229,28 @@ impl App {
             || saved.dials.boldness != self.active_station.dials.boldness
             || saved.dials.patience != self.active_station.dials.patience
             || saved.dials.verbosity != self.active_station.dials.verbosity
+            || saved.voice != self.active_station.voice
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+    }
+
+    pub fn stop_voice(&mut self) {
+        if let Some(mut child) = self.voice_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    pub fn last_turn_text(&self) -> String {
+        let tid = self.turn_counter;
+        self.messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.content.is_empty())
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn push_user(&mut self, content: String, images: Vec<String>) {
