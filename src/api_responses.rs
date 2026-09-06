@@ -67,10 +67,14 @@ pub(crate) async fn stream(
             Err(e) => {
                 // The shop doesn't actually retain windows despite the
                 // opt-in ("previous_response_id is not supported" and
-                // kin): fall back to a full replay once instead of
-                // surfacing the error.
+                // kin): tell the UI to pin this shop to full windows
+                // (persisted, so this trips once ever), then serve this
+                // turn with a full replay instead of erroring.
                 let msg = format!("{e:#}");
                 if msg.contains("previous_response_id") {
+                    let _ = tx.send(StreamEvent::WindowUnsupported {
+                        shop: shop.name.clone(),
+                    });
                     return stream_full(client, shop, station, messages, engine, tx).await;
                 }
                 return Err(e);
