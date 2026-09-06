@@ -140,7 +140,7 @@ fn toml_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::station::Dials;
+    use crate::station::{Dials, Patience};
 
     #[test]
     fn replace_block_preserves_surrounding_content() {
