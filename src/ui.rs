@@ -217,30 +217,27 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Color::Gray
         }),
     ));
+    // ---- usage meter (bottom-right, DarkGray K terms) ----
+    // Same line, same rendering as the rest of the status bar — padded
+    // out so it hugs the right edge in the "via ds4" color.
+    let used = app.usage_ctx + app.usage_out;
+    if used > 0 {
+        let label = format!("{} used", format_k(used));
+        let left_w: usize = pieces
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let bar_w = chunks[2].width as usize;
+        let uw = UnicodeWidthStr::width(label.as_str());
+        if bar_w > left_w + uw + 2 {
+            pieces.push(Span::raw(" ".repeat(bar_w - left_w - uw)));
+        } else {
+            pieces.push(Span::raw("  "));
+        }
+        pieces.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+    }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
-
-    // ---- usage meter (bottom-right, gray, K terms) ----
-    // Tokens burned across this whole window, accumulated as servers
-    // report them. Right-aligned so it never fights the status text.
-    if app.usage_ctx + app.usage_out > 0 {
-        let label = format!("{} used", format_k(app.usage_ctx + app.usage_out));
-        let bar_w = chunks[2].width as usize;
-        let w = UnicodeWidthStr::width(label.as_str()).min(bar_w);
-        let x = chunks[2].x + (bar_w.saturating_sub(w) as u16);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                label,
-                Style::default().fg(Color::Gray),
-            ))),
-            Rect {
-                x,
-                y: chunks[2].y,
-                width: w as u16,
-                height: 1,
-            },
-        );
-    }
 
     // ---- error overlay (bottom-right half, wrapped) ----
     // Long upstream errors used to bleed past the right edge on the
