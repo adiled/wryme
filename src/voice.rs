@@ -1,6 +1,7 @@
 use std::process::{Child, Command};
 
-pub const DEFAULT_MAC_VOICE: &str = "Samantha";
+pub const DEFAULT_MAC_VOICE: &str = "Tara";
+pub const DEFAULT_MAC_RATE_WPM: &str = "260";
 
 fn has_bin(name: &str) -> bool {
     std::env::var_os("PATH").map_or(false, |paths| {
@@ -25,7 +26,15 @@ pub fn speak(text: &str, voice: Option<&str>) -> Option<Child> {
     }
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = Command::new("say");
-        c.arg("-v").arg(voice.unwrap_or(DEFAULT_MAC_VOICE));
+        match voice {
+            Some(v) => {
+                c.arg("-v").arg(v);
+            }
+            None => {
+                c.arg("-v").arg(DEFAULT_MAC_VOICE);
+                c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
+            }
+        }
         c
     } else {
         let mut c = Command::new("spd-say");

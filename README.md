@@ -130,7 +130,7 @@ The dials, all optional:
 - **`verbosity`**: the most words the AI is allowed to say. A number like
   1024 or 4096. Unset means no cap; the AI stops when it thinks it is done.
 - **`voice`**: speech voice for read-aloud replies. Any `say` voice on macOS
-  (`Samantha` when unset), any espeak voice on Linux. Needs `say`/`spd-say`
+  (`Tara` at 260wpm when unset), any espeak voice on Linux. Needs `say`/`spd-say`
   on PATH; silently off otherwise.
 
 ## Using it
