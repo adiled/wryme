@@ -155,19 +155,20 @@ impl PatienceField {
 
 impl StationDef {
     fn resolve(self) -> Station {
+        let mut dials = Dials::default();
+        if self.boldness.is_some() {
+            dials.boldness = self.boldness;
+        }
+        if self.patience.is_some() {
+            dials.patience = self.patience.and_then(|p| p.into_patience());
+        }
+        if self.verbosity.is_some() {
+            dials.verbosity = self.verbosity;
+        }
         Station {
             name: self.name,
             model: self.model,
-            dials: Dials {
-                boldness: self.boldness,
-                // Missing key falls back to the default (steady); only an
-                // explicitly unparseable value reads as unset.
-                patience: self
-                    .patience
-                    .map(|p| p.into_patience())
-                    .unwrap_or_else(|| Dials::default().patience),
-                verbosity: self.verbosity,
-            },
+            dials,
             voice: self.voice,
         }
     }
