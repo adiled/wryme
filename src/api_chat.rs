@@ -129,12 +129,25 @@ async fn stream_once(
         model: &'a str,
         messages: &'a [serde_json::Value],
         stream: bool,
+        stream_options: StreamOptions,
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
+        // Token ceiling. `max_completion_tokens` covers visible + reasoning
+        // tokens and is the only cap o-series models accept (`max_tokens`
+        // is deprecated and rejected there).
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_tokens: Option<u32>,
+        max_completion_tokens: Option<u32>,
+        // Patience dial. Chat's top-level `reasoning_effort`
+        // (none/minimal/low/medium/high/...); omitted when unset.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<&'a str>,
         tool_choice: &'a str,
         tools: &'a [serde_json::Value],
+    }
+
+    #[derive(Serialize)]
+    struct StreamOptions {
+        include_usage: bool,
     }
 
     let tools = tools::tool_defs_chat();
@@ -144,8 +157,10 @@ async fn stream_once(
         model: &station.model,
         messages: conv,
         stream: true,
+        stream_options: StreamOptions { include_usage: true },
         temperature: station.dials.boldness,
-        max_tokens: station.dials.verbosity,
+        max_completion_tokens: station.dials.verbosity,
+        reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
         tool_choice: "auto",
         tools: &tools,
     };
@@ -266,11 +281,35 @@ fn handle_event(
         match serde_json::from_str::<ChatChunk>(payload) {
             Ok(chunk) => {
                 for choice in chunk.choices {
+                    // Terminal reason for this choice. Surfaces truncation
+                    // and content-filter cutoffs that are otherwise silent
+                    // over SSE (no HTTP error, just a stopped stream).
+                    match choice.finish_reason.as_deref() {
+                        Some("length") => {
+                            let _ = tx.send(StreamEvent::Error {
+                                message: "stopped: token limit reached (bump verbosity)".into(),
+                            });
+                        }
+                        Some("content_filter") => {
+                            let _ = tx.send(StreamEvent::Error {
+                                message: "stopped: content filter".into(),
+                            });
+                        }
+                        _ => {}
+                    }
                     if let Some(delta) = choice.delta {
                         if let Some(content) = delta.content {
                             if !content.is_empty() {
                                 assistant_content.push_str(&content);
                                 let _ = tx.send(StreamEvent::Delta { text: content });
+                            }
+                        }
+                        // Refusal text is model output too; show it instead
+                        // of dropping it.
+                        if let Some(refusal) = delta.refusal {
+                            if !refusal.is_empty() {
+                                assistant_content.push_str(&refusal);
+                                let _ = tx.send(StreamEvent::Delta { text: refusal });
                             }
                         }
                         if let Some(reasoning) = delta.reasoning_content {
@@ -317,10 +356,18 @@ fn handle_event(
 struct ChatChunk {
     #[serde(default)]
     choices: Vec<Choice>,
+    // Present (with empty choices) on the final usage chunk when
+    // `stream_options.include_usage` is set. No UI sink for token
+    // telemetry yet; kept so the shape stays explicit.
+    #[serde(default)]
+    #[allow(dead_code)]
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct Choice {
+    #[serde(default)]
+    finish_reason: Option<String>,
     #[serde(default)]
     delta: Option<Delta>,
 }
@@ -329,6 +376,8 @@ struct Choice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    refusal: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
@@ -351,4 +400,74 @@ struct DeltaFunction {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel() -> (
+        UnboundedSender<StreamEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    ) {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+
+    #[test]
+    fn refusal_delta_surfaces_as_text() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{\"refusal\":\"sorry\"}}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        assert!(content.contains("sorry"));
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Delta { text } if text == "sorry"));
+    }
+
+    #[test]
+    fn finish_reason_length_and_filter_become_errors() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("token limit")));
+
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("content filter")));
+    }
+
+    #[test]
+    fn usage_chunk_parses_cleanly() {
+        let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\ndata: [DONE]\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        assert!(calls.is_empty());
+    }
 }
