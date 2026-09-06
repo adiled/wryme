@@ -217,12 +217,9 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Color::Gray
         }),
     ));
-    // ---- usage meter (bottom-right, DarkGray K terms) ----
-    // Same line, same rendering as the rest of the status bar — padded
-    // out so it hugs the right edge in the "via ds4" color.
     let used = app.usage_ctx + app.usage_out;
     if used > 0 {
-        let label = format!("{} used", format_k(used));
+        let label = format_k(used);
         let left_w: usize = pieces
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
