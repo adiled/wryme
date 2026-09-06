@@ -137,7 +137,7 @@ async fn stream_once(
         tools: &'a [serde_json::Value],
     }
 
-    let tools = tools::tool_defs();
+    let tools = tools::tool_defs_chat();
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let body = Req {
