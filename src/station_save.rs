@@ -9,7 +9,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 
-use crate::station::{Patience, Station};
+use crate::station::Station;
 
 /// Append one [[station]] block to the stations file. Creates the file
 /// (and parent directory) if missing. Preserves the rest of the file
