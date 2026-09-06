@@ -129,6 +129,9 @@ The dials, all optional:
   thinking. Unset means the AI decides.
 - **`verbosity`**: the most words the AI is allowed to say. A number like
   1024 or 4096. Unset means no cap; the AI stops when it thinks it is done.
+- **`voice`**: speech voice for read-aloud replies. Any `say` voice on macOS
+  (`Tara` at 260wpm when unset), any espeak voice on Linux. Needs `say`/`spd-say`
+  on PATH; silently off otherwise.
 
 ## Using it
 
@@ -157,6 +160,7 @@ When you're done, press **Ctrl-C** to close it.
 | `Esc`        | Stop a reply that's still coming in.          |
 | `Ctrl-C`     | Close the program.                            |
 | `Ctrl-T`     | Switch between paged and scrolling view.      |
+| `Ctrl-V`     | Read replies aloud on / off.                  |
 | `Ctrl-S`     | Open the station popup (a tabbed tuning menu).|
 | `F1`         | Open the popup directly on the Help tab.      |
 | `Tab`        | In the popup: switch between Station / Help.  |

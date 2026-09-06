@@ -31,6 +31,9 @@ pub struct Station {
     pub name: String,
     pub model: String,
     pub dials: Dials,
+    /// Speech voice for read-aloud replies (Ctrl-V). Heard, never sent:
+    /// e.g. "Zarvox" via `say`, any espeak voice via `spd-say`.
+    pub voice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -71,6 +74,7 @@ impl Station {
             name: "demo".into(),
             model: "canned replies".into(),
             dials: Dials::default(),
+            voice: None,
         }
     }
 }
@@ -91,6 +95,8 @@ struct StationDef {
     patience: Option<PatienceField>,
     #[serde(default)]
     verbosity: Option<u32>,
+    #[serde(default)]
+    voice: Option<String>,
 }
 
 /// Accept either an enum string ("quick"/"steady"/"slow") or, for the
@@ -124,6 +130,7 @@ impl StationDef {
                 patience: self.patience.and_then(|p| p.into_patience()),
                 verbosity: self.verbosity,
             },
+            voice: self.voice,
         }
     }
 }
@@ -156,6 +163,7 @@ fn from_env() -> Option<Station> {
         name,
         model,
         dials: Dials::default(),
+        voice: None,
     })
 }
 
@@ -206,6 +214,7 @@ pub fn pick(
                     name: "untitled".into(),
                     model: model.clone(),
                     dials: Dials::default(),
+                    voice: None,
                 },
                 None,
             ));
@@ -235,6 +244,7 @@ mod tests {
             name: name.into(),
             model: model.into(),
             dials: Dials::default(),
+            voice: None,
         }
     }
 

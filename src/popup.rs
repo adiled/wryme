@@ -96,9 +96,7 @@ pub fn rows(app: &App) -> Vec<Row> {
 pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter(|(_, r)| {
-            !matches!(r, Row::SectionHeader(_) | Row::Blank)
-        })
+        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank))
         .map(|(i, _)| i)
         .collect()
 }
@@ -207,6 +205,7 @@ pub fn commit_save_as(app: &mut App) {
         name: name.clone(),
         model: app.active_station.model.clone(),
         dials: app.active_station.dials,
+        voice: app.active_station.voice.clone(),
     };
     let Some(path) = crate::station::config_path() else {
         app.note("save failed: no $HOME");
@@ -240,6 +239,7 @@ pub fn commit_update(app: &mut App) {
         name: origin.clone(),
         model: app.active_station.model.clone(),
         dials: app.active_station.dials,
+        voice: app.active_station.voice.clone(),
     };
     if let Err(e) = crate::station_save::update_in_file(&path, &updated) {
         app.note(format!("update failed: {}", e));
@@ -449,10 +449,14 @@ pub fn help_rows() -> Vec<(String, String)> {
         ("Esc".into(), "stop a streaming reply / clear note".into()),
         ("Ctrl-C".into(), "quit immediately".into()),
         ("Ctrl-T".into(), "toggle page / scroll view".into()),
+        ("Ctrl-V".into(), "read replies aloud on / off".into()),
         ("PgUp / PgDn".into(), "page or scroll up / down".into()),
         ("← / →".into(), "move the input cursor".into()),
         ("Home / End".into(), "jump to input start / end".into()),
-        ("Backspace / Delete".into(), "delete before / after cursor".into()),
+        (
+            "Backspace / Delete".into(),
+            "delete before / after cursor".into(),
+        ),
         ("Ctrl-A / Ctrl-E".into(), "jump to input start / end".into()),
         ("Ctrl-U".into(), "kill to start of line".into()),
         ("Ctrl-K".into(), "kill to end of line".into()),

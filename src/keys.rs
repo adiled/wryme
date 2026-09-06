@@ -62,6 +62,7 @@ pub fn handle_key(
         if let Some(t) = in_flight.take() {
             t.abort();
         }
+        app.shutdown_voice();
         app.should_quit = true;
         return;
     }
@@ -69,6 +70,22 @@ pub fn handle_key(
     // F1 opens the popup directly on the Help tab (even when closed).
     if k.code == KeyCode::F(1) {
         popup::open_help(app);
+        return;
+    }
+
+    // Ctrl-V toggles read-aloud replies for this window.
+    if ctrl && matches!(k.code, KeyCode::Char('v')) {
+        if app.voice_on {
+            app.voice_on = false;
+            app.shutdown_voice();
+            app.note("voice off");
+        } else if crate::voice::available() {
+            app.voice_on = true;
+            app.unmute_voice();
+            app.note("voice on");
+        } else {
+            app.note("voice unavailable: no say/spd-say on PATH");
+        }
         return;
     }
 
@@ -80,6 +97,15 @@ pub fn handle_key(
 
     match k.code {
         KeyCode::Esc => {
+            // First Esc while a voiced turn streams quiets the voice for
+            // the rest of the turn (mute sticks, not momentary activity);
+            // the next Esc interrupts the turn itself.
+            if app.voice_on && !app.voice_muted && app.in_flight {
+                app.mute_voice();
+                app.note("quiet");
+                return;
+            }
+            app.stop_voice();
             if let Some(t) = in_flight.take() {
                 t.abort();
                 app.finish_streaming();
@@ -100,6 +126,8 @@ pub fn handle_key(
             let images = attached_images(&text);
             app.push_user(text, images);
             app.begin_assistant();
+            app.stop_voice();
+            app.unmute_voice();
             app.in_flight = true;
             app.current_page = 0;
             app.scroll_row = 0;

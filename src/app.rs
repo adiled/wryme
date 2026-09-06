@@ -128,6 +128,10 @@ pub struct App {
     /// Rendered as a gray K-count, bottom-right.
     pub usage_ctx: u64,
     pub usage_out: u64,
+    pub voice_on: bool,
+    pub voice_muted: bool,
+    pub voice_speaker: Option<crate::voice::Speaker>,
+    pub voice_buffer: String,
     /// All shops loaded at startup. Read-only after that. Used by the
     /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
@@ -195,6 +199,10 @@ impl App {
             last_response_id: None,
             usage_ctx: 0,
             usage_out: 0,
+            voice_on: false,
+            voice_muted: false,
+            voice_speaker: None,
+            voice_buffer: String::new(),
             shops,
             stations,
             active_station,
@@ -225,10 +233,55 @@ impl App {
             || saved.dials.boldness != self.active_station.dials.boldness
             || saved.dials.patience != self.active_station.dials.patience
             || saved.dials.verbosity != self.active_station.dials.verbosity
+            || saved.voice != self.active_station.voice
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+    }
+
+    pub fn stop_voice(&mut self) {
+        if let Some(speaker) = self.voice_speaker.as_mut() {
+            speaker.stop();
+        }
+        self.voice_buffer.clear();
+    }
+
+    /// Quiet for the rest of this turn: kills current speech and drops
+    /// anything queued, and new deltas stay silent until the next turn.
+    pub fn mute_voice(&mut self) {
+        self.stop_voice();
+        self.voice_muted = true;
+    }
+
+    pub fn unmute_voice(&mut self) {
+        self.voice_muted = false;
+    }
+
+    pub fn voice_is_active(&self) -> bool {
+        self.voice_speaker
+            .as_ref()
+            .map(|s| s.is_active())
+            .unwrap_or(false)
+    }
+
+    pub fn shutdown_voice(&mut self) {
+        if let Some(mut speaker) = self.voice_speaker.take() {
+            speaker.shutdown();
+        }
+        self.voice_buffer.clear();
+    }
+
+    pub fn ensure_speaker(&mut self, voice: Option<String>) {
+        let same = self
+            .voice_speaker
+            .as_ref()
+            .map(|s| s.name == voice)
+            .unwrap_or(false);
+        if !same {
+            self.shutdown_voice();
+            self.voice_speaker = Some(crate::voice::Speaker::new(voice));
+        }
     }
 
     pub fn push_user(&mut self, content: String, images: Vec<String>) {

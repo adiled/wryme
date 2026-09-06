@@ -47,7 +47,13 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Style::default().fg(Color::Cyan)
         })
         .title(if app.in_flight {
-            " streaming… (Esc cancel) "
+            if app.voice_is_active() {
+                " streaming + speaking… (Esc to quiet) "
+            } else {
+                " streaming… (Esc to interrupt) "
+            }
+        } else if app.voice_is_active() {
+            " speaking… (Esc to quiet) "
         } else {
             " write. Enter to send, Ctrl-C to quit "
         });
@@ -183,6 +189,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         Span::raw(dot),
         Span::raw(format!("{} msg", app.messages.len())),
     ];
+    if app.voice_on {
+        pieces.push(Span::raw(dot));
+        pieces.push(Span::styled("voice", Style::default().fg(Color::Cyan)));
+    }
     if !app.messages.is_empty() {
         pieces.push(Span::raw(dot));
         match app.view_mode {
