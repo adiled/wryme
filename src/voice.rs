@@ -228,17 +228,19 @@ impl Speaker {
             tx: Some(tx),
             current,
             queued,
+            gen,
             name: voice,
         }
     }
 
     pub fn say(&self, text: String) {
+        let g = self.gen.load(std::sync::atomic::Ordering::Relaxed);
         if self.tx.is_some() {
             self.queued
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(tx) = &self.tx {
-            let _ = tx.send(SpeakCmd::Say(text));
+            let _ = tx.send(SpeakCmd::Say(g, text));
         }
     }
 
