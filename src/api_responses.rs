@@ -52,16 +52,30 @@ pub(crate) async fn stream(
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     if shop.window == WindowMode::Warm {
-        return stream_warm(
+        match stream_warm(
             client,
             shop,
             station,
-            messages,
+            messages.clone(),
             previous_response_id,
-            engine,
+            engine.clone(),
             tx,
         )
-        .await;
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // The shop doesn't actually retain windows despite the
+                // opt-in ("previous_response_id is not supported" and
+                // kin): fall back to a full replay once instead of
+                // surfacing the error.
+                let msg = format!("{e:#}");
+                if msg.contains("previous_response_id") {
+                    return stream_full(client, shop, station, messages, engine, tx).await;
+                }
+                return Err(e);
+            }
+        }
     }
     stream_full(client, shop, station, messages, engine, tx).await
 }
