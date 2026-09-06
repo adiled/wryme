@@ -3,9 +3,11 @@
 // POSTs to `<shop.url>/responses` with `stream: true`. Body uses `input`
 // instead of `messages`, lifts the system prompt to a top-level
 // `instructions` field, carries the model (from station) and translatable
-// dials. When previous_response_id is set, we ship only the latest user
-// turn instead of replaying the full history; the server has the rest
-// pinned to its warm session.
+// dials. Stateless by design: `store: false` on every request and the full
+// conversation (including tool history as function_call /
+// function_call_output items) is replayed each turn, so we never depend on
+// the shop retaining server-side session state (`previous_response_id` is
+// accepted but unused).
 //
 // Tools: we advertise the shell tool (named after the user's real shell,
 // e.g. `zsh`), its discovery companion (`zsh_explore`), and the async-job
@@ -43,7 +45,7 @@ pub(crate) async fn stream(
     shop: &Shop,
     station: &Station,
     messages: Vec<ApiMessage>,
-    previous_response_id: Option<String>,
+    _previous_response_id: Option<String>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
@@ -57,23 +59,16 @@ pub(crate) async fn stream(
         .filter(|m| m.role != "system")
         .collect();
 
-    // First request: full conversation, or just the latest user turn when
-    // the session is pinned via previous_response_id. Established
-    // compartments' rendered bookmarks ride along as `system` input items.
-    let mut prev_id = previous_response_id;
-    let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
-        conv_msgs
-            .last()
-            .into_iter()
-            .flat_map(|m| json_msg(m))
-            .collect()
-    } else {
-        conv_msgs
-            .iter()
-            .flat_map(|m| json_msg(m))
-            .collect()
-    };
-    prepend_preamble(&mut input, &engine);
+    // Stateless: always the full conversation. Tool history rides as
+    // function_call / function_call_output items (see json_msg), so a
+    // shop that stores nothing still sees the whole transcript.
+    // `_previous_response_id` is deliberately unused.
+    let mut input: Vec<serde_json::Value> = conv_msgs
+        .iter()
+        .flat_map(|m| json_msg(m))
+        .collect();
+    let mut preamble_len = 0usize;
+    preamble_len = prepend_preamble_counted(&mut input, &engine, preamble_len);
 
     // Plant any finished async jobs into the input as a check-call +
     // result pair, so the model sees the outcome and continues.
@@ -97,16 +92,18 @@ pub(crate) async fn stream(
     }
 
     loop {
-        let (calls, new_id) =
-            stream_once(client, shop, station, &input, prev_id.as_deref(), instructions, tx)
-                .await?;
+        let (calls, _new_id, reasoning_items) =
+            stream_once(client, shop, station, &input, None, instructions, tx).await?;
         if calls.is_empty() {
             return Ok(());
         }
 
         // Execute each tool call locally, persist the pair via a ToolResult
-        // event, and build the follow-up input.
-        let mut next_input = Vec::new();
+        // event, and grow the stateless input: reasoning items (with
+        // encrypted_content) + function_call + function_call_output, so
+        // the next request carries the whole transcript.
+        let mut follow = Vec::new();
+        follow.extend(reasoning_items);
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -118,17 +115,23 @@ pub(crate) async fn stream(
                 arguments: call.arguments.clone(),
                 output: output.clone(),
             });
-            next_input.push(serde_json::json!({
+            follow.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": call.call_id.clone(),
+                "name": call.name.clone(),
+                "arguments": call.arguments.clone(),
+            }));
+            follow.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": call.call_id,
                 "output": output,
             }));
         }
+        input.extend(follow);
         // Re-pin the preamble: the model may have promoted a compartment
-        // to the preamble this round.
-        prepend_preamble(&mut next_input, &engine);
-        prev_id = Some(new_id);
-        input = next_input;
+        // to the preamble this round. Old preamble items are swapped out
+        // so they never duplicate down the input.
+        preamble_len = prepend_preamble_counted(&mut input, &engine, preamble_len);
     }
 }
 
@@ -137,11 +140,21 @@ pub(crate) async fn stream(
 /// its memory at the top. (The Responses protocol drops system messages
 /// other than the first instructions, so the engine's preamble must be
 /// injected as real input items each round.)
-fn prepend_preamble(input: &mut Vec<serde_json::Value>, engine: &Arc<Mutex<book::Engine>>) {
+///
+/// Counted variant: swaps out the `old_len` previously prepended items so
+/// a growing stateless input never accumulates duplicate preambles.
+/// Returns the new prepended count.
+fn prepend_preamble_counted(
+    input: &mut Vec<serde_json::Value>,
+    engine: &Arc<Mutex<book::Engine>>,
+    old_len: usize,
+) -> usize {
+    let drain = old_len.min(input.len());
+    input.drain(..drain);
     let (preambles, prod) = if let Ok(mut e) = engine.lock() {
         (e.preamble(), e.take_prod())
     } else {
-        return;
+        return 0;
     };
     let mut items: Vec<serde_json::Value> = preambles
         .into_iter()
@@ -150,48 +163,65 @@ fn prepend_preamble(input: &mut Vec<serde_json::Value>, engine: &Arc<Mutex<book:
     if let Some(prod) = prod {
         items.push(serde_json::json!({ "type": "system", "content": prod }));
     }
+    let n = items.len();
     items.append(input);
     *input = items;
+    n
 }
 
 /// One request/response round. Streams content/brain/tool events to `tx`,
-/// collects any function calls the model made, and returns them plus the
-/// new response id (for pinning the follow-up request).
+/// collects any function calls the model made plus completed reasoning
+/// items (for stateless resume), and returns them with the new response
+/// id (captured for the UI; never replayed — `store: false` keeps no
+/// server state).
 async fn stream_once(
     client: &Client,
     shop: &Shop,
     station: &Station,
     input: &[serde_json::Value],
-    previous_response_id: Option<&str>,
+    _previous_response_id: Option<&str>,
     instructions: Option<&str>,
     tx: &UnboundedSender<StreamEvent>,
-) -> Result<(Vec<FuncCall>, String)> {
+) -> Result<(Vec<FuncCall>, String, Vec<serde_json::Value>)> {
     #[derive(Serialize)]
     struct ResponsesReq<'a> {
         model: &'a str,
         input: &'a [serde_json::Value],
         stream: bool,
+        // Stateless: the full transcript rides every request, so the shop
+        // must retain nothing. Never send previous_response_id.
+        store: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        previous_response_id: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<Reasoning>,
+        // Only when reasoning runs: lets the server return
+        // encrypted_content so follow-ups keep reasoning context with
+        // store:false.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        include: Option<Vec<&'a str>>,
         tools: &'a [serde_json::Value],
     }
 
     #[derive(Serialize)]
     struct Reasoning {
         effort: &'static str,
+        // Without `summary: auto` the server may emit no
+        // reasoning_summary_text deltas — our only Brain source.
+        summary: &'static str,
     }
 
     let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
         effort: p.as_wire(),
+        summary: "auto",
     });
+    let include = reasoning
+        .as_ref()
+        .map(|_| vec!["reasoning.encrypted_content"]);
     let tools = tools::tool_defs();
 
     let base = shop.url.trim_end_matches('/');
@@ -200,11 +230,12 @@ async fn stream_once(
         model: &station.model,
         input,
         stream: true,
+        store: false,
         instructions,
-        previous_response_id,
         temperature: station.dials.boldness,
         max_output_tokens: station.dials.verbosity,
         reasoning,
+        include,
         tools: &tools,
     };
 
@@ -223,6 +254,7 @@ async fn stream_once(
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut calls: Vec<FuncCall> = Vec::new();
+    let mut reasoning_items: Vec<serde_json::Value> = Vec::new();
     let mut new_id: Option<String> = None;
 
     while let Some(chunk) = stream.next().await {
@@ -234,18 +266,45 @@ async fn stream_once(
             };
             let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
             let event = &event_bytes[..end.body_len];
-            handle_event(event, tx, &mut calls, &mut new_id)?;
+            handle_event(event, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
         }
     }
     if !buf.is_empty() {
-        handle_event(&buf, tx, &mut calls, &mut new_id)?;
+        handle_event(&buf, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
     }
 
     let new_id = new_id.context("no response.created seen")?;
-    Ok((calls, new_id))
+    Ok((calls, new_id, reasoning_items))
 }
 
 fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
+    // A tool result: the Responses item is `function_call_output`, keyed
+    // by the call id it answers.
+    if m.role == "tool" {
+        return vec![serde_json::json!({
+            "type": "function_call_output",
+            "call_id": m.tool_call_id,
+            "output": m.tool_result,
+        })];
+    }
+    // An assistant turn that called tools: replay each call as a
+    // `function_call` item (plus the text as a message item when any),
+    // so a stateless shop sees the full transcript.
+    if !m.tool_calls.is_empty() {
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        if !m.content.is_empty() {
+            items.push(serde_json::json!({ "role": m.role, "content": m.content }));
+        }
+        for c in &m.tool_calls {
+            items.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": c.id,
+                "name": c.name,
+                "arguments": c.arguments,
+            }));
+        }
+        return items;
+    }
     if m.images.is_empty() {
         return vec![serde_json::json!({ "role": m.role, "content": m.content })];
     }
@@ -273,11 +332,14 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
     items
 }
 /// Parse one SSE event body and emit matching StreamEvents. Function calls
-/// are accumulated into `calls`; the newest response id lands in `new_id`.
+/// are accumulated into `calls`, completed reasoning items (with
+/// encrypted_content) into `reasoning` for stateless resume; the newest
+/// response id lands in `new_id`.
 fn handle_event(
     bytes: &[u8],
     tx: &UnboundedSender<StreamEvent>,
     calls: &mut Vec<FuncCall>,
+    reasoning: &mut Vec<serde_json::Value>,
     new_id: &mut Option<String>,
 ) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
@@ -296,6 +358,32 @@ fn handle_event(
         };
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
+            // Terminal states. Usage rides `response.completed` but has no
+            // UI sink yet; failures and cutoffs surface as errors instead
+            // of a stream that just stops.
+            "response.completed" => {}
+            "response.failed" => {
+                let msg = v
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("response failed");
+                let _ = tx.send(StreamEvent::Error {
+                    message: msg.to_string(),
+                });
+            }
+            "response.incomplete" => {
+                let reason = v
+                    .get("response")
+                    .and_then(|r| r.get("incomplete_details"))
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("incomplete");
+                let _ = tx.send(StreamEvent::Error {
+                    message: format!("stopped: {reason}"),
+                });
+            }
             "response.created" => {
                 if let Some(id) = v
                     .get("response")
@@ -387,24 +475,49 @@ fn handle_event(
                     }
                 }
             }
+            // Authoritative full arguments. Some servers send few or no
+            // deltas and put everything here — without this arm those
+            // calls execute with empty arguments.
+            "response.function_call_arguments.done" => {
+                let item_id = v
+                    .get("item_id")
+                    .and_then(|i| i.as_str())
+                    .or_else(|| v.get("output_item_id").and_then(|i| i.as_str()))
+                    .unwrap_or("");
+                if let Some(args) = v.get("arguments").and_then(arg_string) {
+                    if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
+                        if c.arguments.is_empty() || !args.is_empty() {
+                            c.arguments = args;
+                        }
+                    }
+                }
+            }
             "response.output_item.done" => {
                 let item = v.get("output_item");
                 let item_type = item
                     .and_then(|i| i.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                if item_type == "function_call" {
+                if item_type == "reasoning" {
+                    // Completed reasoning item (summary + encrypted_content):
+                    // replayed into the next stateless input so reasoning
+                    // context survives with store:false.
+                    if let Some(item) = item {
+                        reasoning.push(item.clone());
+                    }
+                } else if item_type == "function_call" {
                     let item_id = item
                         .and_then(|i| i.get("id"))
                         .and_then(|i| i.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if let Some(arguments) = item
-                        .and_then(|i| i.get("arguments"))
-                        .and_then(|a| a.as_str())
+                    if let Some(arguments) =
+                        item.and_then(|i| i.get("arguments")).and_then(arg_string)
                     {
                         if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
-                            c.arguments = arguments.to_string();
+                            if c.arguments.is_empty() || !arguments.is_empty() {
+                                c.arguments = arguments;
+                            }
                         }
                     }
                 }
@@ -418,4 +531,140 @@ fn handle_event(
         }
     }
     Ok(())
+}
+
+/// Function-call arguments as a string. Spec says string, but compat
+/// servers sometimes emit a JSON object — serialize it rather than
+/// dropping the call's arguments on the floor.
+fn arg_string(v: &serde_json::Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if v.is_object() || v.is_array() {
+        return serde_json::to_string(v).ok();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ApiToolCall;
+
+    fn channel() -> (
+        UnboundedSender<StreamEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    ) {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+
+    fn api_msg(role: &str) -> ApiMessage {
+        ApiMessage {
+            role: role.into(),
+            content: String::new(),
+            images: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: String::new(),
+            tool_result: String::new(),
+        }
+    }
+
+    #[test]
+    fn tool_history_replays_as_function_items() {
+        let mut asst = api_msg("assistant");
+        asst.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "zsh".into(),
+            arguments: "{\"command\":\"ls\"}".into(),
+        });
+        let items = json_msg(&asst);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "function_call");
+        assert_eq!(items[0]["call_id"], "c1");
+
+        let mut tool = api_msg("tool");
+        tool.tool_call_id = "c1".into();
+        tool.tool_result = "out".into();
+        let items = json_msg(&tool);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[0]["call_id"], "c1");
+        assert_eq!(items[0]["output"], "out");
+    }
+
+    #[test]
+    fn failed_and_incomplete_become_errors() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut id = None;
+        handle_event(
+            b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n",
+            &tx,
+            &mut calls,
+            &mut reasoning,
+            &mut id,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Error { message } if message == "boom"));
+
+        handle_event(
+            b"data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+            &tx,
+            &mut calls,
+            &mut reasoning,
+            &mut id,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("max_output_tokens")));
+    }
+
+    #[test]
+    fn arguments_done_event_fills_empty_args() {
+        // Servers that send no deltas put everything in
+        // function_call_arguments.done — must not execute empty.
+        let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut id = None;
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"\"}}\n\n",
+            &tx, &mut calls, &mut reasoning, &mut id,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
+            &tx, &mut calls, &mut reasoning, &mut id,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn object_arguments_serialize_instead_of_dropping() {
+        assert_eq!(
+            arg_string(&serde_json::json!({"command": "ls"})).as_deref(),
+            Some("{\"command\":\"ls\"}")
+        );
+    }
+
+    #[test]
+    fn reasoning_done_item_is_captured() {        let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut id = None;
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
+            &tx,
+            &mut calls,
+            &mut reasoning,
+            &mut id,
+        )
+        .unwrap();
+        assert_eq!(reasoning.len(), 1);
+        assert_eq!(reasoning[0]["id"], "rs_1");
+    }
 }

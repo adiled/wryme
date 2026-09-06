@@ -157,7 +157,12 @@ fn extract_command(arguments: &str) -> String {
 /// and we tell the model they went async.
 async fn run_shell(command: &str) -> String {
     if command.trim().is_empty() {
-        return format!("{}: no command given", shell_name());
+        // Tells the model the exact retry shape so an empty call can
+        // self-correct instead of looping on "no command given".
+        return format!(
+            "{}: no command given — call again with {{\"command\": \"...\"}}",
+            shell_name()
+        );
     }
     let handle = jobs::spawn(command.to_string());
     match tokio::time::timeout(Duration::from_secs(SHELL_TIMEOUT_SECS), handle.done).await {

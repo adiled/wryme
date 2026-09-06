@@ -17,11 +17,14 @@ use std::path::PathBuf;
 /// Which wire protocol this shop speaks.
 ///
 /// `Demo` is our local canned-replies generator. No network.
-/// `ChatCompletions` is the universal baseline: `/v1/chat/completions`
-/// with flat `choices[].delta` chunks. Almost every server.
-/// `Responses` is the newer typed-event protocol at `/v1/responses`.
-/// Cleaner for tool calls, reasoning, refusals, and built-in tools.
-/// OpenAI directly and agentic backends (like our local kara) support it.
+/// `Responses` is the default: the newer typed-event protocol at
+/// `/v1/responses`. Cleaner for tool calls, reasoning, refusals, and
+/// built-in tools. Stateless (`store: false`, full transcript replayed),
+/// so it works against any shop that implements the endpoint — OpenAI,
+/// our local ds4/glm servers, and Ollama's OpenAI-compat endpoint.
+/// `ChatCompletions` is the opt-out baseline: `/v1/chat/completions`
+/// with flat `choices[].delta` chunks. Set
+/// `protocol = "chat-completions"` for servers with no `/responses`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Demo,
@@ -69,7 +72,7 @@ struct ShopDef {
     key: Option<String>,
     #[serde(default)]
     key_env: Option<String>,
-    /// "chat-completions" (default) or "responses".
+    /// "responses" (default) or "chat-completions".
     #[serde(default)]
     protocol: Option<String>,
     #[serde(default)]
@@ -84,8 +87,8 @@ impl ShopDef {
             (None, None) => String::new(),
         };
         let protocol = match self.protocol.as_deref() {
-            Some("responses") => Protocol::Responses,
-            _ => Protocol::ChatCompletions,
+            Some("chat-completions") => Protocol::ChatCompletions,
+            _ => Protocol::Responses,
         };
         Shop {
             name: self.name,
@@ -134,8 +137,8 @@ fn from_env() -> Option<Shop> {
     }
 
     let protocol = match protocol.as_deref() {
-        Some("responses") => Protocol::Responses,
-        _ => Protocol::ChatCompletions,
+        Some("chat-completions") => Protocol::ChatCompletions,
+        _ => Protocol::Responses,
     };
     let models: Vec<String> = models
         .map(|s| s.split(',').map(|m| m.trim().to_string()).collect())
@@ -232,8 +235,24 @@ mod tests {
     }
 
     #[test]
-    fn find_for_model_picks_first_matching() {
-        let shops = vec![
+    fn protocol_defaults_to_responses() {
+        let def = |protocol: Option<String>| ShopDef {
+            name: "x".into(),
+            url: "u".into(),
+            key: None,
+            key_env: None,
+            protocol,
+            models: vec![],
+        };
+        assert_eq!(def(None).resolve().protocol, Protocol::Responses);
+        assert_eq!(
+            def(Some("chat-completions".into())).resolve().protocol,
+            Protocol::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn find_for_model_picks_first_matching() {        let shops = vec![
             Shop {
                 name: "a".into(),
                 url: "u1".into(),

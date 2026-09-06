@@ -40,8 +40,8 @@ pub struct Dials {
     pub boldness: Option<f32>,
     /// Reasoning effort. quick / steady / slow. Only meaningful on models
     /// that support extended thinking. Translated to "low"/"medium"/"high"
-    /// on the wire for the Responses protocol; silently dropped for Chat
-    /// Completions since it has no equivalent.
+    /// on the wire: Responses `reasoning.effort` and Chat
+    /// `reasoning_effort`; dropped nowhere, omitted when unset.
     pub patience: Option<Patience>,
     /// Max output tokens. Hard ceiling on reply length. Unset = let the
     /// model stop when it thinks it is done.
@@ -139,8 +139,8 @@ pub fn load_all() -> Result<Vec<Station>> {
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let parsed: StationsFile = toml::from_str(&text)
-                .with_context(|| format!("parsing {}", path.display()))?;
+            let parsed: StationsFile =
+                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
             for def in parsed.station {
                 out.push(def.resolve());
             }
@@ -181,7 +181,11 @@ pub fn pick(
         let found = stations.iter().find(|s| s.name == name).cloned();
         return found
             .map(|s| {
-                let origin = if s.name == "demo" { None } else { Some(s.name.clone()) };
+                let origin = if s.name == "demo" {
+                    None
+                } else {
+                    Some(s.name.clone())
+                };
                 (s, origin)
             })
             .with_context(|| {
@@ -243,11 +247,7 @@ mod tests {
 
     #[test]
     fn pick_uses_requested_name() {
-        let stations = vec![
-            Station::demo(),
-            station("a", "m1"),
-            station("b", "m2"),
-        ];
+        let stations = vec![Station::demo(), station("a", "m1"), station("b", "m2")];
         let shops = vec![Shop::demo()];
         let (got, origin) = pick(&stations, &shops, Some("b")).unwrap();
         assert_eq!(got.name, "b");
