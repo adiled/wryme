@@ -193,6 +193,9 @@ async fn run(
                     StreamEvent::ResponseId { id } => {
                         app.last_response_id = Some(id);
                     }
+                    StreamEvent::Usage { input, output } => {
+                        app.last_usage = Some((input, output));
+                    }
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if let Some(t) = in_flight_task.take() {

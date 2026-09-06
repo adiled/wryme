@@ -220,6 +220,28 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
 
+    // ---- usage meter (bottom-right, gray, K terms) ----
+    // Tokens burned by the last finished turn, when the server reported
+    // them. Right-aligned so it never fights the status text on the left.
+    if let Some((input, output)) = app.last_usage {
+        let label = format!("{} used", format_k(input + output));
+        let bar_w = chunks[2].width as usize;
+        let w = UnicodeWidthStr::width(label.as_str()).min(bar_w);
+        let x = chunks[2].x + (bar_w.saturating_sub(w) as u16);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(Color::Gray),
+            ))),
+            Rect {
+                x,
+                y: chunks[2].y,
+                width: w as u16,
+                height: 1,
+            },
+        );
+    }
+
     // ---- error overlay (bottom-right half, wrapped) ----
     // Long upstream errors used to bleed past the right edge on the
     // single-line status bar. When the status is an error, also pop a
@@ -233,6 +255,20 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     if app.popup.mode != popup::Mode::Closed {
         crate::popup_ui::draw(f, app);
     }
+}
+
+/// K-terms formatting for the usage meter: 950 -> "950", 12400 ->
+/// "12.4K", 2_300_000 -> "2.3M".
+fn format_k(n: u64) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+    let f = n as f64;
+    if n < 1_000_000 {
+        let k = f / 1000.0;
+        return format!("{:.1}K", (k * 10.0).round() / 10.0);
+    }
+    format!("{:.1}M", ((f / 1_000_000.0) * 10.0).round() / 10.0)
 }
 
 /// True when the status bar carries an error worth the red treatment
@@ -538,6 +574,15 @@ mod tests {
         for r in &rows {
             assert!(UnicodeWidthStr::width(r.trim_end_matches('-').to_string().as_str()) <= 10);
         }
+    }
+
+    #[test]
+    fn usage_formats_in_k_terms() {
+        assert_eq!(format_k(0), "0");
+        assert_eq!(format_k(950), "950");
+        assert_eq!(format_k(1000), "1.0K");
+        assert_eq!(format_k(12400), "12.4K");
+        assert_eq!(format_k(2_300_000), "2.3M");
     }
 
     #[test]
