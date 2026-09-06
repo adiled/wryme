@@ -201,7 +201,6 @@ impl App {
         }
     }
 
-
     /// True when the active station differs from the saved entry it was
     /// loaded from. False when there is no origin (untitled / demo) or
     /// when active matches its saved entry exactly.
@@ -303,16 +302,13 @@ impl App {
         self.last_stream_was_brain = false;
 
         let m = self.messages.last_mut().unwrap();
-        // Don't jam a chunk against the previous one: the model frequently
-        // splits "…." and the next word across two deltas, producing
-        // "sentence.Next" with no space. Insert one only when both sides
-        // are non-whitespace so we never double spaces or mangle markdown.
-        if !m.content.is_empty()
-            && !delta.starts_with(char::is_whitespace)
-            && !m.content.ends_with(char::is_whitespace)
-        {
-            m.content.push(' ');
-        }
+        // Verbatim concatenation (issue #16): stream deltas are appended
+        // exactly as they arrive. An earlier heuristic inserted a space
+        // whenever both sides were non-whitespace (to fix "sentence.Next"
+        // splits), but that corrupts well-formed streams — "Hello" + ","
+        // became "Hello ,", subword splits became "un der". Both the Chat
+        // and Responses specs define deltas as exact slices; any spacing
+        // the model intends already rides inside them.
         m.content.push_str(delta);
         m.phase = Phase::Writing;
     }
@@ -357,7 +353,13 @@ impl App {
 
     /// Persist a tool call/result pair onto the streaming assistant message,
     /// so the next user turn's wire history carries the full tool transcript.
-    pub fn record_tool_result(&mut self, call_id: String, name: String, arguments: String, result: String) {
+    pub fn record_tool_result(
+        &mut self,
+        call_id: String,
+        name: String,
+        arguments: String,
+        result: String,
+    ) {
         if let Some(m) = self
             .messages
             .iter_mut()
@@ -396,7 +398,8 @@ impl App {
             }
 
             // Record the whole logical turn (all clusters) into the book once.
-            let joined: String = self.messages
+            let joined: String = self
+                .messages
                 .iter()
                 .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.content.is_empty())
                 .map(|m| m.content.as_str())
@@ -412,13 +415,14 @@ impl App {
             // confusing empty bubble. Server hiccups and pre-delta errors are
             // common causes. If upstream sent an error, the status bar already
             // explains what happened. If not, leave a short note.
-            let any_nonempty = self.messages
-                .iter()
-                .any(|m| m.role == Role::Assistant && m.turn_id == tid
-                    && (!m.content.is_empty() || !m.brain.is_empty()
-                        || m.current_tool.is_some()));
+            let any_nonempty = self.messages.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.turn_id == tid
+                    && (!m.content.is_empty() || !m.brain.is_empty() || m.current_tool.is_some())
+            });
             if !any_nonempty {
-                self.messages.retain(|m| !(m.role == Role::Assistant && m.turn_id == tid));
+                self.messages
+                    .retain(|m| !(m.role == Role::Assistant && m.turn_id == tid));
                 if self.status.is_empty() {
                     self.note("empty reply");
                 }
@@ -517,11 +521,15 @@ impl App {
                         role: "assistant".into(),
                         content: m.content.clone(),
                         images: Vec::new(),
-                        tool_calls: m.tool_events.iter().map(|ev| ApiToolCall {
-                            id: ev.call_id.clone(),
-                            name: ev.name.clone(),
-                            arguments: ev.arguments.clone(),
-                        }).collect(),
+                        tool_calls: m
+                            .tool_events
+                            .iter()
+                            .map(|ev| ApiToolCall {
+                                id: ev.call_id.clone(),
+                                name: ev.name.clone(),
+                                arguments: ev.arguments.clone(),
+                            })
+                            .collect(),
                         tool_call_id: String::new(),
                         tool_result: String::new(),
                     });
@@ -585,5 +593,47 @@ impl App {
             out.append(&mut results);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let mut app = App::new(
+            None,
+            vec![Shop::demo()],
+            vec![Station::demo()],
+            Station::demo(),
+            Shop::demo(),
+            None,
+        );
+        // Keep the test off the real book: swap in a temp engine.
+        let dir = std::env::temp_dir().join(format!("wryme_app_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        app
+    }
+
+    #[test]
+    fn stream_deltas_concatenate_verbatim() {
+        // Issue #16: no space insertion. Punctuation and subword splits
+        // must land exactly as streamed.
+        let mut app = test_app();
+        app.begin_assistant();
+        for d in ["Hello", ",", " world", "!", " un", "der"] {
+            app.append_to_last_assistant(d);
+        }
+        let joined: String = app
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, "Hello, world! under");
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("wryme_app_{}", std::process::id())),
+        );
     }
 }
