@@ -104,13 +104,20 @@ pub(crate) async fn stream(
             return Ok(());
         }
 
-        // Execute each tool call locally and build the follow-up input.
+        // Execute each tool call locally, persist the pair via a ToolResult
+        // event, and build the follow-up input.
         let mut next_input = Vec::new();
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: call.call_id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                output: output.clone(),
+            });
             next_input.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": call.call_id,

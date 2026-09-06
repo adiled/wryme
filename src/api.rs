@@ -21,6 +21,14 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 use crate::shop::{Protocol, Shop};
 use crate::station::Station;
+/// A wire function-call to attach to an assistant ApiMessage.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiMessage {
     pub role: String,
@@ -28,12 +36,28 @@ pub struct ApiMessage {
     /// Image file paths attached to this message. Read and base64-encoded
     /// by the protocol builders when serializing to the wire.
     pub images: Vec<String>,
+    /// For an assistant message that used tools: the function-call array
+    /// to attach on the wire (Chat protocol `tool_calls`). Empty when none.
+    pub tool_calls: Vec<ApiToolCall>,
+    /// For a tool-role message: the call_id this result answers (Chat
+    /// protocol `tool_call_id`). Empty for ordinary messages.
+    pub tool_call_id: String,
+    /// The tool result payload for a tool-role message.
+    pub tool_result: String,
 }
 #[derive(Debug)]
 pub enum StreamEvent {
     Delta { text: String },
     Brain { text: String },
     ToolCall { name: Option<String> },
+    /// A tool call/result pair completed: persist it onto the current
+    /// assistant message so the next turn's history carries the transcript.
+    ToolResult {
+        call_id: String,
+        name: String,
+        arguments: String,
+        output: String,
+    },
     ResponseId { id: String },
     Done,
     Error { message: String },

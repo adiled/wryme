@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::api::ApiMessage;
+use crate::api::{ApiMessage, ApiToolCall};
 use crate::book;
 use crate::popup::Popup;
 use crate::shop::Shop;
@@ -36,6 +36,18 @@ pub enum ViewMode {
     Scroll,
 }
 
+/// One tool call the model made within an assistant turn, together with
+/// the result we fed back to it. Persisted on the Message so the wire
+/// transcript between user turns carries the full tool-call/result pair —
+/// without it, small models "forget" they have tools and stop using them.
+#[derive(Debug, Clone)]
+pub struct ToolEvent {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+    pub result: String,
+}
+
 #[derive(Debug)]
 pub struct Message {
     pub role: Role,
@@ -66,6 +78,10 @@ pub struct Message {
     /// they all share the same `turn_id` so the wire transcript and the
     /// book record still treat them as one turn. User messages set 0.
     pub turn_id: u64,
+    /// Tool calls made during this assistant turn and their results, in
+    /// order. Replayed into the wire history on the next request so the
+    /// model sees its own tool use and keeps using tools.
+    pub tool_events: Vec<ToolEvent>,
 }
 
 fn now_hhmm() -> String {
@@ -219,6 +235,7 @@ impl App {
             phase: Phase::Streaming,
             current_tool: None,
             turn_id: 0,
+            tool_events: Vec::new(),
         });
         // The engine records every turn into the continuous stream, and
         // re-checks whether an unattributed thread is weightful enough to
@@ -245,6 +262,7 @@ impl App {
             phase: Phase::Streaming,
             current_tool: None,
             turn_id: tid,
+            tool_events: Vec::new(),
         });
     }
 
@@ -279,6 +297,7 @@ impl App {
                 phase: Phase::Streaming,
                 current_tool: None,
                 turn_id: tid,
+                tool_events: Vec::new(),
             });
         }
         self.last_stream_was_brain = false;
@@ -333,6 +352,24 @@ impl App {
             if let Some(n) = name {
                 m.current_tool = Some(n);
             }
+        }
+    }
+
+    /// Persist a tool call/result pair onto the streaming assistant message,
+    /// so the next user turn's wire history carries the full tool transcript.
+    pub fn record_tool_result(&mut self, call_id: String, name: String, arguments: String, result: String) {
+        if let Some(m) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::Assistant && m.streaming)
+        {
+            m.tool_events.push(ToolEvent {
+                call_id,
+                name,
+                arguments,
+                result,
+            });
         }
     }
 
@@ -400,6 +437,9 @@ impl App {
                 role: "system".into(),
                 content: sys.clone(),
                 images: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: String::new(),
+                tool_result: String::new(),
             });
         }
         if let Ok(mut engine) = self.engine.lock() {
@@ -408,6 +448,9 @@ impl App {
                     role: "system".into(),
                     content: preamble,
                     images: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: String::new(),
+                    tool_result: String::new(),
                 });
             }
             // The book-writing prod: a quiet system reminder the engine
@@ -417,6 +460,9 @@ impl App {
                     role: "system".into(),
                     content: prod,
                     images: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: String::new(),
+                    tool_result: String::new(),
                 });
             }
         }
@@ -438,17 +484,86 @@ impl App {
                 && last_asst_turn == Some(m.turn_id)
                 && out.last().map(|a| a.role.as_str()) == Some("assistant")
             {
-                let last = out.last_mut().unwrap();
-                if !last.content.is_empty() && !m.content.is_empty() {
-                    last.content.push('\n');
+                let mut merged = false;
+                if let Some(last) = out.last_mut() {
+                    if !last.content.is_empty() && !m.content.is_empty() {
+                        last.content.push('\n');
+                    }
+                    last.content.push_str(&m.content);
+                    for ev in &m.tool_events {
+                        last.tool_calls.push(ApiToolCall {
+                            id: ev.call_id.clone(),
+                            name: ev.name.clone(),
+                            arguments: ev.arguments.clone(),
+                        });
+                    }
+                    merged = true;
                 }
-                last.content.push_str(&m.content);
+                // Emit the tool-role results after releasing the borrow.
+                for ev in &m.tool_events {
+                    out.push(ApiMessage {
+                        role: "tool".into(),
+                        content: ev.result.clone(),
+                        images: Vec::new(),
+                        tool_calls: Vec::new(),
+                        tool_call_id: ev.call_id.clone(),
+                        tool_result: ev.result.clone(),
+                    });
+                }
+                if !merged {
+                    // Should not happen (we checked out.last() is assistant),
+                    // but keep a fresh assistant message so history is sane.
+                    out.push(ApiMessage {
+                        role: "assistant".into(),
+                        content: m.content.clone(),
+                        images: Vec::new(),
+                        tool_calls: m.tool_events.iter().map(|ev| ApiToolCall {
+                            id: ev.call_id.clone(),
+                            name: ev.name.clone(),
+                            arguments: ev.arguments.clone(),
+                        }).collect(),
+                        tool_call_id: String::new(),
+                        tool_result: String::new(),
+                    });
+                    for ev in &m.tool_events {
+                        out.push(ApiMessage {
+                            role: "tool".into(),
+                            content: ev.result.clone(),
+                            images: Vec::new(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: ev.call_id.clone(),
+                            tool_result: ev.result.clone(),
+                        });
+                    }
+                }
                 last_asst_turn = Some(m.turn_id);
                 continue;
             }
             if m.role == Role::Assistant {
                 last_asst_turn = Some(m.turn_id);
             }
+            let (tool_calls, mut results) = if m.role == Role::Assistant {
+                let mut tcs = Vec::new();
+                let mut res = Vec::new();
+                for ev in &m.tool_events {
+                    tcs.push(ApiToolCall {
+                        id: ev.call_id.clone(),
+                        name: ev.name.clone(),
+                        arguments: ev.arguments.clone(),
+                    });
+                    res.push(ApiMessage {
+                        role: "tool".into(),
+                        content: ev.result.clone(),
+                        images: Vec::new(),
+                        tool_calls: Vec::new(),
+                        tool_call_id: ev.call_id.clone(),
+                        tool_result: ev.result.clone(),
+                    });
+                }
+                (tcs, res)
+            } else {
+                (Vec::new(), Vec::new())
+            };
             out.push(ApiMessage {
                 role: match m.role {
                     Role::User => "user",
@@ -461,7 +576,13 @@ impl App {
                 } else {
                     Vec::new()
                 },
+                tool_calls,
+                tool_call_id: String::new(),
+                tool_result: String::new(),
             });
+            // Emit the tool-role result messages right after their assistant
+            // turn, so the wire sees the call/result pair together.
+            out.append(&mut results);
         }
         out
     }

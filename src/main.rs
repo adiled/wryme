@@ -187,6 +187,9 @@ async fn run(
                     StreamEvent::ToolCall { name } => {
                         app.record_tool_call(name);
                     }
+                    StreamEvent::ToolResult { call_id, name, arguments, output } => {
+                        app.record_tool_result(call_id, name, arguments, output);
+                    }
                     StreamEvent::ResponseId { id } => {
                         app.last_response_id = Some(id);
                     }

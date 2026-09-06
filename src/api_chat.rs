@@ -91,12 +91,19 @@ pub(crate) async fn stream(
             "tool_calls": tcs,
         }));
 
-        // Execute each tool call locally and append a `tool` result.
+        // Execute each tool call locally, persist the pair via a ToolResult
+        // event, and append a `tool` result to the follow-up conversation.
         for c in &calls {
             let output = match tools::execute(&engine, &c.name, &c.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
             conv.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": c.id,
@@ -185,33 +192,54 @@ async fn stream_once(
 }
 
 fn json_msg(m: &ApiMessage) -> serde_json::Value {
-    if m.images.is_empty() {
-        return serde_json::json!({ "role": m.role, "content": m.content });
+    // A tool-role message: emit a `tool` message with the call_id + result.
+    if m.role == "tool" {
+        return serde_json::json!({
+            "role": "tool",
+            "tool_call_id": m.tool_call_id,
+            "content": m.tool_result,
+        });
     }
-    // User message with image attachments: content becomes an array of
-    // text + image_url parts, each image base64'd into a data URL.
-    let mut parts: Vec<serde_json::Value> = Vec::new();
-    if !m.content.is_empty() {
-        parts.push(serde_json::json!({
-            "type": "text",
-            "text": m.content,
-        }));
-    }
-    for path in &m.images {
-        if let Some((mime, b64)) = crate::api::image_data_url(path) {
+    // An assistant message that made tool calls: attach the tool_calls array.
+    let mut base = if m.images.is_empty() {
+        serde_json::json!({ "role": m.role, "content": m.content })
+    } else {
+        // User message with image attachments: content becomes an array of
+        // text + image_url parts, each image base64'd into a data URL.
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        if !m.content.is_empty() {
             parts.push(serde_json::json!({
-                "type": "image_url",
-                "image_url": {
-                    "url": format!("data:{mime};base64,{b64}"),
-                    "detail": "auto",
-                },
+                "type": "text",
+                "text": m.content,
             }));
         }
+        for path in &m.images {
+            if let Some((mime, b64)) = crate::api::image_data_url(path) {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{mime};base64,{b64}"),
+                        "detail": "auto",
+                    },
+                }));
+            }
+        }
+        serde_json::json!({
+            "role": m.role,
+            "content": parts,
+        })
+    };
+    if !m.tool_calls.is_empty() {
+        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "type": "function",
+                "function": { "name": c.name, "arguments": c.arguments },
+            })
+        }).collect();
+        base["tool_calls"] = serde_json::json!(tcs);
     }
-    serde_json::json!({
-        "role": m.role,
-        "content": parts,
-    })
+    base
 }
 
 fn handle_event(
