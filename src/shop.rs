@@ -12,6 +12,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Which wire protocol this shop speaks.
@@ -42,6 +43,8 @@ pub struct Shop {
     /// first model is what wryme picks when synthesizing a default
     /// station for a fresh launch with no saved stations.
     pub models: Vec<String>,
+    /// Custom headers sent with every request to this shop.
+    pub headers: HashMap<String, String>,
 }
 
 impl Shop {
@@ -52,6 +55,7 @@ impl Shop {
             key: String::new(),
             protocol: Protocol::Demo,
             models: vec!["canned replies".into()],
+            headers: HashMap::new(),
         }
     }
 }
@@ -77,6 +81,8 @@ struct ShopDef {
     protocol: Option<String>,
     #[serde(default)]
     models: Vec<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 impl ShopDef {
@@ -96,6 +102,7 @@ impl ShopDef {
             key,
             protocol,
             models: self.models,
+            headers: self.headers,
         }
     }
 }
@@ -150,6 +157,7 @@ fn from_env() -> Option<Shop> {
         key,
         protocol,
         models,
+        headers: HashMap::new(),
     })
 }
 
@@ -243,6 +251,7 @@ mod tests {
             key_env: None,
             protocol,
             models: vec![],
+            headers: HashMap::new(),
         };
         assert_eq!(def(None).resolve().protocol, Protocol::Responses);
         assert_eq!(
@@ -259,6 +268,7 @@ mod tests {
                 key: "".into(),
                 protocol: Protocol::ChatCompletions,
                 models: vec!["m1".into(), "m2".into()],
+                headers: HashMap::new(),
             },
             Shop {
                 name: "b".into(),
@@ -266,6 +276,7 @@ mod tests {
                 key: "".into(),
                 protocol: Protocol::Responses,
                 models: vec!["m2".into(), "m3".into()],
+                headers: HashMap::new(),
             },
         ];
         assert_eq!(find_for_model(&shops, "m1").unwrap().name, "a");

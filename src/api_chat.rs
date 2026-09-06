@@ -169,6 +169,9 @@ async fn stream_once(
     if !shop.key.is_empty() {
         req = req.bearer_auth(&shop.key);
     }
+    for (k, v) in &shop.headers {
+        req = req.header(k, v);
+    }
     let resp = req.send().await.context("posting chat/completions")?;
 
     if !resp.status().is_success() {

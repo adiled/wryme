@@ -236,6 +236,7 @@ mod tests {
             key: "".into(),
             protocol: Protocol::ChatCompletions,
             models: models.iter().map(|s| s.to_string()).collect(),
+            headers: HashMap::new(),
         }
     }
 
