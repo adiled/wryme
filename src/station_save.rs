@@ -109,12 +109,7 @@ fn serialize_block(station: &Station) -> String {
         block.push_str(&format!("boldness = {}\n", b));
     }
     if let Some(p) = station.dials.patience {
-        let label = match p {
-            Patience::Quick => "quick",
-            Patience::Steady => "steady",
-            Patience::Slow => "slow",
-        };
-        block.push_str(&format!("patience = \"{}\"\n", label));
+        block.push_str(&format!("patience = \"{}\"\n", p.label()));
     }
     if let Some(v) = station.dials.verbosity {
         block.push_str(&format!("verbosity = {}\n", v));

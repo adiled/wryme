@@ -36,34 +36,63 @@ pub struct Station {
     pub voice: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Dials {
     /// Temperature. 0.0 to 2.0, conventionally. Unset = let the model
     /// pick its own default.
     pub boldness: Option<f32>,
-    /// Reasoning effort. quick / steady / slow. Only meaningful on models
-    /// that support extended thinking. Translated to "low"/"medium"/"high"
-    /// on the wire: Responses `reasoning.effort` and Chat
-    /// `reasoning_effort`; dropped nowhere, omitted when unset.
+    /// Reasoning effort. Defaults to steady (medium). Only meaningful
+    /// on models that support extended thinking. Translated on the wire
+    /// to Responses `reasoning.effort` and Chat `reasoning_effort`.
     pub patience: Option<Patience>,
     /// Max output tokens. Hard ceiling on reply length. Unset = let the
     /// model stop when it thinks it is done.
     pub verbosity: Option<u32>,
 }
 
+impl Default for Dials {
+    fn default() -> Self {
+        Self {
+            boldness: None,
+            patience: Some(Patience::Steady),
+            verbosity: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Patience {
+    Bare,
+    Swift,
     Quick,
     Steady,
     Slow,
+    Deep,
+    Max,
 }
 
 impl Patience {
     pub fn as_wire(self) -> &'static str {
         match self {
+            Patience::Bare => "none",
+            Patience::Swift => "minimal",
             Patience::Quick => "low",
             Patience::Steady => "medium",
             Patience::Slow => "high",
+            Patience::Deep => "xhigh",
+            Patience::Max => "max",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Patience::Bare => "bare",
+            Patience::Swift => "swift",
+            Patience::Quick => "quick",
+            Patience::Steady => "steady",
+            Patience::Slow => "slow",
+            Patience::Deep => "deep",
+            Patience::Max => "max",
         }
     }
 }
@@ -112,9 +141,13 @@ impl PatienceField {
     fn into_patience(self) -> Option<Patience> {
         let PatienceField::Named(s) = self;
         match s.to_lowercase().as_str() {
+            "bare" | "none" => Some(Patience::Bare),
+            "swift" | "minimal" => Some(Patience::Swift),
             "quick" | "low" => Some(Patience::Quick),
             "steady" | "medium" => Some(Patience::Steady),
             "slow" | "high" => Some(Patience::Slow),
+            "deep" | "xhigh" => Some(Patience::Deep),
+            "max" => Some(Patience::Max),
             _ => None,
         }
     }
@@ -309,6 +342,22 @@ mod tests {
         assert_eq!(
             PatienceField::Named("high".into()).into_patience(),
             Some(Patience::Slow)
+        );
+        assert_eq!(
+            PatienceField::Named("bare".into()).into_patience(),
+            Some(Patience::Bare)
+        );
+        assert_eq!(
+            PatienceField::Named("minimal".into()).into_patience(),
+            Some(Patience::Swift)
+        );
+        assert_eq!(
+            PatienceField::Named("deep".into()).into_patience(),
+            Some(Patience::Deep)
+        );
+        assert_eq!(
+            PatienceField::Named("max".into()).into_patience(),
+            Some(Patience::Max)
         );
         assert_eq!(PatienceField::Named("garbage".into()).into_patience(), None);
     }
