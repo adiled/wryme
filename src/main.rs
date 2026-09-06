@@ -182,10 +182,8 @@ async fn run(
                     StreamEvent::Delta { text } => {
                         app.append_to_last_assistant(&text);
                         if app.voice_on {
-                            if app.voice_speaker.is_none() {
-                                let voice = app.active_station.voice.clone();
-                                app.voice_speaker = Some(crate::voice::Speaker::new(voice));
-                            }
+                            let voice = app.active_station.voice.clone();
+                            app.ensure_speaker(voice);
                             app.voice_buffer.push_str(&text);
                             for s in crate::voice::split_sentences(&mut app.voice_buffer) {
                                 if let Some(sp) = &app.voice_speaker {
@@ -218,17 +216,14 @@ async fn run(
                         if app.voice_on {
                             let tail = app.voice_buffer.trim().to_string();
                             app.voice_buffer.clear();
-                            if app.voice_speaker.is_none() && !tail.is_empty() {
-                                let voice = app.active_station.voice.clone();
-                                app.voice_speaker = Some(crate::voice::Speaker::new(voice));
-                            }
+                            let voice = app.active_station.voice.clone();
+                            app.ensure_speaker(voice);
                             if let Some(sp) = &app.voice_speaker {
                                 if !tail.is_empty() {
                                     sp.say(tail);
                                 }
                                 sp.flush();
                             }
-                            app.voice_speaker = None;
                         }
                         if let Some(t) = in_flight_task.take() {
                             drop(t);

@@ -239,10 +239,29 @@ impl App {
     }
 
     pub fn stop_voice(&mut self) {
-        if let Some(mut speaker) = self.voice_speaker.take() {
+        if let Some(speaker) = self.voice_speaker.as_mut() {
             speaker.stop();
         }
         self.voice_buffer.clear();
+    }
+
+    pub fn shutdown_voice(&mut self) {
+        if let Some(mut speaker) = self.voice_speaker.take() {
+            speaker.shutdown();
+        }
+        self.voice_buffer.clear();
+    }
+
+    pub fn ensure_speaker(&mut self, voice: Option<String>) {
+        let same = self
+            .voice_speaker
+            .as_ref()
+            .map(|s| s.name == voice)
+            .unwrap_or(false);
+        if !same {
+            self.shutdown_voice();
+            self.voice_speaker = Some(crate::voice::Speaker::new(voice));
+        }
     }
 
     pub fn push_user(&mut self, content: String, images: Vec<String>) {

@@ -62,7 +62,7 @@ pub fn handle_key(
         if let Some(t) = in_flight.take() {
             t.abort();
         }
-        app.stop_voice();
+        app.shutdown_voice();
         app.should_quit = true;
         return;
     }
@@ -77,7 +77,7 @@ pub fn handle_key(
     if ctrl && matches!(k.code, KeyCode::Char('v')) {
         if app.voice_on {
             app.voice_on = false;
-            app.stop_voice();
+            app.shutdown_voice();
             app.note("voice off");
         } else if crate::voice::available() {
             app.voice_on = true;

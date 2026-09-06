@@ -124,12 +124,14 @@ enum SpeakCmd {
 pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
+    pub name: Option<String>,
 }
 
 impl Speaker {
     pub fn new(voice: Option<String>) -> Self {
         let current = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
         let cur = current.clone();
+        let thread_voice = voice.clone();
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
             let mut pending: Vec<String> = Vec::new();
@@ -140,12 +142,12 @@ impl Speaker {
                     return;
                 }
                 if cfg!(target_os = "macos") {
-                    if let Some(path) = synth_file(&text, voice.as_deref()) {
+                    if let Some(path) = synth_file(&text, thread_voice.as_deref()) {
                         play_wait(&path, cur);
                     }
                     return;
                 }
-                if let Some(child) = spawn_say(&text, voice.as_deref()) {
+                if let Some(child) = spawn_say(&text, thread_voice.as_deref()) {
                     if let Ok(mut guard) = cur.lock() {
                         *guard = Some(child);
                     }
@@ -188,6 +190,7 @@ impl Speaker {
         Self {
             tx: Some(tx),
             current,
+            name: voice,
         }
     }
 
@@ -207,13 +210,17 @@ impl Speaker {
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Stop);
         }
-        self.tx = None;
         if let Ok(mut guard) = self.current.lock() {
             if let Some(mut child) = guard.take() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.stop();
+        self.tx = None;
     }
 }
 
