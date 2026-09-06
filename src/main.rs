@@ -181,6 +181,18 @@ async fn run(
                 match stream_ev {
                     StreamEvent::Delta { text } => {
                         app.append_to_last_assistant(&text);
+                        if app.voice_on {
+                            if app.voice_speaker.is_none() {
+                                let voice = app.active_station.voice.clone();
+                                app.voice_speaker = Some(crate::voice::Speaker::new(voice));
+                            }
+                            app.voice_buffer.push_str(&text);
+                            for s in crate::voice::split_sentences(&mut app.voice_buffer) {
+                                if let Some(sp) = &app.voice_speaker {
+                                    sp.say(s);
+                                }
+                            }
+                        }
                     }
                     StreamEvent::Brain { text } => {
                         app.append_to_last_brain(&text);
@@ -204,13 +216,18 @@ async fn run(
                     StreamEvent::Done => {
                         app.finish_streaming();
                         if app.voice_on {
-                            let text = app.last_turn_text();
-                            let voice = app.active_station.voice.clone();
-                            app.stop_voice();
-                            app.voice_child = crate::voice::speak(&text, voice.as_deref());
-                            if app.voice_child.is_none() && !text.trim().is_empty() {
-                                app.note("voice unavailable: no say/spd-say on PATH");
+                            let tail = app.voice_buffer.trim().to_string();
+                            app.voice_buffer.clear();
+                            if !tail.is_empty() {
+                                if app.voice_speaker.is_none() {
+                                    let voice = app.active_station.voice.clone();
+                                    app.voice_speaker = Some(crate::voice::Speaker::new(voice));
+                                }
+                                if let Some(sp) = &app.voice_speaker {
+                                    sp.say(tail);
+                                }
                             }
+                            app.voice_speaker = None;
                         }
                         if let Some(t) = in_flight_task.take() {
                             drop(t);

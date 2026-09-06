@@ -129,7 +129,8 @@ pub struct App {
     pub usage_ctx: u64,
     pub usage_out: u64,
     pub voice_on: bool,
-    pub voice_child: Option<std::process::Child>,
+    pub voice_speaker: Option<crate::voice::Speaker>,
+    pub voice_buffer: String,
     /// All shops loaded at startup. Read-only after that. Used by the
     /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
@@ -198,7 +199,8 @@ impl App {
             usage_ctx: 0,
             usage_out: 0,
             voice_on: false,
-            voice_child: None,
+            voice_speaker: None,
+            voice_buffer: String::new(),
             shops,
             stations,
             active_station,
@@ -237,20 +239,10 @@ impl App {
     }
 
     pub fn stop_voice(&mut self) {
-        if let Some(mut child) = self.voice_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(mut speaker) = self.voice_speaker.take() {
+            speaker.stop();
         }
-    }
-
-    pub fn last_turn_text(&self) -> String {
-        let tid = self.turn_counter;
-        self.messages
-            .iter()
-            .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.content.is_empty())
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.voice_buffer.clear();
     }
 
     pub fn push_user(&mut self, content: String, images: Vec<String>) {
