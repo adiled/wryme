@@ -60,6 +60,12 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+    let _sentry = sentry::init(sentry::ClientOptions {
+        dsn: std::env::var("SENTRY_DSN").ok().and_then(|s| s.parse().ok()),
+        release: Some(env!("WRYME_VERSION").into()),
+        traces_sample_rate: 0.0,
+        ..Default::default()
+    });
     tracing::info!(version = env!("WRYME_VERSION"), "wme launch");
     let args = Args::parse();
 
