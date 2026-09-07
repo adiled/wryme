@@ -65,13 +65,19 @@ pub(crate) async fn stream(
         {
             Ok(()) => return Ok(()),
             Err(e) => {
-                // The shop doesn't actually retain windows despite the
-                // opt-in ("previous_response_id is not supported" and
-                // kin): tell the UI to pin this shop to full windows
-                // (persisted, so this trips once ever), then serve this
-                // turn with a full replay instead of erroring.
+                // A warm attempt can fail two ways: the shop names the
+                // problem ("previous_response_id is not supported") or it
+                // just 400s the whole body ("Invalid JSON request", as ds4
+                // does). Either way the pinned id is unusable: tell the UI
+                // to pin this shop to full windows (runtime-only, once),
+                // then serve this turn with a full replay instead of
+                // erroring. Anything else (5xx, network) propagates.
                 let msg = format!("{e:#}");
-                if msg.contains("previous_response_id") {
+                if msg.contains("previous_response_id")
+                    || msg.contains("upstream 400")
+                    || msg.contains("upstream 404")
+                    || msg.contains("upstream 422")
+                {
                     let _ = tx.send(StreamEvent::WindowUnsupported {
                         shop: shop.name.clone(),
                     });
