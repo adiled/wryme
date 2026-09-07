@@ -149,7 +149,7 @@ fn init_logging() {
     else {
         return;
     };
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wryme=info".into());
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wme=info".into());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::sync::Mutex::new(file))
