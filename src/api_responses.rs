@@ -351,10 +351,20 @@ fn prepend_preamble_counted(
     };
     let mut items: Vec<serde_json::Value> = preambles
         .into_iter()
-        .map(|p| serde_json::json!({ "type": "system", "content": p }))
+        .map(|p| {
+            serde_json::json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": p }],
+            })
+        })
         .collect();
     if let Some(prod) = prod {
-        items.push(serde_json::json!({ "type": "system", "content": prod }));
+        items.push(serde_json::json!({
+            "type": "message",
+            "role": "system",
+            "content": [{ "type": "input_text", "text": prod }],
+        }));
     }
     let n = items.len();
     items.append(input);
