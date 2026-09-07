@@ -60,6 +60,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+    tracing::info!(version = env!("WRYME_VERSION"), "wme launch");
     let args = Args::parse();
 
     let mut shops = shop::load_all().context("loading shops")?;
