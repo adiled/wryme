@@ -42,7 +42,7 @@ use input::Input;
 #[derive(Parser, Debug)]
 #[command(
     name = "wryme",
-    version,
+    version = env!("WRYME_VERSION"),
     about = "streaming LLM chat TUI. Input on top, newest reply right below it."
 )]
 struct Args {
