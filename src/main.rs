@@ -142,7 +142,11 @@ fn init_logging() {
     });
     let Some(dir) = dir else { return };
     let _ = std::fs::create_dir_all(&dir);
-    let Ok(file) = std::fs::File::create(dir.join("wryme.log")) else {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("wryme.log"))
+    else {
         return;
     };
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wryme=info".into());
