@@ -13,5 +13,5 @@ fn main() {
         None => format!("v{version}"),
     };
     println!("cargo:rustc-env=WRYME_VERSION={stamped}");
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=build.rs");
 }

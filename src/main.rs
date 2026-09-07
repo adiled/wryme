@@ -43,7 +43,7 @@ use input::Input;
 #[command(
     name = "wryme",
     version = env!("WRYME_VERSION"),
-    about = "streaming LLM chat TUI. Input on top, newest reply right below it."
+    about = "wryme • that small, calm window where agents come to meet you"
 )]
 struct Args {
     /// Name of a saved station to use. Defaults to the first saved station,
