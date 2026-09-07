@@ -204,6 +204,20 @@ async fn run(
                     StreamEvent::ResponseId { id } => {
                         app.last_response_id = Some(id);
                     }
+                    StreamEvent::WindowUnsupported { shop } => {
+                        // Runtime only, config file untouched: this shop
+                        // doesn't retain windows, so pin it to full for
+                        // the rest of this window. Trips once per launch.
+                        for s in app.shops.iter_mut() {
+                            if s.name == shop {
+                                s.window = crate::shop::WindowMode::Full;
+                            }
+                        }
+                        if app.active_shop.name == shop {
+                            app.active_shop.window = crate::shop::WindowMode::Full;
+                        }
+                        app.note(format!("{shop}: warm window unsupported, using full"));
+                    }
                     StreamEvent::Usage { input, output } => {
                         // Latest prompt size replaces (each request
                         // re-reports the full transcript); generated

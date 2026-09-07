@@ -9,7 +9,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 
-use crate::station::{Patience, Station};
+use crate::station::Station;
 
 /// Append one [[station]] block to the stations file. Creates the file
 /// (and parent directory) if missing. Preserves the rest of the file
@@ -109,12 +109,7 @@ fn serialize_block(station: &Station) -> String {
         block.push_str(&format!("boldness = {}\n", b));
     }
     if let Some(p) = station.dials.patience {
-        let label = match p {
-            Patience::Quick => "quick",
-            Patience::Steady => "steady",
-            Patience::Slow => "slow",
-        };
-        block.push_str(&format!("patience = \"{}\"\n", label));
+        block.push_str(&format!("patience = \"{}\"\n", p.label()));
     }
     if let Some(v) = station.dials.verbosity {
         block.push_str(&format!("verbosity = {}\n", v));
@@ -145,7 +140,7 @@ fn toml_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::station::Dials;
+    use crate::station::{Dials, Patience};
 
     #[test]
     fn replace_block_preserves_surrounding_content() {

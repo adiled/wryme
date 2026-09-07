@@ -59,6 +59,10 @@ pub enum StreamEvent {
         output: String,
     },
     ResponseId { id: String },
+    /// The shop rejected a warm window (`previous_response_id`
+    /// unsupported): the UI should pin this shop to full windows and
+    /// persist that, so the fallback trips once ever, not every turn.
+    WindowUnsupported { shop: String },
     /// Token usage for the finished turn (prompt + completion), when the
     /// server reports it: chat usage chunk, or responses completed event.
     Usage { input: u64, output: u64 },

@@ -348,9 +348,13 @@ pub fn boldness_label(v: Option<f32>) -> String {
 fn cycle_patience(app: &mut App, delta: i32) {
     let states: &[Option<Patience>] = &[
         None,
+        Some(Patience::Bare),
+        Some(Patience::Swift),
         Some(Patience::Quick),
         Some(Patience::Steady),
         Some(Patience::Slow),
+        Some(Patience::Deep),
+        Some(Patience::Max),
     ];
     let cur = states
         .iter()
@@ -364,9 +368,7 @@ fn cycle_patience(app: &mut App, delta: i32) {
 pub fn patience_label(v: Option<Patience>) -> &'static str {
     match v {
         None => "—",
-        Some(Patience::Quick) => "quick",
-        Some(Patience::Steady) => "steady",
-        Some(Patience::Slow) => "slow",
+        Some(p) => p.label(),
     }
 }
 
