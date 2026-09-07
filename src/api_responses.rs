@@ -645,6 +645,7 @@ fn handle_event(
                     .and_then(|i| i.as_str())
                 {
                     *new_id = Some(id.to_string());
+                    tracing::Span::current().record("response_id", id);
                     let _ = tx.send(StreamEvent::ResponseId {
                         id: id.to_string(),
                     });

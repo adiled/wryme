@@ -126,7 +126,8 @@ impl Client {
             model = %station.model,
             shop = %shop.name,
             protocol = ?shop.protocol,
-            window = ?shop.window
+            window = ?shop.window,
+            response_id = tracing::field::Empty
         );
         let _guard = span.enter();
         let result = match shop.protocol {

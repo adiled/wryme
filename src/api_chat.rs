@@ -335,6 +335,9 @@ fn handle_event(
         }
         match serde_json::from_str::<ChatChunk>(payload) {
             Ok(chunk) => {
+                if let Some(id) = chunk.id.as_deref() {
+                    tracing::Span::current().record("response_id", id);
+                }
                 // Token usage rides the final chunk (empty choices) when
                 // `stream_options.include_usage` is set.
                 if let Some(u) = chunk.usage.as_ref() {
@@ -442,6 +445,8 @@ fn handle_event(
 
 #[derive(Deserialize)]
 struct ChatChunk {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     choices: Vec<Choice>,
     // Present (with empty choices) on the final usage chunk when
