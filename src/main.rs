@@ -61,7 +61,14 @@ struct Args {
 async fn main() -> Result<()> {
     init_logging();
     let _sentry = sentry::init(sentry::ClientOptions {
-        dsn: std::env::var("SENTRY_DSN").ok().and_then(|s| s.parse().ok()),
+        dsn: std::env::var("SENTRY_DSN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                "https://114f188d49c0df6af704e00e13a7f512@o4510982366625792.ingest.us.sentry.io/4512044113068032"
+                    .parse()
+                    .ok()
+            }),
         release: Some(env!("WRYME_VERSION").into()),
         traces_sample_rate: 0.0,
         ..Default::default()
