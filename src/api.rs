@@ -94,7 +94,7 @@ impl Client {
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
-        let r = AssertUnwindSafe(self.stream_completion(
+        let r = AssertUnwindSafe(self.dispatch(
             shop,
             station,
             messages,
@@ -111,7 +111,7 @@ impl Client {
             let _ = tx.send(StreamEvent::Done);
         }
     }
-    pub async fn stream_completion(
+    async fn dispatch(
         &self,
         shop: Shop,
         station: Station,
