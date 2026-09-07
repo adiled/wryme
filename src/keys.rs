@@ -124,6 +124,9 @@ pub fn handle_key(
                 return;
             }
             let images = attached_images(&text);
+            if app.messages.is_empty() {
+                tracing::info!("window start");
+            }
             app.push_user(text, images);
             app.begin_assistant();
             app.stop_voice();

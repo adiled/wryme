@@ -277,6 +277,7 @@ async fn run(
                         }
                     }
                     StreamEvent::Error { message } => {
+                        tracing::error!(err = %message, "turn error");
                         app.note(format!("upstream: {message}"));
                     }
                 }
