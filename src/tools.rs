@@ -72,7 +72,9 @@ pub async fn execute(
     name: &str,
     arguments: &str,
 ) -> Option<String> {
-    tracing::debug!(tool = name, args = arguments, "tool called");
+    let span = tracing::debug_span!("tool", name = %name);
+    let _guard = span.enter();
+    tracing::debug!(args = arguments, "tool called");
     let out = if name == shell_name() {
         let command = extract_command(arguments);
         Some(run_shell(&command).await)

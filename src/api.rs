@@ -121,6 +121,14 @@ impl Client {
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
+        let span = tracing::info_span!(
+            "turn",
+            model = %station.model,
+            shop = %shop.name,
+            protocol = ?shop.protocol,
+            window = ?shop.window
+        );
+        let _guard = span.enter();
         let result = match shop.protocol {
             Protocol::Demo => {
                 let prompt = messages
