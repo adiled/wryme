@@ -105,6 +105,7 @@ impl Client {
         .catch_unwind()
         .await;
         if r.is_err() {
+            tracing::error!("turn task panicked, turn closed");
             let _ = tx.send(StreamEvent::Error {
                 message: "internal: turn task panicked, turn closed".into(),
             });

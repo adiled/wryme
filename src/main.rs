@@ -59,6 +59,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
     let args = Args::parse();
 
     let mut shops = shop::load_all().context("loading shops")?;
@@ -78,6 +79,13 @@ async fn main() -> Result<()> {
         })?;
 
     let client = Client::new().context("building api client")?;
+    tracing::info!(
+        shop = %active_shop.name,
+        model = %active.model,
+        protocol = ?active_shop.protocol,
+        window = ?active_shop.window,
+        "wme start"
+    );
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
@@ -123,6 +131,26 @@ fn install_panic_hook() {
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         prev(info);
     }));
+}
+
+fn init_logging() {
+    let dir = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".local")
+            .join("share")
+            .join("wryme")
+    });
+    let Some(dir) = dir else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(file) = std::fs::File::create(dir.join("wryme.log")) else {
+        return;
+    };
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wryme=info".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::sync::Mutex::new(file))
+        .with_ansi(false)
+        .try_init();
 }
 
 async fn run(

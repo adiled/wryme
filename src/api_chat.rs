@@ -131,6 +131,7 @@ pub(crate) async fn stream(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };
+            tracing::debug!(tool = %c.name, args = %c.arguments, out = %output, "tool ran");
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: c.id.clone(),
                 name: c.name.clone(),
@@ -205,11 +206,18 @@ async fn stream_once(
     for (k, v) in &shop.headers {
         req = req.header(k, v);
     }
+    tracing::debug!(
+        url = %url,
+        model = %station.model,
+        body = %serde_json::to_string(&body).unwrap_or_default(),
+        "chat request"
+    );
     let resp = req.send().await.context("posting chat/completions")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "chat upstream error");
         return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
     }
 

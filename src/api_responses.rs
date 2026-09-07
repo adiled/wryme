@@ -78,6 +78,7 @@ pub(crate) async fn stream(
                     || msg.contains("upstream 404")
                     || msg.contains("upstream 422")
                 {
+                    tracing::warn!(shop = %shop.name, err = %crate::api::truncate(&msg, 500), "warm unsupported, full replay");
                     let _ = tx.send(StreamEvent::WindowUnsupported {
                         shop: shop.name.clone(),
                     });
@@ -195,6 +196,7 @@ async fn stream_warm(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
+            tracing::debug!(tool = %call.name, args = %call.arguments, out = %output, "tool ran");
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
@@ -301,6 +303,7 @@ async fn stream_full(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
+            tracing::debug!(tool = %call.name, args = %call.arguments, out = %output, "tool ran");
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
@@ -458,11 +461,19 @@ async fn stream_once(
     for (k, v) in &shop.headers {
         req = req.header(k, v);
     }
+    tracing::debug!(
+        url = %url,
+        model = %station.model,
+        store = body.store,
+        body = %serde_json::to_string(&body).unwrap_or_default(),
+        "responses request"
+    );
     let resp = req.send().await.context("posting responses")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "responses upstream error");
         return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
     }
 
