@@ -196,7 +196,6 @@ async fn stream_warm(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
-            tracing::debug!(tool = %call.name, args = %call.arguments, out = %output, "tool ran");
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
@@ -303,7 +302,6 @@ async fn stream_full(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
-            tracing::debug!(tool = %call.name, args = %call.arguments, out = %output, "tool ran");
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),

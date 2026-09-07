@@ -131,7 +131,6 @@ pub(crate) async fn stream(
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
             };
-            tracing::debug!(tool = %c.name, args = %c.arguments, out = %output, "tool ran");
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: c.id.clone(),
                 name: c.name.clone(),
