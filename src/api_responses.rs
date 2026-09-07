@@ -147,6 +147,7 @@ async fn stream_warm(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
         let (calls, new_id, _) = stream_once(
             client,
@@ -159,15 +160,36 @@ async fn stream_warm(
             tx,
         )
         .await?;
-        let calls: Vec<FuncCall> = calls
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
             .into_iter()
-            .filter(|c| !c.call_id.is_empty() && !c.name.is_empty())
-            .collect();
-        if calls.is_empty() {
-            return Ok(());
-        }
-
+            .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
         let mut next_input = Vec::new();
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.call_id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            next_input.push(serde_json::json!({
+                "type": "system",
+                "content": output,
+            }));
+        }
+        if paired.is_empty() {
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            prepend_preamble_counted(&mut next_input, &engine, 0);
+            prev_id = Some(new_id);
+            input = next_input;
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -239,25 +261,41 @@ async fn stream_full(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
         let (calls, _new_id, reasoning_items) =
             stream_once(client, shop, station, &input, None, false, instructions, tx).await?;
-        // Calls without a call_id or a name can never pair with output;
-        // replaying them poisons every future turn with the same 400.
-        let calls: Vec<FuncCall> = calls
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
             .into_iter()
-            .filter(|c| !c.call_id.is_empty() && !c.name.is_empty())
-            .collect();
-        if calls.is_empty() {
-            return Ok(());
-        }
-
-        // Execute each tool call locally, persist the pair via a ToolResult
-        // event, and grow the stateless input: reasoning items (with
-        // encrypted_content) + function_call + function_call_output, so
-        // the next request carries the whole transcript.
+            .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
         let mut follow = Vec::new();
         follow.extend(reasoning_items);
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.call_id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            follow.push(serde_json::json!({
+                "type": "system",
+                "content": output,
+            }));
+        }
+        if paired.is_empty() {
+            // Nothing to execute: re-ask with the error notes so the model
+            // can correct itself, but stop feeding a model that won't.
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            input.extend(follow);
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,

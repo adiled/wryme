@@ -70,15 +70,44 @@ pub(crate) async fn stream(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
         let (calls, assistant_content) = stream_once(client, shop, station, &conv, tx).await?;
-        // Calls without an id or a name can never pair with a result;
-        // replaying them poisons every future turn with the same 400.
-        let calls: Vec<ChatToolCall> =
-            calls.into_iter().filter(|c| !c.id.is_empty() && !c.name.is_empty()).collect();
-        if calls.is_empty() {
-            return Ok(());
+        // Split pairable calls from broken ones. Broken ones never reach
+        // the wire (their shape would 400 this and every replayed turn),
+        // but each still answers with a clear error the model can read.
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .partition(|c| !c.id.is_empty() && !c.name.is_empty());
+        if paired.is_empty() && !broken.is_empty() {
+            conv.push(serde_json::json!({
+                "role": "assistant",
+                "content": assistant_content,
+            }));
         }
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            conv.push(serde_json::json!({
+                "role": "system",
+                "content": output,
+            }));
+        }
+        if paired.is_empty() {
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
 
         // The assistant message carrying the tool calls.
         let mut tcs = Vec::new();
