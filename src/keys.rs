@@ -143,7 +143,7 @@ pub fn handle_key(
             let tx = tx.clone();
             *in_flight = Some(tokio::spawn(async move {
                 client
-                    .stream_completion_guarded(shop, station, msgs, prev_id, engine, tx)
+                    .stream_completion(shop, station, msgs, prev_id, engine, tx)
                     .await;
             }));
         }

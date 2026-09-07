@@ -85,7 +85,7 @@ impl Client {
     }
     /// Panic-proof wrapper: guarantees Error + Done so a turn can never
     /// wedge `in_flight` forever.
-    pub async fn stream_completion_guarded(
+    pub async fn stream_completion(
         &self,
         shop: Shop,
         station: Station,
