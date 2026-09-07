@@ -42,7 +42,7 @@ pub(crate) async fn stream(
     // messages); tool calls and their results get appended here.
     let mut conv: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| json_msg(m))
+        .filter_map(|m| json_msg(m))
         .collect();
 
     // Plant any finished async jobs back into the conversation as a
@@ -72,6 +72,10 @@ pub(crate) async fn stream(
 
     loop {
         let (calls, assistant_content) = stream_once(client, shop, station, &conv, tx).await?;
+        // Calls without an id or a name can never pair with a result;
+        // replaying them poisons every future turn with the same 400.
+        let calls: Vec<ChatToolCall> =
+            calls.into_iter().filter(|c| !c.id.is_empty() && !c.name.is_empty()).collect();
         if calls.is_empty() {
             return Ok(());
         }
@@ -211,14 +215,19 @@ async fn stream_once(
     Ok((calls, assistant_content))
 }
 
-fn json_msg(m: &ApiMessage) -> serde_json::Value {
+fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
     // A tool-role message: emit a `tool` message with the call_id + result.
+    // Unpaired results (empty call_id) never go on the wire: strict
+    // servers 400 them and the poison persists in history.
     if m.role == "tool" {
-        return serde_json::json!({
+        if m.tool_call_id.is_empty() {
+            return None;
+        }
+        return Some(serde_json::json!({
             "role": "tool",
             "tool_call_id": m.tool_call_id,
             "content": m.tool_result,
-        });
+        }));
     }
     // An assistant message that made tool calls: attach the tool_calls array.
     let mut base = if m.images.is_empty() {
@@ -250,16 +259,23 @@ fn json_msg(m: &ApiMessage) -> serde_json::Value {
         })
     };
     if !m.tool_calls.is_empty() {
-        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().map(|c| {
+        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().filter(|c| {
+            // Never replay unpaired calls: empty ids poison future turns.
+            !c.id.is_empty() && !c.name.is_empty()
+        }).map(|c| {
             serde_json::json!({
                 "id": c.id,
                 "type": "function",
                 "function": { "name": c.name, "arguments": c.arguments },
             })
         }).collect();
-        base["tool_calls"] = serde_json::json!(tcs);
+        if tcs.is_empty() {
+            base.as_object_mut().map(|o| o.remove("tool_calls"));
+        } else {
+            base["tool_calls"] = serde_json::json!(tcs);
+        }
     }
-    base
+    Some(base)
 }
 
 fn handle_event(
@@ -523,8 +539,57 @@ mod tests {
     }
 
     #[test]
-    fn usage_chunk_emits_usage_event() {
-        let (tx, mut rx) = channel();
+    fn unpaired_tool_history_never_reaches_wire() {
+        use crate::api::{ApiMessage, ApiToolCall};
+        let base = || ApiMessage {
+            role: "assistant".into(),
+            content: "hi".into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: String::new(),
+            tool_result: String::new(),
+        };
+        // Empty id: dropped, and with no valid calls the key vanishes.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        // Empty name: same.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        // Valid call survives.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert_eq!(v["tool_calls"].as_array().unwrap().len(), 1);
+        // Unpaired tool result is dropped entirely.
+        let tool = ApiMessage {
+            role: "tool".into(),
+            content: "out".into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: "".into(),
+            tool_result: "out".into(),
+        };
+        assert!(json_msg(&tool).is_none());
+    }
+
+    #[test]
+    fn usage_chunk_emits_usage_event() {        let (tx, mut rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
         handle_event(

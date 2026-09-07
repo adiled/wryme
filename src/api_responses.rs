@@ -153,6 +153,10 @@ async fn stream_warm(
             tx,
         )
         .await?;
+        let calls: Vec<FuncCall> = calls
+            .into_iter()
+            .filter(|c| !c.call_id.is_empty() && !c.name.is_empty())
+            .collect();
         if calls.is_empty() {
             return Ok(());
         }
@@ -232,6 +236,12 @@ async fn stream_full(
     loop {
         let (calls, _new_id, reasoning_items) =
             stream_once(client, shop, station, &input, None, false, instructions, tx).await?;
+        // Calls without a call_id or a name can never pair with output;
+        // replaying them poisons every future turn with the same 400.
+        let calls: Vec<FuncCall> = calls
+            .into_iter()
+            .filter(|c| !c.call_id.is_empty() && !c.name.is_empty())
+            .collect();
         if calls.is_empty() {
             return Ok(());
         }
@@ -440,8 +450,11 @@ async fn stream_once(
 
 fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
     // A tool result: the Responses item is `function_call_output`, keyed
-    // by the call id it answers.
+    // by the call id it answers. Unpaired results never go on the wire.
     if m.role == "tool" {
+        if m.tool_call_id.is_empty() {
+            return vec![];
+        }
         return vec![serde_json::json!({
             "type": "function_call_output",
             "call_id": m.tool_call_id,
@@ -450,13 +463,14 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
     }
     // An assistant turn that called tools: replay each call as a
     // `function_call` item (plus the text as a message item when any),
-    // so a stateless shop sees the full transcript.
+    // so a stateless shop sees the full transcript. Unpaired calls are
+    // dropped: replaying them poisons every future turn.
     if !m.tool_calls.is_empty() {
         let mut items: Vec<serde_json::Value> = Vec::new();
         if !m.content.is_empty() {
             items.push(serde_json::json!({ "role": m.role, "content": m.content }));
         }
-        for c in &m.tool_calls {
+        for c in m.tool_calls.iter().filter(|c| !c.id.is_empty() && !c.name.is_empty()) {
             items.push(serde_json::json!({
                 "type": "function_call",
                 "call_id": c.id,
@@ -767,6 +781,24 @@ mod tests {
         assert_eq!(items[0]["type"], "function_call_output");
         assert_eq!(items[0]["call_id"], "c1");
         assert_eq!(items[0]["output"], "out");
+    }
+
+    #[test]
+    fn unpaired_tool_history_never_reaches_wire() {
+        use crate::api::ApiToolCall;
+        let mut asst = api_msg("assistant");
+        asst.tool_calls.push(ApiToolCall {
+            id: "".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let items = json_msg(&asst);
+        assert!(items.iter().all(|i| i.get("type").and_then(|t| t.as_str()) != Some("function_call")));
+
+        let mut tool = api_msg("tool");
+        tool.tool_call_id = "".into();
+        tool.tool_result = "out".into();
+        assert!(json_msg(&tool).is_empty());
     }
 
     #[test]

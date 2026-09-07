@@ -305,6 +305,7 @@ mod tests {
             protocol: None,
             window,
             models: vec![],
+            headers: std::collections::HashMap::new(),
         };
         assert_eq!(def(None).resolve().window, WindowMode::Full);
         assert_eq!(
