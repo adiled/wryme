@@ -362,7 +362,10 @@ impl App {
         }
         self.last_stream_was_brain = false;
 
-        let m = self.messages.last_mut().unwrap();
+        let m = match self.messages.last_mut() {
+            Some(m) => m,
+            None => return,
+        };
         // Verbatim concatenation (issue #16): stream deltas are appended
         // exactly as they arrive. An earlier heuristic inserted a space
         // whenever both sides were non-whitespace (to fix "sentence.Next"

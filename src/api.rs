@@ -17,7 +17,9 @@
 //   Done                clean end of stream
 //   Error { message }   anything we couldn't classify as success
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use serde::Serialize;
+use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc::UnboundedSender;
 use crate::shop::{Protocol, Shop};
 use crate::station::Station;
@@ -81,11 +83,34 @@ impl Client {
             .context("building http client")?;
         Ok(Self { http })
     }
-    /// Open a streaming completion against the given shop with the given
-    /// station's model + dials. Each StreamEvent is sent on `tx` as it
-    /// arrives; returns when the upstream stream closes or errors.
-    /// `engine` is the shared book engine, so the invisible `book` tool
-    /// can reach memory mid-turn.
+    /// Panic-proof wrapper: guarantees Error + Done so a turn can never
+    /// wedge `in_flight` forever.
+    pub async fn stream_completion_guarded(
+        &self,
+        shop: Shop,
+        station: Station,
+        messages: Vec<ApiMessage>,
+        previous_response_id: Option<String>,
+        engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
+        tx: UnboundedSender<StreamEvent>,
+    ) {
+        let r = AssertUnwindSafe(self.stream_completion(
+            shop,
+            station,
+            messages,
+            previous_response_id,
+            engine,
+            tx.clone(),
+        ))
+        .catch_unwind()
+        .await;
+        if r.is_err() {
+            let _ = tx.send(StreamEvent::Error {
+                message: "internal: turn task panicked, turn closed".into(),
+            });
+            let _ = tx.send(StreamEvent::Done);
+        }
+    }
     pub async fn stream_completion(
         &self,
         shop: Shop,
