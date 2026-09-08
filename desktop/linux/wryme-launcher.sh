@@ -56,8 +56,7 @@ if [[ ! -x "${WEZTERM}" && "$WEZTERM" != "wezterm" ]]; then
     WEZTERM="wezterm"
 fi
 
-exec "$WEZTERM" start \
+exec "$WEZTERM" --config-file "$CFG" start \
     --always-new-process \
     --class wryme \
-    --config-file "$CFG" \
     -- "$WME"

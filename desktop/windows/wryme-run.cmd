@@ -55,5 +55,5 @@ if not exist "%WME%" (
     exit /b 1
 )
 
-"%WEZTERM%" start --always-new-process --class wryme --config-file "%CFG%" -- "%WME%"
+"%WEZTERM%" --config-file "%CFG%" start --always-new-process --class wryme -- "%WME%"
 exit /b %errorlevel%
