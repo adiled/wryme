@@ -662,7 +662,7 @@ impl App {
         let clip = self.active_station.dials.tinker_clip;
         let total_pairs = out.iter().filter(|m| m.role == "tool").count();
         let keep_n = self.active_station.dials.tinker_keep.keep_n(total_pairs);
-        if keep_n.is_some() || clip != crate::station::TinkerClip::Full {
+        if keep_n.is_some() || clip != crate::station::TinkerVal::All {
             // Collect pair indices: each assistant with tool_calls + following tool msgs.
             // We prune oldest pairs to keep last N.
             if let Some(n) = keep_n {
@@ -696,7 +696,7 @@ impl App {
                     // no keep-pruning needed, keep out as is
                 }
             }
-            if clip != crate::station::TinkerClip::Full {
+            if clip != crate::station::TinkerVal::All {
                 for m in &mut out {
                     if m.role == "tool" {
                         let clipped = clip.clip(&m.content);

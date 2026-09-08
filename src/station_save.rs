@@ -120,7 +120,7 @@ fn serialize_block(station: &Station) -> String {
             station.dials.tinker_keep.label()
         ));
     }
-    if station.dials.tinker_clip != crate::station::TinkerClip::Full {
+    if station.dials.tinker_clip != crate::station::TinkerVal::All {
         block.push_str(&format!(
             "tinker_clip = \"{}\"\n",
             station.dials.tinker_clip.label()
@@ -180,7 +180,7 @@ model = \"m3\"
                 patience: Some(Patience::Slow),
                 verbosity: None,
                 tinker_keep: crate::station::TinkerKeep::All,
-                tinker_clip: crate::station::TinkerClip::Full,
+                tinker_clip: crate::station::TinkerVal::All,
             },
             voice: None,
         };

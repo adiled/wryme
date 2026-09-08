@@ -60,62 +60,50 @@ impl Default for Dials {
             boldness: None,
             patience: Some(Patience::Steady),
             verbosity: None,
-            tinker_keep: TinkerKeep::All,
-            tinker_clip: TinkerClip::Full,
+            tinker_keep: TinkerVal::All,
+            tinker_clip: TinkerVal::All,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TinkerKeep {
+pub enum TinkerVal {
     All,
     Count(usize),
     Percent(u8),
 }
 
-impl TinkerKeep {
+pub type TinkerKeep = TinkerVal;
+pub type TinkerClip = TinkerVal;
+
+impl TinkerVal {
     pub fn keep_n(self, total: usize) -> Option<usize> {
         match self {
-            TinkerKeep::All => None,
-            TinkerKeep::Count(n) => Some(n.min(total)),
-            TinkerKeep::Percent(p) => {
+            TinkerVal::All => None,
+            TinkerVal::Count(n) => Some(n.min(total)),
+            TinkerVal::Percent(p) => {
                 let p = (p as usize).min(100);
                 Some(((total * p).div_ceil(100)).min(total))
             }
         }
     }
-    pub fn label(self) -> String {
-        match self {
-            TinkerKeep::All => "all".to_string(),
-            TinkerKeep::Count(n) => n.to_string(),
-            TinkerKeep::Percent(p) => format!("{}%", p),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TinkerClip {
-    Full,
-    Clip1000,
-    Clip300,
-    Empty,
-}
-
-impl TinkerClip {
     pub fn clip(self, s: &str) -> String {
         match self {
-            TinkerClip::Full => s.to_string(),
-            TinkerClip::Clip1000 => crate::api::truncate(s, 1000),
-            TinkerClip::Clip300 => crate::api::truncate(s, 300),
-            TinkerClip::Empty => String::new(),
+            TinkerVal::All => s.to_string(),
+            TinkerVal::Count(0) => String::new(),
+            TinkerVal::Count(n) => crate::api::truncate(s, n),
+            TinkerVal::Percent(0) => String::new(),
+            TinkerVal::Percent(p) => {
+                let keep = (s.len() * p as usize).div_ceil(100);
+                crate::api::truncate(s, keep)
+            }
         }
     }
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            TinkerClip::Full => "full",
-            TinkerClip::Clip1000 => "1k",
-            TinkerClip::Clip300 => "300",
-            TinkerClip::Empty => "empty",
+            TinkerVal::All => "all".to_string(),
+            TinkerVal::Count(n) => n.to_string(),
+            TinkerVal::Percent(p) => format!("{}%", p),
         }
     }
 }
@@ -185,9 +173,9 @@ struct StationDef {
     #[serde(default)]
     verbosity: Option<u32>,
     #[serde(default)]
-    tinker_keep: Option<TinkerKeepField>,
+    tinker_keep: Option<TinkerField>,
     #[serde(default)]
-    tinker_clip: Option<TinkerClipField>,
+    tinker_clip: Option<TinkerField>,
     #[serde(default)]
     voice: Option<String>,
 }
@@ -219,51 +207,32 @@ impl PatienceField {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum TinkerKeepField {
+enum TinkerField {
     Integer(i64),
     Named(String),
 }
 
-impl TinkerKeepField {
-    fn into_keep(self) -> Option<TinkerKeep> {
+impl TinkerField {
+    fn into_val(self) -> Option<TinkerVal> {
         match self {
-            TinkerKeepField::Integer(n) if n >= 0 => Some(TinkerKeep::Count(n as usize)),
-            TinkerKeepField::Named(s) => {
+            TinkerField::Integer(n) if n >= 0 => Some(TinkerVal::Count(n as usize)),
+            TinkerField::Named(s) => {
                 let s = s.trim().to_lowercase();
                 if s == "all" {
-                    return Some(TinkerKeep::All);
+                    return Some(TinkerVal::All);
                 }
                 if let Some(pct) = s.strip_suffix('%') {
                     if let Ok(p) = pct.trim().parse::<u8>() {
                         if p <= 100 {
-                            return Some(TinkerKeep::Percent(p));
+                            return Some(TinkerVal::Percent(p));
                         }
                     }
                 }
                 if let Ok(n) = s.parse::<usize>() {
-                    return Some(TinkerKeep::Count(n));
+                    return Some(TinkerVal::Count(n));
                 }
                 None
             }
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum TinkerClipField {
-    Named(String),
-}
-
-impl TinkerClipField {
-    fn into_clip(self) -> Option<TinkerClip> {
-        let TinkerClipField::Named(s) = self;
-        match s.to_lowercase().as_str() {
-            "full" => Some(TinkerClip::Full),
-            "1k" | "1000" => Some(TinkerClip::Clip1000),
-            "300" => Some(TinkerClip::Clip300),
-            "empty" => Some(TinkerClip::Empty),
             _ => None,
         }
     }
@@ -281,10 +250,10 @@ impl StationDef {
         if self.verbosity.is_some() {
             dials.verbosity = self.verbosity;
         }
-        if let Some(k) = self.tinker_keep.and_then(|k| k.into_keep()) {
+        if let Some(k) = self.tinker_keep.and_then(|k| k.into_val()) {
             dials.tinker_keep = k;
         }
-        if let Some(c) = self.tinker_clip.and_then(|c| c.into_clip()) {
+        if let Some(c) = self.tinker_clip.and_then(|c| c.into_val()) {
             dials.tinker_clip = c;
         }
         Station {
@@ -333,7 +302,7 @@ model = "canned replies"
 patience = "steady"
 # verbosity = 8000
 tinker_keep = "all"
-tinker_clip = "full"
+tinker_clip = "all"
 # voice = "Tara"
 "#;
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
