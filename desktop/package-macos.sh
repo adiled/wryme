@@ -10,7 +10,13 @@
 set -euo pipefail
 
 VERSION="${1:?usage: package-macos.sh <version> [arch]}"
-ARCH="${2:-$(uname -m)}"
+RAW_ARCH="${2:-$(uname -m)}"
+# Normalize target triples like aarch64-apple-darwin -> arm64, x86_64-apple-darwin -> x86_64
+case "$RAW_ARCH" in
+    aarch64*|arm64*) ARCH="arm64" ;;
+    x86_64*) ARCH="x86_64" ;;
+    *) ARCH="$RAW_ARCH" ;;
+esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 

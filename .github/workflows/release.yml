@@ -26,14 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: macos-13
             target: x86_64-apple-darwin
             package: desktop/package-macos.sh
             artifact: wryme-darwin-x86_64.zip
           - os: macos-14
             target: aarch64-apple-darwin
             package: desktop/package-macos.sh
-            artifact: wryme-darwin-aarch64.zip
+            artifact: wryme-darwin-arm64.zip
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             package: desktop/package-windows.sh
@@ -67,7 +67,10 @@ jobs:
 
       - name: Package desktop bundle
         run: |
-          bash "${{ matrix.package }}" "${GITHUB_REF_NAME#v}"
+          bash "${{ matrix.package }}" "${GITHUB_REF_NAME#v}" "${{ matrix.target }}"
+          ls -la dist/*.zip dist/*.tar.gz *.zip *.tar.gz 2>/dev/null || true
+          # normalize: package scripts may put zip in dist/ or cwd, ensure cwd has it for upload
+          for f in dist/*.zip dist/*.tar.gz; do [[ -f "$f" ]] && cp "$f" . 2>/dev/null || true; done
           ls -la *.zip *.tar.gz 2>/dev/null || true
 
       - name: Upload bundle artifact
@@ -77,6 +80,8 @@ jobs:
           path: |
             *.zip
             *.tar.gz
+            dist/*.zip
+            dist/*.tar.gz
           if-no-files-found: error
 
   release:
