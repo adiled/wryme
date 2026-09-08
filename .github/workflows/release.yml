@@ -41,7 +41,7 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             package: desktop/package-linux.sh
-            artifact: wryme-linux-x86_64.tar.gz
+            artifact: wryme-linux-x86_64.deb
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -68,10 +68,10 @@ jobs:
       - name: Package desktop bundle
         run: |
           bash "${{ matrix.package }}" "${GITHUB_REF_NAME#v}" "${{ matrix.target }}"
-          ls -la dist/*.zip dist/*.tar.gz *.zip *.tar.gz 2>/dev/null || true
-          # normalize: package scripts may put zip in dist/ or cwd, ensure cwd has it for upload
-          for f in dist/*.zip dist/*.tar.gz; do [[ -f "$f" ]] && cp "$f" . 2>/dev/null || true; done
-          ls -la *.zip *.tar.gz 2>/dev/null || true
+          ls -la dist/* wryme* *.zip *.tar.gz *.deb 2>/dev/null || true
+          # normalize: package scripts may put artifacts in dist/ or cwd, ensure cwd has it for upload
+          for f in dist/*.zip dist/*.tar.gz dist/*.deb; do [[ -f "$f" ]] && cp "$f" . 2>/dev/null || true; done
+          ls -la *.zip *.tar.gz *.deb 2>/dev/null || true
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
@@ -80,8 +80,10 @@ jobs:
           path: |
             *.zip
             *.tar.gz
+            *.deb
             dist/*.zip
             dist/*.tar.gz
+            dist/*.deb
           if-no-files-found: error
 
   release:
@@ -102,7 +104,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           FILES=()
-          for f in bundles/*.zip bundles/*.tar.gz; do
+          for f in bundles/*.zip bundles/*.tar.gz bundles/*.deb; do
             [[ -f "$f" ]] && FILES+=("$f")
           done
           gh release create "$TAG" \
