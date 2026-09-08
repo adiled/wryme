@@ -1,6 +1,6 @@
 [package]
 name = "wryme"
-version = "1.7.2"
+version = "1.7.3"
 edition = "2021"
 license = "MIT"
 description = "wryme • that small, calm window where agents come to meet you"
