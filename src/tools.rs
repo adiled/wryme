@@ -72,21 +72,26 @@ pub async fn execute(
     name: &str,
     arguments: &str,
 ) -> Option<String> {
-    if name == shell_name() {
+    let span = tracing::debug_span!("tool", name = %name);
+    let _guard = span.enter();
+    tracing::debug!(args = arguments, "tool called");
+    let out = if name == shell_name() {
         let command = extract_command(arguments);
-        return Some(run_shell(&command).await);
-    }
-    if name == check_name() {
+        Some(run_shell(&command).await)
+    } else if name == check_name() {
         let id = extract_id(arguments);
-        return Some(check(id).await);
+        Some(check(id).await)
+    } else if name == explore::tool_name() {
+        explore::execute(name, arguments).await
+    } else if name == book_name() {
+        Some(book_execute(engine, arguments).await)
+    } else {
+        None
+    };
+    if let Some(ref o) = out {
+        tracing::debug!(tool = name, out = o, "tool result");
     }
-    if name == explore::tool_name() {
-        return explore::execute(name, arguments).await;
-    }
-    if name == book_name() {
-        return Some(book_execute(engine, arguments).await);
-    }
-    None
+    out
 }
 
 /// The async-job check tool: `<shell>_check`, e.g. `zsh_check`.

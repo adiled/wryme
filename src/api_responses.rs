@@ -65,13 +65,20 @@ pub(crate) async fn stream(
         {
             Ok(()) => return Ok(()),
             Err(e) => {
-                // The shop doesn't actually retain windows despite the
-                // opt-in ("previous_response_id is not supported" and
-                // kin): tell the UI to pin this shop to full windows
-                // (persisted, so this trips once ever), then serve this
-                // turn with a full replay instead of erroring.
+                // A warm attempt can fail two ways: the shop names the
+                // problem ("previous_response_id is not supported") or it
+                // just 400s the whole body ("Invalid JSON request", as ds4
+                // does). Either way the pinned id is unusable: tell the UI
+                // to pin this shop to full windows (runtime-only, once),
+                // then serve this turn with a full replay instead of
+                // erroring. Anything else (5xx, network) propagates.
                 let msg = format!("{e:#}");
-                if msg.contains("previous_response_id") {
+                if msg.contains("previous_response_id")
+                    || msg.contains("upstream 400")
+                    || msg.contains("upstream 404")
+                    || msg.contains("upstream 422")
+                {
+                    tracing::warn!(shop = %shop.name, err = %crate::api::truncate(&msg, 500), "warm unsupported, full replay");
                     let _ = tx.send(StreamEvent::WindowUnsupported {
                         shop: shop.name.clone(),
                     });
@@ -141,6 +148,7 @@ async fn stream_warm(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
         let (calls, new_id, _) = stream_once(
             client,
@@ -153,11 +161,41 @@ async fn stream_warm(
             tx,
         )
         .await?;
-        if calls.is_empty() {
-            return Ok(());
-        }
-
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
         let mut next_input = Vec::new();
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.call_id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            next_input.push(serde_json::json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": output }],
+            }));
+        }
+        if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            // preamble is top-of-conversation only — follow-up tool rounds reuse the warm
+            // server context (store:true) so no preamble re-injection.
+            prev_id = Some(new_id);
+            input = next_input;
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -175,7 +213,6 @@ async fn stream_warm(
                 "output": output,
             }));
         }
-        prepend_preamble_counted(&mut next_input, &engine, 0);
         prev_id = Some(new_id);
         input = next_input;
     }
@@ -206,7 +243,7 @@ async fn stream_full(
         .iter()
         .flat_map(|m| json_msg(m))
         .collect();
-    let mut preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
+    let _preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
     // Plant any finished async jobs into the input as a check-call +
     // result pair, so the model sees the outcome and continues.
@@ -229,19 +266,45 @@ async fn stream_full(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
         let (calls, _new_id, reasoning_items) =
             stream_once(client, shop, station, &input, None, false, instructions, tx).await?;
-        if calls.is_empty() {
-            return Ok(());
-        }
-
-        // Execute each tool call locally, persist the pair via a ToolResult
-        // event, and grow the stateless input: reasoning items (with
-        // encrypted_content) + function_call + function_call_output, so
-        // the next request carries the whole transcript.
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
         let mut follow = Vec::new();
         follow.extend(reasoning_items);
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.call_id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            follow.push(serde_json::json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": output }],
+            }));
+        }
+        if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
+            // Nothing to execute: re-ask with the error notes so the model
+            // can correct itself, but stop feeding a model that won't.
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            input.extend(follow);
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -266,10 +329,8 @@ async fn stream_full(
             }));
         }
         input.extend(follow);
-        // Re-pin the preamble: the model may have promoted a compartment
-        // to the preamble this round. Old preamble items are swapped out
-        // so they never duplicate down the input.
-        preamble_len = prepend_preamble_counted(&mut input, &engine, preamble_len);
+        // preamble is top-of-conversation only — not re-pinned on every tool
+        // follow-up (would be insane on long stateless replays).
     }
 }
 
@@ -296,10 +357,20 @@ fn prepend_preamble_counted(
     };
     let mut items: Vec<serde_json::Value> = preambles
         .into_iter()
-        .map(|p| serde_json::json!({ "type": "system", "content": p }))
+        .map(|p| {
+            serde_json::json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": p }],
+            })
+        })
         .collect();
     if let Some(prod) = prod {
-        items.push(serde_json::json!({ "type": "system", "content": prod }));
+        items.push(serde_json::json!({
+            "type": "message",
+            "role": "system",
+            "content": [{ "type": "input_text", "text": prod }],
+        }));
     }
     let n = items.len();
     items.append(input);
@@ -404,11 +475,19 @@ async fn stream_once(
     for (k, v) in &shop.headers {
         req = req.header(k, v);
     }
+    tracing::debug!(
+        url = %url,
+        model = %station.model,
+        store = body.store,
+        body = %serde_json::to_string(&body).unwrap_or_default(),
+        "responses request"
+    );
     let resp = req.send().await.context("posting responses")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "responses upstream error");
         return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
     }
 
@@ -440,8 +519,11 @@ async fn stream_once(
 
 fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
     // A tool result: the Responses item is `function_call_output`, keyed
-    // by the call id it answers.
+    // by the call id it answers. Unpaired results never go on the wire.
     if m.role == "tool" {
+        if m.tool_call_id.is_empty() {
+            return vec![];
+        }
         return vec![serde_json::json!({
             "type": "function_call_output",
             "call_id": m.tool_call_id,
@@ -450,13 +532,14 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
     }
     // An assistant turn that called tools: replay each call as a
     // `function_call` item (plus the text as a message item when any),
-    // so a stateless shop sees the full transcript.
+    // so a stateless shop sees the full transcript. Unpaired calls are
+    // dropped: replaying them poisons every future turn.
     if !m.tool_calls.is_empty() {
         let mut items: Vec<serde_json::Value> = Vec::new();
         if !m.content.is_empty() {
             items.push(serde_json::json!({ "role": m.role, "content": m.content }));
         }
-        for c in &m.tool_calls {
+        for c in m.tool_calls.iter().filter(|c| !c.id.is_empty() && !c.name.is_empty()) {
             items.push(serde_json::json!({
                 "type": "function_call",
                 "call_id": c.id,
@@ -568,6 +651,7 @@ fn handle_event(
                     .and_then(|i| i.as_str())
                 {
                     *new_id = Some(id.to_string());
+                    tracing::Span::current().record("response_id", id);
                     let _ = tx.send(StreamEvent::ResponseId {
                         id: id.to_string(),
                     });
@@ -767,6 +851,24 @@ mod tests {
         assert_eq!(items[0]["type"], "function_call_output");
         assert_eq!(items[0]["call_id"], "c1");
         assert_eq!(items[0]["output"], "out");
+    }
+
+    #[test]
+    fn unpaired_tool_history_never_reaches_wire() {
+        use crate::api::ApiToolCall;
+        let mut asst = api_msg("assistant");
+        asst.tool_calls.push(ApiToolCall {
+            id: "".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let items = json_msg(&asst);
+        assert!(items.iter().all(|i| i.get("type").and_then(|t| t.as_str()) != Some("function_call")));
+
+        let mut tool = api_msg("tool");
+        tool.tool_call_id = "".into();
+        tool.tool_result = "out".into();
+        assert!(json_msg(&tool).is_empty());
     }
 
     #[test]

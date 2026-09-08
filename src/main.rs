@@ -42,8 +42,8 @@ use input::Input;
 #[derive(Parser, Debug)]
 #[command(
     name = "wryme",
-    version,
-    about = "streaming LLM chat TUI. Input on top, newest reply right below it."
+    version = env!("WRYME_VERSION"),
+    about = "wryme • that small, calm window where agents come to meet you"
 )]
 struct Args {
     /// Name of a saved station to use. Defaults to the first saved station,
@@ -59,6 +59,21 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
+    let _sentry = sentry::init(sentry::ClientOptions {
+        dsn: std::env::var("SENTRY_DSN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                "https://114f188d49c0df6af704e00e13a7f512@o4510982366625792.ingest.us.sentry.io/4512044113068032"
+                    .parse()
+                    .ok()
+            }),
+        release: Some(env!("WRYME_VERSION").into()),
+        traces_sample_rate: 0.0,
+        ..Default::default()
+    });
+    tracing::info!(version = env!("WRYME_VERSION"), "wme launch");
     let args = Args::parse();
 
     let mut shops = shop::load_all().context("loading shops")?;
@@ -78,6 +93,13 @@ async fn main() -> Result<()> {
         })?;
 
     let client = Client::new().context("building api client")?;
+    tracing::info!(
+        shop = %active_shop.name,
+        model = %active.model,
+        protocol = ?active_shop.protocol,
+        window = ?active_shop.window,
+        "wme start"
+    );
 
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
@@ -123,6 +145,30 @@ fn install_panic_hook() {
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         prev(info);
     }));
+}
+
+fn init_logging() {
+    let dir = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".local")
+            .join("share")
+            .join("wryme")
+    });
+    let Some(dir) = dir else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("wryme.log"))
+    else {
+        return;
+    };
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wme=info".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::sync::Mutex::new(file))
+        .with_ansi(false)
+        .try_init();
 }
 
 async fn run(
@@ -244,6 +290,7 @@ async fn run(
                         }
                     }
                     StreamEvent::Error { message } => {
+                        tracing::error!(err = %message, "turn error");
                         app.note(format!("upstream: {message}"));
                     }
                 }

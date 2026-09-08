@@ -42,7 +42,7 @@ pub(crate) async fn stream(
     // messages); tool calls and their results get appended here.
     let mut conv: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| json_msg(m))
+        .filter_map(|m| json_msg(m))
         .collect();
 
     // Plant any finished async jobs back into the conversation as a
@@ -70,11 +70,47 @@ pub(crate) async fn stream(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
         let (calls, assistant_content) = stream_once(client, shop, station, &conv, tx).await?;
-        if calls.is_empty() {
-            return Ok(());
+        // Split pairable calls from broken ones. Broken ones never reach
+        // the wire (their shape would 400 this and every replayed turn),
+        // but each still answers with a clear error the model can read.
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .partition(|c| !c.id.is_empty() && !c.name.is_empty());
+        if paired.is_empty() && !broken.is_empty() {
+            conv.push(serde_json::json!({
+                "role": "assistant",
+                "content": assistant_content,
+            }));
         }
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            conv.push(serde_json::json!({
+                "role": "system",
+                "content": output,
+            }));
+        }
+        if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
 
         // The assistant message carrying the tool calls.
         let mut tcs = Vec::new();
@@ -172,11 +208,18 @@ async fn stream_once(
     for (k, v) in &shop.headers {
         req = req.header(k, v);
     }
+    tracing::debug!(
+        url = %url,
+        model = %station.model,
+        body = %serde_json::to_string(&body).unwrap_or_default(),
+        "chat request"
+    );
     let resp = req.send().await.context("posting chat/completions")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "chat upstream error");
         return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
     }
 
@@ -211,14 +254,19 @@ async fn stream_once(
     Ok((calls, assistant_content))
 }
 
-fn json_msg(m: &ApiMessage) -> serde_json::Value {
+fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
     // A tool-role message: emit a `tool` message with the call_id + result.
+    // Unpaired results (empty call_id) never go on the wire: strict
+    // servers 400 them and the poison persists in history.
     if m.role == "tool" {
-        return serde_json::json!({
+        if m.tool_call_id.is_empty() {
+            return None;
+        }
+        return Some(serde_json::json!({
             "role": "tool",
             "tool_call_id": m.tool_call_id,
             "content": m.tool_result,
-        });
+        }));
     }
     // An assistant message that made tool calls: attach the tool_calls array.
     let mut base = if m.images.is_empty() {
@@ -250,16 +298,23 @@ fn json_msg(m: &ApiMessage) -> serde_json::Value {
         })
     };
     if !m.tool_calls.is_empty() {
-        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().map(|c| {
+        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().filter(|c| {
+            // Never replay unpaired calls: empty ids poison future turns.
+            !c.id.is_empty() && !c.name.is_empty()
+        }).map(|c| {
             serde_json::json!({
                 "id": c.id,
                 "type": "function",
                 "function": { "name": c.name, "arguments": c.arguments },
             })
         }).collect();
-        base["tool_calls"] = serde_json::json!(tcs);
+        if tcs.is_empty() {
+            base.as_object_mut().map(|o| o.remove("tool_calls"));
+        } else {
+            base["tool_calls"] = serde_json::json!(tcs);
+        }
     }
-    base
+    Some(base)
 }
 
 fn handle_event(
@@ -283,6 +338,9 @@ fn handle_event(
         }
         match serde_json::from_str::<ChatChunk>(payload) {
             Ok(chunk) => {
+                if let Some(id) = chunk.id.as_deref() {
+                    tracing::Span::current().record("response_id", id);
+                }
                 // Token usage rides the final chunk (empty choices) when
                 // `stream_options.include_usage` is set.
                 if let Some(u) = chunk.usage.as_ref() {
@@ -390,6 +448,8 @@ fn handle_event(
 
 #[derive(Deserialize)]
 struct ChatChunk {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     choices: Vec<Choice>,
     // Present (with empty choices) on the final usage chunk when
@@ -523,8 +583,57 @@ mod tests {
     }
 
     #[test]
-    fn usage_chunk_emits_usage_event() {
-        let (tx, mut rx) = channel();
+    fn unpaired_tool_history_never_reaches_wire() {
+        use crate::api::{ApiMessage, ApiToolCall};
+        let base = || ApiMessage {
+            role: "assistant".into(),
+            content: "hi".into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: String::new(),
+            tool_result: String::new(),
+        };
+        // Empty id: dropped, and with no valid calls the key vanishes.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        // Empty name: same.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        // Valid call survives.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert_eq!(v["tool_calls"].as_array().unwrap().len(), 1);
+        // Unpaired tool result is dropped entirely.
+        let tool = ApiMessage {
+            role: "tool".into(),
+            content: "out".into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: "".into(),
+            tool_result: "out".into(),
+        };
+        assert!(json_msg(&tool).is_none());
+    }
+
+    #[test]
+    fn usage_chunk_emits_usage_event() {        let (tx, mut rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
         handle_event(
