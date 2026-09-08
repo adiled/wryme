@@ -659,14 +659,13 @@ impl App {
             out.append(&mut results);
         }
         // Tinker keep/clip: prune replay, keep pair atomic. Defaults keep=all/full.
-        let keep_n = self.active_station.dials.tinker_keep.keep_n();
         let clip = self.active_station.dials.tinker_clip;
+        let total_pairs = out.iter().filter(|m| m.role == "tool").count();
+        let keep_n = self.active_station.dials.tinker_keep.keep_n(total_pairs);
         if keep_n.is_some() || clip != crate::station::TinkerClip::Full {
             // Collect pair indices: each assistant with tool_calls + following tool msgs.
             // We prune oldest pairs to keep last N.
             if let Some(n) = keep_n {
-                // Count total pairs = total tool_result msgs
-                let total_pairs = out.iter().filter(|m| m.role == "tool").count();
                 if total_pairs > n {
                     let drop = total_pairs - n;
                     let mut to_drop = drop;

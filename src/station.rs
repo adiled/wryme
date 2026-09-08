@@ -69,26 +69,26 @@ impl Default for Dials {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TinkerKeep {
     All,
-    Keep8,
-    Keep3,
-    Keep1,
+    Count(usize),
+    Percent(u8),
 }
 
 impl TinkerKeep {
-    pub fn keep_n(self) -> Option<usize> {
+    pub fn keep_n(self, total: usize) -> Option<usize> {
         match self {
             TinkerKeep::All => None,
-            TinkerKeep::Keep8 => Some(8),
-            TinkerKeep::Keep3 => Some(3),
-            TinkerKeep::Keep1 => Some(1),
+            TinkerKeep::Count(n) => Some(n.min(total)),
+            TinkerKeep::Percent(p) => {
+                let p = (p as usize).min(100);
+                Some(((total * p).div_ceil(100)).min(total))
+            }
         }
     }
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            TinkerKeep::All => "all",
-            TinkerKeep::Keep8 => "8",
-            TinkerKeep::Keep3 => "3",
-            TinkerKeep::Keep1 => "1",
+            TinkerKeep::All => "all".to_string(),
+            TinkerKeep::Count(n) => n.to_string(),
+            TinkerKeep::Percent(p) => format!("{}%", p),
         }
     }
 }
@@ -220,17 +220,31 @@ impl PatienceField {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum TinkerKeepField {
+    Integer(i64),
     Named(String),
 }
 
 impl TinkerKeepField {
     fn into_keep(self) -> Option<TinkerKeep> {
-        let TinkerKeepField::Named(s) = self;
-        match s.to_lowercase().as_str() {
-            "all" => Some(TinkerKeep::All),
-            "8" => Some(TinkerKeep::Keep8),
-            "3" => Some(TinkerKeep::Keep3),
-            "1" => Some(TinkerKeep::Keep1),
+        match self {
+            TinkerKeepField::Integer(n) if n >= 0 => Some(TinkerKeep::Count(n as usize)),
+            TinkerKeepField::Named(s) => {
+                let s = s.trim().to_lowercase();
+                if s == "all" {
+                    return Some(TinkerKeep::All);
+                }
+                if let Some(pct) = s.strip_suffix('%') {
+                    if let Ok(p) = pct.trim().parse::<u8>() {
+                        if p <= 100 {
+                            return Some(TinkerKeep::Percent(p));
+                        }
+                    }
+                }
+                if let Ok(n) = s.parse::<usize>() {
+                    return Some(TinkerKeep::Count(n));
+                }
+                None
+            }
             _ => None,
         }
     }
