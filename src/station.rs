@@ -58,7 +58,7 @@ impl Default for Dials {
     fn default() -> Self {
         Self {
             boldness: None,
-            patience: Some(Patience::Steady),
+            patience: None,
             verbosity: None,
             tinker_keep: TinkerVal::All,
             tinker_clip: TinkerVal::All,

@@ -31,6 +31,9 @@ pub struct Popup {
     pub scroll: usize,
     /// Used while in SaveAs mode.
     pub name_input: Input,
+    /// Used while editing a tinker dial freeform.
+    pub dial_input: Input,
+    pub dial_idx: Option<usize>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -46,6 +49,7 @@ pub enum Mode {
     Closed,
     Browse,
     SaveAs,
+    DialEdit,
 }
 
 /// One row of the popup. The renderer turns these into Lines; the
@@ -142,7 +146,7 @@ pub fn toggle(app: &mut App) {
             app.popup.selected = first_selectable(app);
             app.popup.scroll = 0;
         }
-        Mode::Browse | Mode::SaveAs => {
+        Mode::Browse | Mode::SaveAs | Mode::DialEdit => {
             close(app);
         }
     }
@@ -152,6 +156,8 @@ pub fn close(app: &mut App) {
     app.popup.mode = Mode::Closed;
     app.popup.tab = Tab::Station;
     app.popup.name_input = Input::new();
+    app.popup.dial_input = Input::new();
+    app.popup.dial_idx = None;
     app.popup.selected = 0;
     app.popup.scroll = 0;
 }
@@ -194,10 +200,8 @@ pub fn adjust(app: &mut App, delta: i32) {
     }
 }
 
-/// Enter on the focused row. For dial rows, the same as a right-adjust.
-/// For a saved station, load it. For the update action, write current
-/// state back to the saved entry. For the save-as action, switch to
-/// SaveAs mode.
+/// Enter on the focused row. Dial rows enter freeform edit (type a number / all / 50%).
+/// Saved station, update, save-as as before. Model still cycles.
 pub fn activate(app: &mut App) {
     let r = rows(app);
     let row = r.get(app.popup.selected).cloned();
@@ -214,11 +218,81 @@ pub fn activate(app: &mut App) {
             app.popup.mode = Mode::SaveAs;
             app.popup.name_input = Input::new();
         }
-        Some(Row::Model | Row::Dial(_)) => {
+        Some(Row::Dial(idx)) => {
+            enter_dial_edit(app, idx);
+        }
+        Some(Row::Model) => {
             adjust(app, 1);
         }
         _ => {}
     }
+}
+
+fn enter_dial_edit(app: &mut App, idx: usize) {
+    if let Some(meta) = dial_metas().get(idx) {
+        let cur = (meta.label)(&app.active_station.dials);
+        let mut input = Input::new();
+        input.text = cur;
+        // place cursor at end
+        input.home();
+        for _ in 0..input.text.len() {
+            input.end();
+        }
+        app.popup.dial_input = input;
+        app.popup.dial_idx = Some(idx);
+        app.popup.mode = Mode::DialEdit;
+    }
+}
+
+pub fn commit_dial_edit(app: &mut App) {
+    let idx = match app.popup.dial_idx {
+        Some(i) => i,
+        None => return,
+    };
+    let text = app.popup.dial_input.text.trim().to_string();
+    if text.is_empty() {
+        app.note("tinker value can't be empty");
+        return;
+    }
+    let parsed = parse_tinker_val(&text);
+    let Some(val) = parsed else {
+        app.note("invalid tinker value: use all, 0, 12, or 50%");
+        return;
+    };
+    if let Some(meta) = dial_metas().get(idx) {
+        // Both tinker_keep and tinker_clip share TinkerVal, so we set via dial cycle to the exact value
+        // by directly assigning.
+        match meta.name {
+            "tinker_keep" => app.active_station.dials.tinker_keep = val,
+            "tinker_clip" => app.active_station.dials.tinker_clip = val,
+            _ => {}
+        }
+        app.note(format!("{} = {}", meta.name, val.label()));
+    }
+    app.popup.mode = Mode::Browse;
+    app.popup.dial_input = Input::new();
+    app.popup.dial_idx = None;
+}
+
+fn parse_tinker_val(s: &str) -> Option<crate::station::TinkerVal> {
+    let s = s.trim().to_lowercase();
+    if s == "all" {
+        return Some(crate::station::TinkerVal::All);
+    }
+    if s == "0" {
+        return Some(crate::station::TinkerVal::Count(0));
+    }
+    if let Some(pct) = s.strip_suffix('%') {
+        if let Ok(p) = pct.trim().parse::<u8>() {
+            if p <= 100 {
+                return Some(crate::station::TinkerVal::Percent(p));
+            }
+        }
+    }
+    if let Ok(n) = s.parse::<usize>() {
+        return Some(crate::station::TinkerVal::Count(n));
+    }
+    None
 }
 
 /// Commit the SaveAs name input: append a new station to the stations

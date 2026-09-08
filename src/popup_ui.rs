@@ -115,12 +115,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Span::raw(app.popup.name_input.text.clone()),
             ]));
         }
+        if app.popup.mode == popup::Mode::DialEdit {
+            lines.push(Line::from(""));
+            if let Some(idx) = app.popup.dial_idx {
+                if let Some(meta) = popup::dial_metas().get(idx) {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {}: ", meta.name),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                        Span::raw(app.popup.dial_input.text.clone()),
+                    ]));
+                }
+            }
+        }
 
         // Hint line at the bottom.
         let hint = if app.popup.mode == popup::Mode::SaveAs {
             "  Enter save  ·  Esc cancel"
+        } else if app.popup.mode == popup::Mode::DialEdit {
+            "  Enter save  ·  Esc cancel  ·  all | 0 | 12 | 50%"
         } else {
-            "  ↑↓ select  ·  ←→ adjust  ·  Enter act  ·  Tab: Help  ·  F1 Help  ·  PgUp/PgDn scroll  ·  Esc / Ctrl-S close"
+            "  ↑↓ select  ·  ←→ adjust  ·  Enter edit number  ·  Tab: Help  ·  F1 Help  ·  PgUp/PgDn scroll  ·  Esc / Ctrl-S close"
         };
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -209,6 +225,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let name_y = modal_area.y + 1 + (name_line_idx.saturating_sub(scroll)) as u16;
         let prompt_len = "  name: ".len() as u16;
         let caret = app.popup.name_input.display_col();
+        f.set_cursor_position(Position {
+            x: modal_area.x + prompt_len + caret,
+            y: name_y,
+        });
+    }
+    if app.popup.mode == popup::Mode::DialEdit {
+        let line_count = lines.len();
+        let name_line_idx = line_count.saturating_sub(3);
+        let name_y = modal_area.y + 1 + (name_line_idx.saturating_sub(scroll)) as u16;
+        // prompt is "  tinker_keep: " or "  tinker_clip: " — compute from dial name
+        let prompt = if let Some(idx) = app.popup.dial_idx {
+            if let Some(meta) = popup::dial_metas().get(idx) {
+                format!("  {}: ", meta.name)
+            } else {
+                "  value: ".to_string()
+            }
+        } else {
+            "  value: ".to_string()
+        };
+        let prompt_len = prompt.len() as u16;
+        let caret = app.popup.dial_input.display_col();
         f.set_cursor_position(Position {
             x: modal_area.x + prompt_len + caret,
             y: name_y,
