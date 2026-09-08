@@ -1,6 +1,11 @@
 # Rust build artifacts
 /target
 
+# Desktop packaging output (built in CI or locally)
+/dist
+*.zip
+*.tar.gz
+
 # Runtime logs / pids
 logs/
 *.log

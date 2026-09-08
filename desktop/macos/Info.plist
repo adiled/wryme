@@ -10,6 +10,8 @@
     <key>CFBundleName</key>
     <string>wryme</string>
     <key>CFBundleDisplayName</key>
+    <string>wme</string>
+    <key>CFBundleSpokenName</key>
     <string>wryme</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
@@ -25,6 +27,10 @@
     <string>public.app-category.productivity</string>
     <key>LSMultipleInstancesProhibited</key>
     <false/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>wryme asks WezTerm to open its window.</string>
 </dict>
