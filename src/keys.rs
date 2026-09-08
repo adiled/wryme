@@ -62,6 +62,7 @@ pub fn handle_key(
         if let Some(t) = in_flight.take() {
             t.abort();
         }
+        app.shutdown_voice();
         app.should_quit = true;
         return;
     }
@@ -69,6 +70,22 @@ pub fn handle_key(
     // F1 opens the popup directly on the Help tab (even when closed).
     if k.code == KeyCode::F(1) {
         popup::open_help(app);
+        return;
+    }
+
+    // Ctrl-V toggles read-aloud replies for this window.
+    if ctrl && matches!(k.code, KeyCode::Char('v')) {
+        if app.voice_on {
+            app.voice_on = false;
+            app.shutdown_voice();
+            app.note("voice off");
+        } else if crate::voice::available() {
+            app.voice_on = true;
+            app.unmute_voice();
+            app.note("voice on");
+        } else {
+            app.note("voice unavailable: no say/spd-say on PATH");
+        }
         return;
     }
 
@@ -80,6 +97,15 @@ pub fn handle_key(
 
     match k.code {
         KeyCode::Esc => {
+            // First Esc while a voiced turn streams quiets the voice for
+            // the rest of the turn (mute sticks, not momentary activity);
+            // the next Esc interrupts the turn itself.
+            if app.voice_on && !app.voice_muted && app.in_flight {
+                app.mute_voice();
+                app.note("quiet");
+                return;
+            }
+            app.stop_voice();
             if let Some(t) = in_flight.take() {
                 t.abort();
                 app.finish_streaming();
@@ -98,8 +124,13 @@ pub fn handle_key(
                 return;
             }
             let images = attached_images(&text);
+            if app.messages.is_empty() {
+                tracing::info!("window start");
+            }
             app.push_user(text, images);
             app.begin_assistant();
+            app.stop_voice();
+            app.unmute_voice();
             app.in_flight = true;
             app.current_page = 0;
             app.scroll_row = 0;
@@ -276,6 +307,35 @@ fn popup_key(k: KeyEvent, app: &mut App) {
                     }
                 } else {
                     app.popup.name_input.insert_char(c);
+                }
+            }
+            _ => {}
+        },
+        popup::Mode::DialEdit => match k.code {
+            KeyCode::Esc => {
+                app.popup.mode = popup::Mode::Browse;
+                app.popup.dial_input = Input::new();
+                app.popup.dial_idx = None;
+            }
+            KeyCode::Enter => popup::commit_dial_edit(app),
+            KeyCode::Left => app.popup.dial_input.move_left(),
+            KeyCode::Right => app.popup.dial_input.move_right(),
+            KeyCode::Home => app.popup.dial_input.home(),
+            KeyCode::End => app.popup.dial_input.end(),
+            KeyCode::Backspace => app.popup.dial_input.backspace(),
+            KeyCode::Delete => app.popup.dial_input.delete_forward(),
+            KeyCode::Char(c) => {
+                if ctrl {
+                    match c {
+                        'u' => app.popup.dial_input.kill_to_start(),
+                        'k' => app.popup.dial_input.kill_to_end(),
+                        'a' => app.popup.dial_input.home(),
+                        'e' => app.popup.dial_input.end(),
+                        'w' => app.popup.dial_input.kill_prev_word(),
+                        _ => {}
+                    }
+                } else {
+                    app.popup.dial_input.insert_char(c);
                 }
             }
             _ => {}

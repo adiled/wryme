@@ -12,16 +12,33 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Which wire protocol this shop speaks.
+/// How a Responses shop carries the window between turns.
+///
+/// `Full` (default): stateless. Every request carries the whole
+/// transcript with `store: false`; works against any shop, but the
+/// server re-prefills everything each tool round, so long windows get
+/// slow. `Warm`: the server keeps the window warm; follow-ups send only
+/// the new items against `previous_response_id` with `store: true`.
+/// Fast, but only shops that actually retain windows (OpenAI, our ds4).
+/// Set `window = "warm"` per shop to opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    Full,
+    Warm,
+}
 ///
 /// `Demo` is our local canned-replies generator. No network.
-/// `ChatCompletions` is the universal baseline: `/v1/chat/completions`
-/// with flat `choices[].delta` chunks. Almost every server.
-/// `Responses` is the newer typed-event protocol at `/v1/responses`.
-/// Cleaner for tool calls, reasoning, refusals, and built-in tools.
-/// OpenAI directly and agentic backends (like our local kara) support it.
+/// `Responses` is the default: the newer typed-event protocol at
+/// `/v1/responses`. Cleaner for tool calls, reasoning, refusals, and
+/// built-in tools. Stateless (`store: false`, full transcript replayed),
+/// so it works against any shop that implements the endpoint — OpenAI,
+/// our local ds4/glm servers, and Ollama's OpenAI-compat endpoint.
+/// `ChatCompletions` is the opt-out baseline: `/v1/chat/completions`
+/// with flat `choices[].delta` chunks. Set
+/// `protocol = "chat-completions"` for servers with no `/responses`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Demo,
@@ -35,10 +52,13 @@ pub struct Shop {
     pub url: String,
     pub key: String,
     pub protocol: Protocol,
+    pub window: WindowMode,
     /// Models this shop advertises. Convention: list newest-first. The
     /// first model is what wryme picks when synthesizing a default
     /// station for a fresh launch with no saved stations.
     pub models: Vec<String>,
+    /// Custom headers sent with every request to this shop.
+    pub headers: HashMap<String, String>,
 }
 
 impl Shop {
@@ -48,7 +68,9 @@ impl Shop {
             url: String::new(),
             key: String::new(),
             protocol: Protocol::Demo,
+            window: WindowMode::Full,
             models: vec!["canned replies".into()],
+            headers: HashMap::new(),
         }
     }
 }
@@ -69,11 +91,16 @@ struct ShopDef {
     key: Option<String>,
     #[serde(default)]
     key_env: Option<String>,
-    /// "chat-completions" (default) or "responses".
+    /// "responses" (default) or "chat-completions".
     #[serde(default)]
     protocol: Option<String>,
+    /// "full" (default) or "warm". Warm keeps the window server-side.
+    #[serde(default)]
+    window: Option<String>,
     #[serde(default)]
     models: Vec<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 impl ShopDef {
@@ -84,15 +111,21 @@ impl ShopDef {
             (None, None) => String::new(),
         };
         let protocol = match self.protocol.as_deref() {
-            Some("responses") => Protocol::Responses,
-            _ => Protocol::ChatCompletions,
+            Some("chat-completions") => Protocol::ChatCompletions,
+            _ => Protocol::Responses,
+        };
+        let window = match self.window.as_deref() {
+            Some("warm") => WindowMode::Warm,
+            _ => WindowMode::Full,
         };
         Shop {
             name: self.name,
             url: self.url,
             key,
             protocol,
+            window,
             models: self.models,
+            headers: self.headers,
         }
     }
 }
@@ -105,6 +138,10 @@ pub fn load_all() -> Result<Vec<Shop>> {
     }
 
     if let Some(path) = config_path() {
+        if !path.exists() {
+            // First run — seed a file so canned shows as a persisted shop/radio and user sees the shape.
+            let _ = ensure_default_file(&path);
+        }
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
@@ -118,6 +155,26 @@ pub fn load_all() -> Result<Vec<Shop>> {
     Ok(out)
 }
 
+fn ensure_default_file(path: &PathBuf) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let body = r#"# wryme shops — add your providers here. `canned` is local, no network. All shop knobs shown.
+[[shop]]
+name = "canned"
+url = ""
+models = ["canned replies"]
+# protocol = "chat-completions" # or "responses"
+# window = "full" # or "warm"
+# key = ""
+# key_env = "OPENAI_API_KEY"
+# headers = { }
+"#;
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
 fn from_env() -> Option<Shop> {
     let name = std::env::var("WME_DEFAULT_SHOP_NAME").ok();
     let url = std::env::var("WME_DEFAULT_SHOP_URL").ok();
@@ -126,16 +183,26 @@ fn from_env() -> Option<Shop> {
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
         .unwrap_or_default();
     let protocol = std::env::var("WME_DEFAULT_SHOP_PROTOCOL").ok();
+    let window = std::env::var("WME_DEFAULT_SHOP_WINDOW").ok();
     let models = std::env::var("WME_DEFAULT_SHOP_MODELS").ok();
 
-    if name.is_none() && url.is_none() && key.is_empty() && protocol.is_none() && models.is_none()
+    if name.is_none()
+        && url.is_none()
+        && key.is_empty()
+        && protocol.is_none()
+        && window.is_none()
+        && models.is_none()
     {
         return None;
     }
 
     let protocol = match protocol.as_deref() {
-        Some("responses") => Protocol::Responses,
-        _ => Protocol::ChatCompletions,
+        Some("chat-completions") => Protocol::ChatCompletions,
+        _ => Protocol::Responses,
+    };
+    let window = match window.as_deref() {
+        Some("warm") => WindowMode::Warm,
+        _ => WindowMode::Full,
     };
     let models: Vec<String> = models
         .map(|s| s.split(',').map(|m| m.trim().to_string()).collect())
@@ -146,7 +213,9 @@ fn from_env() -> Option<Shop> {
         url: url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
         key,
         protocol,
+        window,
         models,
+        headers: HashMap::new(),
     })
 }
 
@@ -232,6 +301,44 @@ mod tests {
     }
 
     #[test]
+    fn protocol_defaults_to_responses() {
+        let def = |protocol: Option<String>| ShopDef {
+            name: "x".into(),
+            url: "u".into(),
+            key: None,
+            key_env: None,
+            protocol,
+            window: None,
+            models: vec![],
+            headers: HashMap::new(),
+        };
+        assert_eq!(def(None).resolve().protocol, Protocol::Responses);
+        assert_eq!(
+            def(Some("chat-completions".into())).resolve().protocol,
+            Protocol::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn window_defaults_to_full_and_opts_into_warm() {
+        let def = |window: Option<String>| ShopDef {
+            name: "x".into(),
+            url: "u".into(),
+            key: None,
+            key_env: None,
+            protocol: None,
+            window,
+            models: vec![],
+            headers: std::collections::HashMap::new(),
+        };
+        assert_eq!(def(None).resolve().window, WindowMode::Full);
+        assert_eq!(
+            def(Some("warm".into())).resolve().window,
+            WindowMode::Warm
+        );
+    }
+
+    #[test]
     fn find_for_model_picks_first_matching() {
         let shops = vec![
             Shop {
@@ -239,14 +346,18 @@ mod tests {
                 url: "u1".into(),
                 key: "".into(),
                 protocol: Protocol::ChatCompletions,
+                window: WindowMode::Full,
                 models: vec!["m1".into(), "m2".into()],
+                headers: HashMap::new(),
             },
             Shop {
                 name: "b".into(),
                 url: "u2".into(),
                 key: "".into(),
                 protocol: Protocol::Responses,
+                window: WindowMode::Warm,
                 models: vec!["m2".into(), "m3".into()],
+                headers: HashMap::new(),
             },
         ];
         assert_eq!(find_for_model(&shops, "m1").unwrap().name, "a");

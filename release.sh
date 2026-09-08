@@ -50,6 +50,10 @@ echo "$NEW_VERSION" > VERSION
 # Keep Cargo.toml's version in sync with VERSION
 sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
 
+# Keep Cargo.lock's own wryme entry in sync too, so `cargo build --locked`
+# and the published crate don't drift.
+sed -i '' "/^name = \"wryme\"/,/^version = \"[0-9.]*\"/s/version = \"[0-9.]*\"/version = \"$NEW_VERSION\"/" Cargo.lock
+
 git add -A
 git commit -m "Release v$NEW_VERSION" || true
 git tag -d "v$NEW_VERSION" 2>/dev/null || true

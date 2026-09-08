@@ -17,10 +17,38 @@
 //   Done                clean end of stream
 //   Error { message }   anything we couldn't classify as success
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use serde::Serialize;
+use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 use crate::shop::{Protocol, Shop};
 use crate::station::Station;
+
+pub(crate) static TOOLLESS_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+pub(crate) fn is_toolless(model: &str) -> bool {
+    TOOLLESS_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|s| s.contains(model))
+        .unwrap_or(false)
+}
+
+pub(crate) fn mark_toolless(model: &str) {
+    if let Ok(mut s) = TOOLLESS_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+    {
+        s.insert(model.to_string());
+    }
+}
+
+pub(crate) fn is_tool_unsupported_msg(msg: &str) -> bool {
+    let s = msg.to_lowercase();
+    s.contains("tool") && (s.contains("not supported") || s.contains("unsupported") || s.contains("does not support"))
+}
 /// A wire function-call to attach to an assistant ApiMessage.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiToolCall {
@@ -59,6 +87,13 @@ pub enum StreamEvent {
         output: String,
     },
     ResponseId { id: String },
+    /// The shop rejected a warm window (`previous_response_id`
+    /// unsupported): the UI should pin this shop to full windows and
+    /// persist that, so the fallback trips once ever, not every turn.
+    WindowUnsupported { shop: String },
+    /// Token usage for the finished turn (prompt + completion), when the
+    /// server reports it: chat usage chunk, or responses completed event.
+    Usage { input: u64, output: u64 },
     Done,
     Error { message: String },
 }
@@ -74,11 +109,8 @@ impl Client {
             .context("building http client")?;
         Ok(Self { http })
     }
-    /// Open a streaming completion against the given shop with the given
-    /// station's model + dials. Each StreamEvent is sent on `tx` as it
-    /// arrives; returns when the upstream stream closes or errors.
-    /// `engine` is the shared book engine, so the invisible `book` tool
-    /// can reach memory mid-turn.
+    /// Panic-proof wrapper: guarantees Error + Done so a turn can never
+    /// wedge `in_flight` forever.
     pub async fn stream_completion(
         &self,
         shop: Shop,
@@ -88,6 +120,42 @@ impl Client {
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
+        let r = AssertUnwindSafe(self.dispatch(
+            shop,
+            station,
+            messages,
+            previous_response_id,
+            engine,
+            tx.clone(),
+        ))
+        .catch_unwind()
+        .await;
+        if r.is_err() {
+            tracing::error!("turn task panicked, turn closed");
+            let _ = tx.send(StreamEvent::Error {
+                message: "internal: turn task panicked, turn closed".into(),
+            });
+            let _ = tx.send(StreamEvent::Done);
+        }
+    }
+    async fn dispatch(
+        &self,
+        shop: Shop,
+        station: Station,
+        messages: Vec<ApiMessage>,
+        previous_response_id: Option<String>,
+        engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
+        tx: UnboundedSender<StreamEvent>,
+    ) {
+        let span = tracing::info_span!(
+            "turn",
+            model = %station.model,
+            shop = %shop.name,
+            protocol = ?shop.protocol,
+            window = ?shop.window,
+            response_id = tracing::field::Empty
+        );
+        let _guard = span.enter();
         let result = match shop.protocol {
             Protocol::Demo => {
                 let prompt = messages

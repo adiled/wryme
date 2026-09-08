@@ -1,6 +1,6 @@
 [package]
 name = "wryme"
-version = "1.1.4"
+version = "1.6.0"
 edition = "2021"
 license = "MIT"
 description = "wryme • that small, calm window where agents come to meet you"
@@ -8,6 +8,7 @@ repository = "https://github.com/adiled/wryme"
 homepage = "https://github.com/adiled/wryme"
 documentation = "https://github.com/adiled/wryme#readme"
 readme = "README.md"
+exclude = ["dist/", "desktop/", "target/"]
 keywords = ["tui", "terminal", "chat", "ai", "agent"]
 categories = ["command-line-interface"]
 
@@ -34,6 +35,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parquet = "53"
 arrow-array = "53"
 arrow-schema = "53"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sentry = { version = "0.42", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest"] }
 
 [profile.release]
 opt-level = 3

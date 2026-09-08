@@ -42,7 +42,7 @@ pub(crate) async fn stream(
     // messages); tool calls and their results get appended here.
     let mut conv: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| json_msg(m))
+        .filter_map(|m| json_msg(m))
         .collect();
 
     // Plant any finished async jobs back into the conversation as a
@@ -70,11 +70,65 @@ pub(crate) async fn stream(
         }
     }
 
+    let mut bad_rounds: u32 = 0;
     loop {
-        let (calls, assistant_content) = stream_once(client, shop, station, &conv, tx).await?;
-        if calls.is_empty() {
-            return Ok(());
+        let (calls, assistant_content) = match stream_once(client, shop, station, &conv, tx).await {
+            Ok(v) => v,
+            Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
+                if crate::api::is_toolless(&station.model) {
+                    return Err(e);
+                }
+                crate::api::mark_toolless(&station.model);
+                tracing::warn!(model=%station.model, "tools unsupported, retrying without tools and marking toolless");
+                let _ = tx.send(StreamEvent::Error {
+                    message: "tools unsupported by model, retrying without tools".into(),
+                });
+                // retry once without tools — next call will see is_toolless and skip tools
+                match stream_once(client, shop, station, &conv, tx).await {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        // Split pairable calls from broken ones. Broken ones never reach
+        // the wire (their shape would 400 this and every replayed turn),
+        // but each still answers with a clear error the model can read.
+        let (paired, broken): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .partition(|c| !c.id.is_empty() && !c.name.is_empty());
+        if paired.is_empty() && !broken.is_empty() {
+            conv.push(serde_json::json!({
+                "role": "assistant",
+                "content": assistant_content,
+            }));
         }
+        for c in &broken {
+            let output =
+                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let _ = tx.send(StreamEvent::ToolResult {
+                call_id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+                output: output.clone(),
+            });
+            conv.push(serde_json::json!({
+                "role": "system",
+                "content": output,
+            }));
+        }
+        if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
+            bad_rounds += 1;
+            if bad_rounds > 2 {
+                return Ok(());
+            }
+            continue;
+        }
+        bad_rounds = 0;
+        let calls = paired;
 
         // The assistant message carrying the tool calls.
         let mut tcs = Vec::new();
@@ -129,22 +183,57 @@ async fn stream_once(
         model: &'a str,
         messages: &'a [serde_json::Value],
         stream: bool,
+        stream_options: StreamOptions,
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
+        // Token ceiling. `max_completion_tokens` covers visible + reasoning
+        // tokens and is the only cap o-series models accept (`max_tokens`
+        // is deprecated and rejected there).
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_tokens: Option<u32>,
+        max_completion_tokens: Option<u32>,
+        // Patience dial. Chat's top-level `reasoning_effort`
+        // (none/minimal/low/medium/high/...); omitted when unset.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<&'a str>,
+        tool_choice: &'a str,
         tools: &'a [serde_json::Value],
     }
 
-    let tools = tools::tool_defs();
+    #[derive(Serialize)]
+    struct StreamOptions {
+        include_usage: bool,
+    }
+
+    let toolless = crate::api::is_toolless(&station.model);
+    let tools = if toolless {
+        Vec::new()
+    } else {
+        tools::tool_defs_chat()
+    };
+    let tool_choice = if toolless { "none" } else { "auto" };
+    // For toolless models, strip tool history from conv so we don't send poison.
+    let filtered_conv: Vec<serde_json::Value>;
+    let conv: &[serde_json::Value] = if toolless {
+        filtered_conv = conv
+            .iter()
+            .filter(|v| v.get("tool_calls").is_none() && v.get("tool_call_id").is_none())
+            .cloned()
+            .collect();
+        if filtered_conv.is_empty() { conv } else { &filtered_conv }
+    } else {
+        conv
+    };
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let body = Req {
         model: &station.model,
         messages: conv,
         stream: true,
+        stream_options: StreamOptions { include_usage: true },
         temperature: station.dials.boldness,
-        max_tokens: station.dials.verbosity,
+        max_completion_tokens: station.dials.verbosity,
+        reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
+        tool_choice,
         tools: &tools,
     };
 
@@ -152,11 +241,21 @@ async fn stream_once(
     if !shop.key.is_empty() {
         req = req.bearer_auth(&shop.key);
     }
+    for (k, v) in &shop.headers {
+        req = req.header(k, v);
+    }
+    tracing::debug!(
+        url = %url,
+        model = %station.model,
+        body = %serde_json::to_string(&body).unwrap_or_default(),
+        "chat request"
+    );
     let resp = req.send().await.context("posting chat/completions")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "chat upstream error");
         return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
     }
 
@@ -191,14 +290,19 @@ async fn stream_once(
     Ok((calls, assistant_content))
 }
 
-fn json_msg(m: &ApiMessage) -> serde_json::Value {
+fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
     // A tool-role message: emit a `tool` message with the call_id + result.
+    // Unpaired results (empty call_id) never go on the wire: strict
+    // servers 400 them and the poison persists in history.
     if m.role == "tool" {
-        return serde_json::json!({
+        if m.tool_call_id.is_empty() {
+            return None;
+        }
+        return Some(serde_json::json!({
             "role": "tool",
             "tool_call_id": m.tool_call_id,
             "content": m.tool_result,
-        });
+        }));
     }
     // An assistant message that made tool calls: attach the tool_calls array.
     let mut base = if m.images.is_empty() {
@@ -230,16 +334,23 @@ fn json_msg(m: &ApiMessage) -> serde_json::Value {
         })
     };
     if !m.tool_calls.is_empty() {
-        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().map(|c| {
+        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().filter(|c| {
+            // Never replay unpaired calls: empty ids poison future turns.
+            !c.id.is_empty() && !c.name.is_empty()
+        }).map(|c| {
             serde_json::json!({
                 "id": c.id,
                 "type": "function",
                 "function": { "name": c.name, "arguments": c.arguments },
             })
         }).collect();
-        base["tool_calls"] = serde_json::json!(tcs);
+        if tcs.is_empty() {
+            base.as_object_mut().map(|o| o.remove("tool_calls"));
+        } else {
+            base["tool_calls"] = serde_json::json!(tcs);
+        }
     }
-    base
+    Some(base)
 }
 
 fn handle_event(
@@ -263,12 +374,54 @@ fn handle_event(
         }
         match serde_json::from_str::<ChatChunk>(payload) {
             Ok(chunk) => {
+                if let Some(id) = chunk.id.as_deref() {
+                    tracing::Span::current().record("response_id", id);
+                }
+                // Token usage rides the final chunk (empty choices) when
+                // `stream_options.include_usage` is set.
+                if let Some(u) = chunk.usage.as_ref() {
+                    let input = u.get("prompt_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let output = u
+                        .get("completion_tokens")
+                        .and_then(|n| n.as_u64())
+                        .unwrap_or(0);
+                    let total = u.get("total_tokens").and_then(|n| n.as_u64());
+                    if input + output > 0 {
+                        let _ = tx.send(StreamEvent::Usage { input, output });
+                    } else if let Some(t) = total.filter(|t| *t > 0) {
+                        let _ = tx.send(StreamEvent::Usage { input: t, output: 0 });
+                    }
+                }
                 for choice in chunk.choices {
+                    // Terminal reason for this choice. Surfaces truncation
+                    // and content-filter cutoffs that are otherwise silent
+                    // over SSE (no HTTP error, just a stopped stream).
+                    match choice.finish_reason.as_deref() {
+                        Some("length") => {
+                            let _ = tx.send(StreamEvent::Error {
+                                message: "stopped: token limit reached (bump verbosity)".into(),
+                            });
+                        }
+                        Some("content_filter") => {
+                            let _ = tx.send(StreamEvent::Error {
+                                message: "stopped: content filter".into(),
+                            });
+                        }
+                        _ => {}
+                    }
                     if let Some(delta) = choice.delta {
                         if let Some(content) = delta.content {
                             if !content.is_empty() {
                                 assistant_content.push_str(&content);
                                 let _ = tx.send(StreamEvent::Delta { text: content });
+                            }
+                        }
+                        // Refusal text is model output too; show it instead
+                        // of dropping it.
+                        if let Some(refusal) = delta.refusal {
+                            if !refusal.is_empty() {
+                                assistant_content.push_str(&refusal);
+                                let _ = tx.send(StreamEvent::Delta { text: refusal });
                             }
                         }
                         if let Some(reasoning) = delta.reasoning_content {
@@ -295,9 +448,27 @@ fn handle_event(
                                         c.name.push_str(&n);
                                     }
                                     if let Some(a) = f.arguments {
-                                        c.arguments.push_str(&a);
+                                        c.arguments.push_str(&arg_string(&a));
                                     }
                                 }
+                            }
+                        }
+                        // Legacy single-call shape some compat servers still
+                        // emit. Folds into call 0 like a normal delta.
+                        if let Some(f) = delta.function_call {
+                            while calls.is_empty() {
+                                calls.push(ChatToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                });
+                            }
+                            let c = &mut calls[0];
+                            if let Some(n) = f.name {
+                                c.name.push_str(&n);
+                            }
+                            if let Some(a) = f.arguments {
+                                c.arguments.push_str(&arg_string(&a));
                             }
                         }
                     }
@@ -314,11 +485,19 @@ fn handle_event(
 #[derive(Deserialize)]
 struct ChatChunk {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     choices: Vec<Choice>,
+    // Present (with empty choices) on the final usage chunk when
+    // `stream_options.include_usage` is set. Parsed into a Usage event.
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct Choice {
+    #[serde(default)]
+    finish_reason: Option<String>,
     #[serde(default)]
     delta: Option<Delta>,
 }
@@ -328,9 +507,14 @@ struct Delta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    refusal: Option<String>,
+    #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
+    // Deprecated single-call shape; some compat servers still emit it.
+    #[serde(default)]
+    function_call: Option<DeltaFunction>,
 }
 
 #[derive(Deserialize)]
@@ -347,6 +531,171 @@ struct DeltaToolCall {
 struct DeltaFunction {
     #[serde(default)]
     name: Option<String>,
+    // Spec says string, but compat servers sometimes emit an object for
+    // one-shot calls. Kept as Value so one odd field can't sink the
+    // whole chunk (serde would drop the entire delta otherwise).
     #[serde(default)]
-    arguments: Option<String>,
+    arguments: Option<serde_json::Value>,
+}
+
+/// Arguments to string: verbatim when already a string, serialized when
+/// a server sent an object instead.
+fn arg_string(v: &serde_json::Value) -> String {
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    serde_json::to_string(v).unwrap_or_default()
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel() -> (
+        UnboundedSender<StreamEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    ) {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+
+    #[test]
+    fn refusal_delta_surfaces_as_text() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{\"refusal\":\"sorry\"}}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        assert!(content.contains("sorry"));
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Delta { text } if text == "sorry"));
+    }
+
+    #[test]
+    fn finish_reason_length_and_filter_become_errors() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("token limit")));
+
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("content filter")));
+    }
+
+    #[test]
+    fn legacy_function_call_delta_accumulates() {
+        let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}}]}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "zsh");
+        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn unpaired_tool_history_never_reaches_wire() {
+        use crate::api::{ApiMessage, ApiToolCall};
+        let base = || ApiMessage {
+            role: "assistant".into(),
+            content: "hi".into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: String::new(),
+            tool_result: String::new(),
+        };
+        // Empty id: dropped, and with no valid calls the key vanishes.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        // Empty name: same.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert!(v.get("tool_calls").is_none());
+        // Valid call survives.
+        let mut m = base();
+        m.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let v = json_msg(&m).unwrap();
+        assert_eq!(v["tool_calls"].as_array().unwrap().len(), 1);
+        // Unpaired tool result is dropped entirely.
+        let tool = ApiMessage {
+            role: "tool".into(),
+            content: "out".into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: "".into(),
+            tool_result: "out".into(),
+        };
+        assert!(json_msg(&tool).is_none());
+    }
+
+    #[test]
+    fn usage_chunk_emits_usage_event() {        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":300,\"total_tokens\":1500}}\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::Usage { input: 1200, output: 300 }));
+    }
+
+    #[test]
+    fn usage_chunk_parses_cleanly() {        let (tx, _rx) = channel();
+        let mut calls = Vec::new();
+        let mut content = String::new();
+        handle_event(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\ndata: [DONE]\n\n",
+            &tx,
+            &mut calls,
+            &mut content,
+        )
+        .unwrap();
+        assert!(calls.is_empty());
+    }
 }

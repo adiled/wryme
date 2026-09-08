@@ -117,11 +117,21 @@ pub struct App {
     /// in scroll mode.
     pub last_viewport_h: usize,
     /// Most recent response.id seen from a Responses-protocol station.
-    /// Used as `previous_response_id` on the next request so the server
-    /// pins us to the same warm session (matters for stations that keep
-    /// per-session state like cached tool results or MCP server state).
-    /// Reset to None on launch; we don't persist across runs.
+    /// Captured for the UI; never replayed — requests are stateless
+    /// (`store: false`, full transcript every turn). Reset to None on
+    /// launch; we don't persist across runs.
     pub last_response_id: Option<String>,
+    /// Running token usage for this window. `usage_ctx` is the latest
+    /// reported prompt size (replaced each turn — every request re-reports
+    /// the whole transcript, so summing it would explode past the real
+    /// context). `usage_out` accumulates generated tokens across turns.
+    /// Rendered as a gray K-count, bottom-right.
+    pub usage_ctx: u64,
+    pub usage_out: u64,
+    pub voice_on: bool,
+    pub voice_muted: bool,
+    pub voice_speaker: Option<crate::voice::Speaker>,
+    pub voice_buffer: String,
     /// All shops loaded at startup. Read-only after that. Used by the
     /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
@@ -187,6 +197,12 @@ impl App {
             view_mode: ViewMode::Page,
             last_viewport_h: 0,
             last_response_id: None,
+            usage_ctx: 0,
+            usage_out: 0,
+            voice_on: false,
+            voice_muted: false,
+            voice_speaker: None,
+            voice_buffer: String::new(),
             shops,
             stations,
             active_station,
@@ -200,7 +216,6 @@ impl App {
             last_stream_was_brain: false,
         }
     }
-
 
     /// True when the active station differs from the saved entry it was
     /// loaded from. False when there is no origin (untitled / demo) or
@@ -218,10 +233,57 @@ impl App {
             || saved.dials.boldness != self.active_station.dials.boldness
             || saved.dials.patience != self.active_station.dials.patience
             || saved.dials.verbosity != self.active_station.dials.verbosity
+            || saved.dials.tinker_keep != self.active_station.dials.tinker_keep
+            || saved.dials.tinker_clip != self.active_station.dials.tinker_clip
+            || saved.voice != self.active_station.voice
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+    }
+
+    pub fn stop_voice(&mut self) {
+        if let Some(speaker) = self.voice_speaker.as_mut() {
+            speaker.stop();
+        }
+        self.voice_buffer.clear();
+    }
+
+    /// Quiet for the rest of this turn: kills current speech and drops
+    /// anything queued, and new deltas stay silent until the next turn.
+    pub fn mute_voice(&mut self) {
+        self.stop_voice();
+        self.voice_muted = true;
+    }
+
+    pub fn unmute_voice(&mut self) {
+        self.voice_muted = false;
+    }
+
+    pub fn voice_is_active(&self) -> bool {
+        self.voice_speaker
+            .as_ref()
+            .map(|s| s.is_active())
+            .unwrap_or(false)
+    }
+
+    pub fn shutdown_voice(&mut self) {
+        if let Some(mut speaker) = self.voice_speaker.take() {
+            speaker.shutdown();
+        }
+        self.voice_buffer.clear();
+    }
+
+    pub fn ensure_speaker(&mut self, voice: Option<String>) {
+        let same = self
+            .voice_speaker
+            .as_ref()
+            .map(|s| s.name == voice)
+            .unwrap_or(false);
+        if !same {
+            self.shutdown_voice();
+            self.voice_speaker = Some(crate::voice::Speaker::new(voice));
+        }
     }
 
     pub fn push_user(&mut self, content: String, images: Vec<String>) {
@@ -302,17 +364,17 @@ impl App {
         }
         self.last_stream_was_brain = false;
 
-        let m = self.messages.last_mut().unwrap();
-        // Don't jam a chunk against the previous one: the model frequently
-        // splits "…." and the next word across two deltas, producing
-        // "sentence.Next" with no space. Insert one only when both sides
-        // are non-whitespace so we never double spaces or mangle markdown.
-        if !m.content.is_empty()
-            && !delta.starts_with(char::is_whitespace)
-            && !m.content.ends_with(char::is_whitespace)
-        {
-            m.content.push(' ');
-        }
+        let m = match self.messages.last_mut() {
+            Some(m) => m,
+            None => return,
+        };
+        // Verbatim concatenation (issue #16): stream deltas are appended
+        // exactly as they arrive. An earlier heuristic inserted a space
+        // whenever both sides were non-whitespace (to fix "sentence.Next"
+        // splits), but that corrupts well-formed streams — "Hello" + ","
+        // became "Hello ,", subword splits became "un der". Both the Chat
+        // and Responses specs define deltas as exact slices; any spacing
+        // the model intends already rides inside them.
         m.content.push_str(delta);
         m.phase = Phase::Writing;
     }
@@ -357,7 +419,13 @@ impl App {
 
     /// Persist a tool call/result pair onto the streaming assistant message,
     /// so the next user turn's wire history carries the full tool transcript.
-    pub fn record_tool_result(&mut self, call_id: String, name: String, arguments: String, result: String) {
+    pub fn record_tool_result(
+        &mut self,
+        call_id: String,
+        name: String,
+        arguments: String,
+        result: String,
+    ) {
         if let Some(m) = self
             .messages
             .iter_mut()
@@ -396,7 +464,8 @@ impl App {
             }
 
             // Record the whole logical turn (all clusters) into the book once.
-            let joined: String = self.messages
+            let joined: String = self
+                .messages
                 .iter()
                 .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.content.is_empty())
                 .map(|m| m.content.as_str())
@@ -412,13 +481,14 @@ impl App {
             // confusing empty bubble. Server hiccups and pre-delta errors are
             // common causes. If upstream sent an error, the status bar already
             // explains what happened. If not, leave a short note.
-            let any_nonempty = self.messages
-                .iter()
-                .any(|m| m.role == Role::Assistant && m.turn_id == tid
-                    && (!m.content.is_empty() || !m.brain.is_empty()
-                        || m.current_tool.is_some()));
+            let any_nonempty = self.messages.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.turn_id == tid
+                    && (!m.content.is_empty() || !m.brain.is_empty() || m.current_tool.is_some())
+            });
             if !any_nonempty {
-                self.messages.retain(|m| !(m.role == Role::Assistant && m.turn_id == tid));
+                self.messages
+                    .retain(|m| !(m.role == Role::Assistant && m.turn_id == tid));
                 if self.status.is_empty() {
                     self.note("empty reply");
                 }
@@ -517,11 +587,15 @@ impl App {
                         role: "assistant".into(),
                         content: m.content.clone(),
                         images: Vec::new(),
-                        tool_calls: m.tool_events.iter().map(|ev| ApiToolCall {
-                            id: ev.call_id.clone(),
-                            name: ev.name.clone(),
-                            arguments: ev.arguments.clone(),
-                        }).collect(),
+                        tool_calls: m
+                            .tool_events
+                            .iter()
+                            .map(|ev| ApiToolCall {
+                                id: ev.call_id.clone(),
+                                name: ev.name.clone(),
+                                arguments: ev.arguments.clone(),
+                            })
+                            .collect(),
                         tool_call_id: String::new(),
                         tool_result: String::new(),
                     });
@@ -584,6 +658,96 @@ impl App {
             // turn, so the wire sees the call/result pair together.
             out.append(&mut results);
         }
+        // Tinker keep/clip: prune replay, keep pair atomic. Defaults keep=all/full.
+        let clip = self.active_station.dials.tinker_clip;
+        let total_pairs = out.iter().filter(|m| m.role == "tool").count();
+        let keep_n = self.active_station.dials.tinker_keep.keep_n(total_pairs);
+        if keep_n.is_some() || clip != crate::station::TinkerVal::All {
+            // Collect pair indices: each assistant with tool_calls + following tool msgs.
+            // We prune oldest pairs to keep last N.
+            if let Some(n) = keep_n {
+                if total_pairs > n {
+                    let drop = total_pairs - n;
+                    let mut to_drop = drop;
+                    let mut pruned: Vec<ApiMessage> = Vec::with_capacity(out.len());
+                    for msg in out {
+                        if msg.role == "tool" && to_drop > 0 {
+                            to_drop -= 1;
+                            // also drop its paired call from preceding assistant
+                            if let Some(last) = pruned.last_mut() {
+                                if last.role == "assistant" && !last.tool_calls.is_empty() {
+                                    // find matching call_id
+                                    let id = &msg.tool_call_id;
+                                    last.tool_calls.retain(|c| c.id != *id);
+                                }
+                            }
+                            continue;
+                        }
+                        if msg.role == "assistant" && to_drop > 0 && msg.tool_calls.len() <= to_drop
+                        {
+                            // This assistant's calls are among dropped oldest - handled via tool drop above,
+                            // but if assistant has no remaining calls keep content anyway
+                            // (don't drop whole assistant turn)
+                        }
+                        pruned.push(msg);
+                    }
+                    out = pruned;
+                } else {
+                    // no keep-pruning needed, keep out as is
+                }
+            }
+            if clip != crate::station::TinkerVal::All {
+                for m in &mut out {
+                    if m.role == "tool" {
+                        let clipped = clip.clip(&m.content);
+                        m.content = clipped.clone();
+                        m.tool_result = clipped;
+                    }
+                }
+            }
+        }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let mut app = App::new(
+            None,
+            vec![Shop::demo()],
+            vec![Station::demo()],
+            Station::demo(),
+            Shop::demo(),
+            None,
+        );
+        // Keep the test off the real book: swap in a temp engine.
+        let dir = std::env::temp_dir().join(format!("wryme_app_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        app
+    }
+
+    #[test]
+    fn stream_deltas_concatenate_verbatim() {
+        // Issue #16: no space insertion. Punctuation and subword splits
+        // must land exactly as streamed.
+        let mut app = test_app();
+        app.begin_assistant();
+        for d in ["Hello", ",", " world", "!", " un", "der"] {
+            app.append_to_last_assistant(d);
+        }
+        let joined: String = app
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, "Hello, world! under");
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("wryme_app_{}", std::process::id())),
+        );
     }
 }

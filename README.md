@@ -60,12 +60,14 @@ Make the file `~/.config/wryme/shops.toml` and put one block in it for the
 AI service you have an account with:
 
 ```toml
-# OpenAI
+# OpenAI (responses is the default protocol; add
+# protocol = "chat-completions" only for servers with no /responses.
+# Add window = "warm" per shop if it retains windows server-side —
+# follow-ups then send deltas only, much faster on long windows.)
 [[shop]]
 name = "openai"
 url = "https://api.openai.com/v1"
 key_env = "OPENAI_API_KEY"
-protocol = "responses"
 models = ["gpt-4o-mini", "o1-mini", "gpt-4o"]
 ```
 
@@ -129,6 +131,12 @@ The dials, all optional:
   thinking. Unset means the AI decides.
 - **`verbosity`**: the most words the AI is allowed to say. A number like
   1024 or 4096. Unset means no cap; the AI stops when it thinks it is done.
+- **`tinker_keep`**: how many tool pairs survive in replay. `all` (default),
+  a positive integer (`8`, `3`), `0` (keep none), or a percent (`50%`). Keeps the last N pairs, pair stays atomic.
+- **`tinker_clip`**: how much of each kept tool result body survives. `all` (default, verbatim), a positive integer chars (`500`, `1000`), `0` (empty body keeps `call_id`), or a percent (`50%` of original).
+- **`voice`**: speech voice for read-aloud replies. Any `say` voice on macOS
+  (`Tara` at 260wpm when unset), any espeak voice on Linux. Needs `say`/`spd-say`
+  on PATH; silently off otherwise.
 
 ## Using it
 
@@ -157,6 +165,7 @@ When you're done, press **Ctrl-C** to close it.
 | `Esc`        | Stop a reply that's still coming in.          |
 | `Ctrl-C`     | Close the program.                            |
 | `Ctrl-T`     | Switch between paged and scrolling view.      |
+| `Ctrl-V`     | Read replies aloud on / off.                  |
 | `Ctrl-S`     | Open the station popup (a tabbed tuning menu).|
 | `F1`         | Open the popup directly on the Help tab.      |
 | `Tab`        | In the popup: switch between Station / Help.  |

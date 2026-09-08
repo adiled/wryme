@@ -280,14 +280,22 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     let summary_path = dir.join("life_summary.txt");
     let life_summary = std::fs::read_to_string(&summary_path).unwrap_or_default();
 
+    // Watermark is the frontier of attributed rows. On a fresh book it is 0
+    // (whole stream unattributed); on a continued book it resumes at the
+    // farthest span end so a restart never orphans the tail after the last
+    // deem. Old ghost spans are already dropped above.
+    let watermark = index
+        .iter()
+        .flat_map(|m| m.spans.iter().map(|(_, e)| *e))
+        .max()
+        .unwrap_or(0)
+        .min(next_row);
+
     Ok(Book {
         dir: dir.to_path_buf(),
         next_row,
         next_seg,
-        // On a fresh open the frontier is the whole stream (everything is
-        // unattributed); on a continued open the frontier is restored to
-        // the end so we never re-deem already-attributed rows.
-        watermark: next_row,
+        watermark,
         unattr_tokens: 0,
         unattr_turns: 0,
         index,
@@ -497,10 +505,7 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
                 m.plans.join(" ").to_lowercase(),
                 m.open.join(" ").to_lowercase(),
             );
-            let score = words
-                .iter()
-                .filter(|w| hay.contains(w.as_str()))
-                .count();
+            let score = words.iter().filter(|w| hay.contains(w.as_str())).count();
             (score > 0).then_some((m, score))
         })
         .collect();
@@ -632,29 +637,43 @@ fn stream_schema() -> SchemaRef {
 }
 
 fn write_index(book: &Book) -> Result<()> {
-    let opened = Int64Array::from(
-        book.index.iter().map(|m| m.opened_at).collect::<Vec<_>>(),
-    );
-    let updated = Int64Array::from(
-        book.index.iter().map(|m| m.updated_at).collect::<Vec<_>>(),
-    );
+    let opened = Int64Array::from(book.index.iter().map(|m| m.opened_at).collect::<Vec<_>>());
+    let updated = Int64Array::from(book.index.iter().map(|m| m.updated_at).collect::<Vec<_>>());
     let topic = StringArray::from(
-        book.index.iter().map(|m| m.topic.as_str()).collect::<Vec<_>>(),
+        book.index
+            .iter()
+            .map(|m| m.topic.as_str())
+            .collect::<Vec<_>>(),
     );
     let tags = StringArray::from(
-        book.index.iter().map(|m| join(&m.tags)).collect::<Vec<String>>(),
+        book.index
+            .iter()
+            .map(|m| join(&m.tags))
+            .collect::<Vec<String>>(),
     );
     let people = StringArray::from(
-        book.index.iter().map(|m| join(&m.people)).collect::<Vec<String>>(),
+        book.index
+            .iter()
+            .map(|m| join(&m.people))
+            .collect::<Vec<String>>(),
     );
     let facts = StringArray::from(
-        book.index.iter().map(|m| join(&m.facts)).collect::<Vec<String>>(),
+        book.index
+            .iter()
+            .map(|m| join(&m.facts))
+            .collect::<Vec<String>>(),
     );
     let plans = StringArray::from(
-        book.index.iter().map(|m| join(&m.plans)).collect::<Vec<String>>(),
+        book.index
+            .iter()
+            .map(|m| join(&m.plans))
+            .collect::<Vec<String>>(),
     );
     let open = StringArray::from(
-        book.index.iter().map(|m| join(&m.open)).collect::<Vec<String>>(),
+        book.index
+            .iter()
+            .map(|m| join(&m.open))
+            .collect::<Vec<String>>(),
     );
     let spans = StringArray::from(
         book.index
@@ -662,9 +681,7 @@ fn write_index(book: &Book) -> Result<()> {
             .map(|m| join_spans(&m.spans))
             .collect::<Vec<String>>(),
     );
-    let tokens = Int64Array::from(
-        book.index.iter().map(|m| m.life_tokens).collect::<Vec<_>>(),
-    );
+    let tokens = Int64Array::from(book.index.iter().map(|m| m.life_tokens).collect::<Vec<_>>());
 
     let batch = RecordBatch::try_new(
         index_schema(),
@@ -773,16 +790,11 @@ fn read_stream_segment(path: &Path) -> Result<Vec<StreamRow>> {
 }
 
 fn as_i64(col: &arrow_array::ArrayRef, i: usize) -> i64 {
-    col
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(i)
+    col.as_any().downcast_ref::<Int64Array>().unwrap().value(i)
 }
 
 fn as_str(col: &arrow_array::ArrayRef, i: usize) -> String {
-    col
-        .as_any()
+    col.as_any()
         .downcast_ref::<StringArray>()
         .unwrap()
         .value(i)
@@ -879,7 +891,14 @@ mod tests {
             book.unattr_turns += 1;
             book.unattr_tokens += c.len() as i64;
         }
-        deem_span(&mut book, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+        deem_span(
+            &mut book,
+            &Bookmark {
+                topic: "garden".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         for c in ["dog", "fence", "noise"] {
             book.pending.push(msg("user", c, book.next_row));
@@ -887,7 +906,14 @@ mod tests {
             book.unattr_turns += 1;
             book.unattr_tokens += c.len() as i64;
         }
-        deem_span(&mut book, &Bookmark { topic: "neighbours".into(), ..Default::default() }).unwrap();
+        deem_span(
+            &mut book,
+            &Bookmark {
+                topic: "neighbours".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Back to the garden later: a second, non-contiguous span.
         for c in ["compost", "mulch"] {
@@ -896,7 +922,14 @@ mod tests {
             book.unattr_turns += 1;
             book.unattr_tokens += c.len() as i64;
         }
-        deem_span(&mut book, &Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+        deem_span(
+            &mut book,
+            &Bookmark {
+                topic: "garden".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let g = compartment(&book, "garden").unwrap();
         let n = compartment(&book, "neighbours").unwrap();
@@ -917,20 +950,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
 
-        assert!(deem_span(&mut book, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap().contains("no new turns"));
+        assert!(deem_span(
+            &mut book,
+            &Bookmark {
+                topic: "t".into(),
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .contains("no new turns"));
         assert_eq!(book.watermark, 0);
 
         book.pending.push(msg("user", "one", book.next_row));
         book.next_row += 1;
         book.unattr_turns += 1;
         book.unattr_tokens += 3;
-        deem_span(&mut book, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap();
+        deem_span(
+            &mut book,
+            &Bookmark {
+                topic: "t".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(book.watermark, 1);
         assert_eq!(book.unattr_tokens, 0);
         assert_eq!(compartment(&book, "t").unwrap().spans, vec![(0, 1)]);
 
         // Nothing new to deem now.
-        assert!(deem_span(&mut book, &Bookmark { topic: "t".into(), ..Default::default() }).unwrap().contains("no new turns"));
+        assert!(deem_span(
+            &mut book,
+            &Bookmark {
+                topic: "t".into(),
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .contains("no new turns"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -967,7 +1023,11 @@ mod tests {
         for _ in 0..40 {
             e3.record_turn("user", "this is a long enough sentence to count as weight");
         }
-        e3.deem(&Bookmark { topic: "x".into(), ..Default::default() }).unwrap();
+        e3.deem(&Bookmark {
+            topic: "x".into(),
+            ..Default::default()
+        })
+        .unwrap();
         assert_eq!(e3.take_prod(), None);
 
         let _ = std::fs::remove_dir_all(&dir);

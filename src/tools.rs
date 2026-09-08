@@ -46,6 +46,8 @@ zsh_check) with that id to peek at its progress or get the final result; \
 otherwise a finished job's result will be delivered to you on its own.";
 
 /// The JSON parameters schema advertised with the shell tool.
+/// Strict-mode clean: every property listed in `required` and no
+/// additional properties, so servers can enforce `strict: true`.
 pub fn tool_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -55,7 +57,8 @@ pub fn tool_parameters() -> serde_json::Value {
                 "description": "the shell command to run, exactly as typed at a terminal"
             }
         },
-        "required": ["command"]
+        "required": ["command"],
+        "additionalProperties": false
     })
 }
 
@@ -69,21 +72,26 @@ pub async fn execute(
     name: &str,
     arguments: &str,
 ) -> Option<String> {
-    if name == shell_name() {
+    let span = tracing::debug_span!("tool", name = %name);
+    let _guard = span.enter();
+    tracing::debug!(args = arguments, "tool called");
+    let out = if name == shell_name() {
         let command = extract_command(arguments);
-        return Some(run_shell(&command).await);
-    }
-    if name == check_name() {
+        Some(run_shell(&command).await)
+    } else if name == check_name() {
         let id = extract_id(arguments);
-        return Some(check(id).await);
+        Some(check(id).await)
+    } else if name == explore::tool_name() {
+        explore::execute(name, arguments).await
+    } else if name == book_name() {
+        Some(book_execute(engine, arguments).await)
+    } else {
+        None
+    };
+    if let Some(ref o) = out {
+        tracing::debug!(tool = name, out = o, "tool result");
     }
-    if name == explore::tool_name() {
-        return explore::execute(name, arguments).await;
-    }
-    if name == book_name() {
-        return Some(book_execute(engine, arguments).await);
-    }
-    None
+    out
 }
 
 /// The async-job check tool: `<shell>_check`, e.g. `zsh_check`.
@@ -108,7 +116,8 @@ pub fn check_parameters() -> serde_json::Value {
                 "description": "the async job id from 'gone async · id=N'"
             }
         },
-        "required": ["id"]
+        "required": ["id"],
+        "additionalProperties": false
     })
 }
 
@@ -157,7 +166,12 @@ fn extract_command(arguments: &str) -> String {
 /// and we tell the model they went async.
 async fn run_shell(command: &str) -> String {
     if command.trim().is_empty() {
-        return format!("{}: no command given", shell_name());
+        // Tells the model the exact retry shape so an empty call can
+        // self-correct instead of looping on "no command given".
+        return format!(
+            "{}: no command given — call again with {{\"command\": \"...\"}}",
+            shell_name()
+        );
     }
     let handle = jobs::spawn(command.to_string());
     match tokio::time::timeout(Duration::from_secs(SHELL_TIMEOUT_SECS), handle.done).await {
@@ -201,6 +215,9 @@ deem it so it is never lost. Keep the distilled bookmark short — \
 people, facts, plans, and what is still open.";
 
 pub fn book_parameters() -> serde_json::Value {
+    // Strict-mode clean: every property required (the model sends empty
+    // strings/arrays for unused ones; parsing defaults them) and no
+    // additional properties.
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -235,7 +252,8 @@ pub fn book_parameters() -> serde_json::Value {
                 "description": "open threads — where we left off"
             }
         },
-        "required": ["action"]
+        "required": ["action", "query", "topic", "tags", "people", "facts", "plans", "open"],
+        "additionalProperties": false
     })
 }
 
@@ -341,9 +359,59 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The JSON tool definitions for the Chat Completions protocol
+/// (`POST /chat/completions`, incl. Ollama's OpenAI-compat endpoint).
+/// OpenAI's Chat spec requires the nested shape:
+/// `{"type":"function","function":{"name":..,"description":..,"parameters":..}}`.
+/// The flat `{"type":"function","name":..}` shape is Responses-only and is
+/// silently ignored by strict OpenAI-compat servers (Ollama) — the model
+/// then claims "no tools". See https://ollama.com/blog/tool-support.
+pub fn tool_defs_chat() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": shell_name(),
+                "description": TOOL_DESCRIPTION,
+                "parameters": tool_parameters(),
+                "strict": true,
+            },
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": explore::tool_name(),
+                "description": explore::TOOL_DESCRIPTION,
+                "parameters": explore::tool_parameters(),
+                "strict": true,
+            },
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": check_name(),
+                "description": CHECK_DESCRIPTION,
+                "parameters": check_parameters(),
+                "strict": true,
+            },
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": book_name(),
+                "description": BOOK_DESCRIPTION,
+                "parameters": book_parameters(),
+                "strict": true,
+            },
+        }),
+    ]
+}
+
 /// The JSON tool definitions advertised in both protocols: the shell
 /// tool, its discovery companion, the async-job checker, and the
 /// invisible bookkeeper.
+/// NOTE: this flat shape is Responses-only. Chat Completions callers must
+/// use `tool_defs_chat()` (nested `function` wrapper).
 pub fn tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -351,19 +419,22 @@ pub fn tool_defs() -> Vec<serde_json::Value> {
             "name": shell_name(),
             "description": TOOL_DESCRIPTION,
             "parameters": tool_parameters(),
+            "strict": true,
         }),
         serde_json::json!({
             "type": "function",
             "name": explore::tool_name(),
             "description": explore::TOOL_DESCRIPTION,
             "parameters": explore::tool_parameters(),
+            "strict": true,
         }),
-        serde_json::json!({ "type": "function", "name": check_name(), "description": CHECK_DESCRIPTION, "parameters": check_parameters() }),
+        serde_json::json!({ "type": "function", "name": check_name(), "description": CHECK_DESCRIPTION, "parameters": check_parameters(), "strict": true }),
         serde_json::json!({
             "type": "function",
             "name": book_name(),
             "description": BOOK_DESCRIPTION,
             "parameters": book_parameters(),
+            "strict": true,
         }),
     ]
 }
@@ -411,6 +482,57 @@ mod tests {
         assert!(names.contains(&explore::tool_name().as_str()));
         assert!(names.contains(&check_name().as_str()));
         assert!(names.contains(&book_name()));
+    }
+
+    #[test]
+    fn tool_defs_chat_uses_nested_function_wrapper() {        // OpenAI Chat Completions (+ Ollama compat) requires
+        // {"type":"function","function":{name,description,parameters}}.
+        // Flat shape is silently ignored -> model says "no tools".
+        let defs = tool_defs_chat();
+        assert_eq!(defs.len(), 4);
+        for d in &defs {
+            assert_eq!(d["type"].as_str().unwrap(), "function");
+            let f = &d["function"];
+            assert!(f["name"].as_str().is_some(), "missing function.name: {d}");
+            assert!(f["description"].as_str().is_some());
+            assert!(f["parameters"].is_object());
+            assert!(d.get("name").is_none(), "flat name leaks to chat: {d}");
+        }
+        let names: Vec<&str> = defs
+            .iter()
+            .map(|d| d["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&shell_name().as_str()));
+        assert!(names.contains(&book_name()));
+        // Strict everywhere: servers can enforce schema adherence.
+        for d in &defs {
+            assert_eq!(d["function"]["strict"], true);
+        }
+    }
+
+    #[test]
+    fn all_tool_schemas_are_strict_clean() {
+        // strict:true requires every property in `required` and no
+        // additional properties, on both protocols' defs.
+        for params in [
+            tool_parameters(),
+            explore::tool_parameters(),
+            check_parameters(),
+            book_parameters(),
+        ] {
+            assert_eq!(params["additionalProperties"], false);
+            let props = params["properties"].as_object().unwrap();
+            let req = params["required"].as_array().unwrap();
+            for key in props.keys() {
+                assert!(
+                    req.iter().any(|r| r.as_str() == Some(key)),
+                    "property {key} not in required"
+                );
+            }
+        }
+        for d in tool_defs() {
+            assert_eq!(d["strict"], true);
+        }
     }
 
     #[tokio::test]
