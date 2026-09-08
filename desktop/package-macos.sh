@@ -2,7 +2,7 @@
 #
 # Package the wryme desktop bundle for macOS.
 #
-# Produces: wryme-darwin-<arch>.zip  (contains Wryme.app)
+# Produces: wryme-darwin-<arch>.zip  (contains wme.app)
 #
 # Usage: package-macos.sh <version> [arch]
 #   arch defaults to `uname -m` (arm64 on Apple Silicon runners, x86_64 on Intel)
@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 BIN="target/release/wme"
-STAGE="dist/wryme-desktop/Wryme.app"
+STAGE="dist/wryme-desktop/wme.app"
 
 [[ -x "$BIN" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
 
@@ -36,5 +36,5 @@ sed "s/1\.1\.4/$VERSION/g" desktop/macos/Info.plist > "$STAGE/Contents/Info.plis
 # possible (Gatekeeper may still warn on first open of an unsigned download).
 codesign --force --deep --sign - "$STAGE" >/dev/null 2>&1 || echo "codesign skipped"
 
-(cd dist/wryme-desktop && zip -qry "../wryme-darwin-$ARCH.zip" Wryme.app)
+(cd dist/wryme-desktop && zip -qry "../wryme-darwin-$ARCH.zip" wme.app)
 echo "built dist/wryme-darwin-$ARCH.zip"

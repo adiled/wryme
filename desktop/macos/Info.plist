@@ -8,9 +8,9 @@
     <key>CFBundleIdentifier</key>
     <string>sh.wryme.desktop</string>
     <key>CFBundleName</key>
-    <string>wryme</string>
+    <string>wme</string>
     <key>CFBundleDisplayName</key>
-    <string>wryme</string>
+    <string>wme</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
