@@ -21,6 +21,13 @@ CFG="$RESC/wezterm.lua"
 
 # --- Locate wezterm ---------------------------------------------------------
 find_wezterm() {
+    # 1) Bundled inside wme.app (preferred, no download, no hack)
+    for p in \
+        "$RESC/WezTerm.app/Contents/MacOS/wezterm" \
+        "$SCRIPT_DIR/../Resources/WezTerm.app/Contents/MacOS/wezterm" \
+        "$SCRIPT_DIR/../../Resources/WezTerm.app/Contents/MacOS/wezterm"; do
+        if [[ -x "$p" ]]; then echo "$p"; return 0; fi
+    done
     local bin
     if bin="$(command -v wezterm 2>/dev/null)"; then
         echo "$bin"; return 0
@@ -107,22 +114,6 @@ except Exception as e:
     # Clear quarantine so Gatekeeper does not block first run
     xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 
-    # Brand WezTerm's dock icon with Wryme's W so all wryme windows group under our W
-    # (WezTerm owns the windows, so its dock icon is what groups; patch it best-effort)
-    if [[ -f "$RESC/AppIcon.icns" ]]; then
-        if [[ -d "$dest/Contents/Resources" ]]; then
-            # Backup original once
-            [[ -f "$dest/Contents/Resources/terminal.icns" && ! -f "$dest/Contents/Resources/terminal.orig.icns" ]] && cp "$dest/Contents/Resources/terminal.icns" "$dest/Contents/Resources/terminal.orig.icns" 2>/dev/null || true
-            cp "$RESC/AppIcon.icns" "$dest/Contents/Resources/terminal.icns" 2>/dev/null || true
-            cp "$RESC/AppIcon.icns" "$dest/Contents/Resources/AppIcon.icns" 2>/dev/null || true
-            # Point WezTerm's plist at our icon and re-sign ad-hoc so macOS picks it up
-            /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$dest/Contents/Info.plist" 2>/dev/null || true
-            /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$dest/Contents/Info.plist" 2>/dev/null || true
-            codesign --force --deep --sign - "$dest" >/dev/null 2>&1 || true
-            touch "$dest" 2>/dev/null || true
-        fi
-    fi
-
     WEZTERM="$dest/Contents/MacOS/wezterm"
 }
 
@@ -158,6 +149,49 @@ if [[ -z "${WEZTERM:-}" ]]; then
     osascript -e 'display dialog "WezTerm still not found after install. Install it from https://wezterm.org/install/macos.html then open wryme again." buttons {"OK"} default button "OK" with icon stop' >/dev/null 2>&1 || true
     exit 1
 fi
+
+# --- Use a private branded WezTerm copy for wryme (so wme has its own Dock icon) ----
+# We leave the user's main WezTerm.app untouched. We copy it to
+# ~/Library/Application Support/wryme/WezTerm-Wryme.app, brand its icon with
+# our W, give it a distinct bundle ID, and point WEZTERM there. This makes
+# wme windows group under the W icon, while WezTerm keeps its own icon.
+maybe_brand_wezterm() {
+    [[ -f "$RESC/AppIcon.icns" ]] || return 0
+    local src_app
+    # Resolve src .app from WEZTERM path (e.g. /Applications/WezTerm.app/Contents/MacOS/wezterm)
+    src_app="$(cd "$(dirname "$WEZTERM")/.." && pwd)"
+    [[ -d "$src_app" ]] || return 0
+    # Only brand if src is a real .app (not a bare binary)
+    [[ "$src_app" == *.app ]] || return 0
+    local support="$HOME/Library/Application Support/wryme"
+    local branded="$support/WezTerm-Wryme.app"
+    mkdir -p "$support" 2>/dev/null || return 0
+    # Rebuild branded copy if missing or src newer, or our icon newer
+    local need=0
+    if [[ ! -d "$branded" ]]; then need=1
+    elif [[ "$src_app/Contents/Info.plist" -nt "$branded/Contents/Info.plist" ]]; then need=1
+    elif [[ "$RESC/AppIcon.icns" -nt "$branded/Contents/Resources/terminal.icns" ]]; then need=1
+    fi
+    if [[ $need -eq 1 ]]; then
+        rm -rf "$branded" 2>/dev/null || true
+        ditto "$src_app" "$branded" 2>/dev/null || cp -R "$src_app" "$branded" 2>/dev/null || return 0
+        cp "$RESC/AppIcon.icns" "$branded/Contents/Resources/terminal.icns" 2>/dev/null || true
+        cp "$RESC/AppIcon.icns" "$branded/Contents/Resources/AppIcon.icns" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier sh.wryme.wezterm" "$branded/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string sh.wryme.wezterm" "$branded/Contents/Info.plist" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Set :CFBundleName wme" "$branded/Contents/Info.plist" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName wme" "$branded/Contents/Info.plist" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$branded/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$branded/Contents/Info.plist" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Set :CFBundleIconName AppIcon" "$branded/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$branded/Contents/Info.plist" 2>/dev/null || true
+        xattr -dr com.apple.quarantine "$branded" 2>/dev/null || true
+        codesign --force --deep --sign - "$branded" >/dev/null 2>&1 || true
+        touch "$branded" 2>/dev/null || true
+    fi
+    # Use branded binary if present
+    if [[ -x "$branded/Contents/MacOS/wezterm" ]]; then
+        WEZTERM="$branded/Contents/MacOS/wezterm"
+    fi
+}
+maybe_brand_wezterm 2>/dev/null || true
 
 # --- Silent auto-update ---------------------------------------------
 # Checks GitHub for a newer wryme release once per 24h, in background.
