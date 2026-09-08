@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 // The "station" popup. The single place in the TUI where the user can:
 //   - tune the active station (model + dials) for the current session
 //   - jump to a different saved station
@@ -347,10 +346,6 @@ const BOLDNESS_PRESETS: &[(&str, f32)] = &[
     ("wild", 1.8),
 ];
 
-fn cycle_boldness(app: &mut App, delta: i32) {
-    cycle_boldness_dials(&mut app.active_station.dials, delta);
-}
-
 pub fn boldness_label(v: Option<f32>) -> String {
     match v {
         None => "—".into(),
@@ -366,10 +361,6 @@ pub fn boldness_label(v: Option<f32>) -> String {
     }
 }
 
-fn cycle_patience(app: &mut App, delta: i32) {
-    cycle_patience_dials(&mut app.active_station.dials, delta);
-}
-
 pub fn patience_label(v: Option<Patience>) -> &'static str {
     match v {
         None => "—",
@@ -383,10 +374,6 @@ const VERBOSITY_PRESETS: &[(&str, u32)] = &[
     ("large", 4096),
     ("heaping", 8192),
 ];
-
-fn cycle_verbosity(app: &mut App, delta: i32) {
-    cycle_verbosity_dials(&mut app.active_station.dials, delta);
-}
 
 pub fn verbosity_label(v: Option<u32>) -> String {
     match v {
@@ -411,14 +398,6 @@ const TINKER_KEEP_PRESETS: &[crate::station::TinkerVal] = &[
     crate::station::TinkerVal::Percent(50),
 ];
 
-fn cycle_tinker_keep(app: &mut App, delta: i32) {
-    cycle_tinker_keep_dials(&mut app.active_station.dials, delta);
-}
-
-pub fn tinker_keep_label(v: crate::station::TinkerVal) -> String {
-    v.label()
-}
-
 const TINKER_CLIP_PRESETS: &[crate::station::TinkerVal] = &[
     crate::station::TinkerVal::All,
     crate::station::TinkerVal::Count(0),
@@ -426,14 +405,6 @@ const TINKER_CLIP_PRESETS: &[crate::station::TinkerVal] = &[
     crate::station::TinkerVal::Count(1000),
     crate::station::TinkerVal::Percent(50),
 ];
-
-fn cycle_tinker_clip(app: &mut App, delta: i32) {
-    cycle_tinker_clip_dials(&mut app.active_station.dials, delta);
-}
-
-pub fn tinker_clip_label(v: crate::station::TinkerVal) -> String {
-    v.label()
-}
 
 pub fn cycle_boldness_dials(dials: &mut Dials, delta: i32) {
     let states: Vec<Option<f32>> = std::iter::once(None)
