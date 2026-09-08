@@ -56,6 +56,13 @@ except Exception as e:
             unzip -q "$TMP_WEZ/wezterm.zip" -d "$TMP_WEZ" 2>/dev/null || echo "unzip WezTerm failed" >&2
             FOUND="$(find "$TMP_WEZ" -maxdepth 3 -name "WezTerm.app" -type d | head -1 || true)"
             if [[ -n "$FOUND" ]]; then
+                # Extract entitlements before modifying (needed for re-sign)
+                ent="/tmp/wryme-ent-$$.plist"
+                codesign -d --entitlements "$ent" "$FOUND" 2>/dev/null || codesign -d --entitlements "$ent" "$FOUND/Contents/MacOS/wezterm-gui" 2>/dev/null || rm -f "$ent" 2>/dev/null || true
+                # Fallback to system WezTerm entitlements if zip extraction failed
+                if [[ ! -s "$ent" && -d "/Applications/WezTerm.app" ]]; then
+                    codesign -d --entitlements "$ent" "/Applications/WezTerm.app" 2>/dev/null || true
+                fi
                 ditto "$FOUND" "$WEZTERM_BUNDLE" 2>/dev/null || cp -R "$FOUND" "$WEZTERM_BUNDLE"
                 # Brand the bundled WezTerm with our W so Dock groups under W
                 if [[ -f desktop/macos/AppIcon.icns ]]; then
@@ -68,6 +75,13 @@ except Exception as e:
                     /usr/libexec/PlistBuddy -c "Set :CFBundleIconName AppIcon" "$WEZTERM_BUNDLE/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$WEZTERM_BUNDLE/Contents/Info.plist" 2>/dev/null || true
                 fi
                 xattr -dr com.apple.quarantine "$WEZTERM_BUNDLE" 2>/dev/null || true
+                # Re-sign bundled WezTerm with original entitlements (required, else SIGKILL)
+                if [[ -s "$ent" ]]; then
+                    codesign --force --deep --sign - --entitlements "$ent" "$WEZTERM_BUNDLE" >/dev/null 2>&1 || codesign --force --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || true
+                else
+                    codesign --force --options runtime --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || codesign --force --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || true
+                fi
+                rm -f "$ent" 2>/dev/null || true
             else
                 echo "warn: WezTerm.app not found in zip" >&2
             fi
