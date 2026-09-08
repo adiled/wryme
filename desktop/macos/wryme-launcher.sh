@@ -113,8 +113,8 @@ except Exception as e:
 }
 
 if [[ -z "$WEZTERM" ]]; then
-    osascript -e 'display dialog "One more thing: wryme needs WezTerm (a small native terminal) as its window. Install it now? (one-time, ~30 MB)" buttons {"Cancel", "Install"} default button "Install" with icon note' \
-        >/dev/null 2>&1 || exit 0
+    # Auto-install silently — no prompt, just a notification
+    osascript -e 'display notification "Installing WezTerm (one-time, ~30 MB)…" with title "wryme"' >/dev/null 2>&1 || true
 
     if command -v brew >/dev/null 2>&1; then
         # Prefer brew when available (handles updates + cask quarantine)
