@@ -14,10 +14,22 @@ ARCH="${2:-$(uname -m)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-BIN="target/release/wme"
 STAGE="dist/wryme-desktop/wme.app"
 
-[[ -x "$BIN" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
+# Locate binary: prefer $BIN from CI (target/<triple>/release/wme), then target/release/wme
+BIN="${BIN:-}"
+if [[ -z "$BIN" ]]; then
+    for cand in "target/${TARGET:-}/release/wme" "target/release/wme" target/*/release/wme; do
+        if [[ -x "$cand" ]]; then BIN="$cand"; break; fi
+    done
+fi
+# Also try matrix target env from CI
+if [[ ! -x "${BIN:-}" ]]; then
+    for cand in target/aarch64-apple-darwin/release/wme target/x86_64-apple-darwin/release/wme target/release/wme; do
+        if [[ -x "$cand" ]]; then BIN="$cand"; break; fi
+    done
+fi
+[[ -x "${BIN:-}" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
 
 rm -rf dist/wryme-desktop
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"

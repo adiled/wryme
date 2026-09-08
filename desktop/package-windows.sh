@@ -12,10 +12,15 @@ VERSION="${1:?usage: package-windows.sh <version>}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-BIN="target/release/wme.exe"
 STAGE="dist/wryme-windows"
 
-[[ -f "$BIN" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
+BIN="${BIN:-}"
+if [[ -z "$BIN" ]]; then
+    for cand in "target/${TARGET:-}/release/wme.exe" "target/release/wme.exe" target/*/release/wme.exe target/x86_64-pc-windows-msvc/release/wme.exe; do
+        if [[ -f "$cand" ]]; then BIN="$cand"; break; fi
+    done
+fi
+[[ -f "${BIN:-}" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE"

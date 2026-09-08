@@ -14,10 +14,16 @@ ARCH="${2:-$(uname -m)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-BIN="target/release/wme"
 STAGE="dist/wryme-linux"
 
-[[ -x "$BIN" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
+# Locate binary: prefer $BIN from CI, then fallbacks
+BIN="${BIN:-}"
+if [[ -z "$BIN" ]]; then
+    for cand in "target/${TARGET:-}/release/wme" "target/release/wme" target/*/release/wme target/x86_64-unknown-linux-gnu/release/wme; do
+        if [[ -x "$cand" ]]; then BIN="$cand"; break; fi
+    done
+fi
+[[ -x "${BIN:-}" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
