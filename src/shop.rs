@@ -138,6 +138,10 @@ pub fn load_all() -> Result<Vec<Shop>> {
     }
 
     if let Some(path) = config_path() {
+        if !path.exists() {
+            // First run — seed a file so canned shows as a persisted shop/radio and user sees the shape.
+            let _ = ensure_default_file(&path);
+        }
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
@@ -149,6 +153,21 @@ pub fn load_all() -> Result<Vec<Shop>> {
         }
     }
     Ok(out)
+}
+
+fn ensure_default_file(path: &PathBuf) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let body = r#"# wryme shops — add your providers here. `canned` is local, no network.
+[[shop]]
+name = "canned"
+url = ""
+models = ["canned replies"]
+"#;
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 fn from_env() -> Option<Shop> {
