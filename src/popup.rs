@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // The "station" popup. The single place in the TUI where the user can:
 //   - tune the active station (model + dials) for the current session
 //   - jump to a different saved station
@@ -14,7 +15,7 @@
 use crate::app::App;
 use crate::input::Input;
 use crate::shop::Shop;
-use crate::station::{Dials, Patience, Station, TinkerVal};
+use crate::station::{Dials, Patience, Station};
 
 /// Popup lifecycle state. Default is closed.
 #[derive(Debug, Default)]
