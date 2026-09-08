@@ -19,10 +19,36 @@
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 use crate::shop::{Protocol, Shop};
 use crate::station::Station;
+
+pub(crate) static TOOLLESS_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+pub(crate) fn is_toolless(model: &str) -> bool {
+    TOOLLESS_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|s| s.contains(model))
+        .unwrap_or(false)
+}
+
+pub(crate) fn mark_toolless(model: &str) {
+    if let Ok(mut s) = TOOLLESS_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+    {
+        s.insert(model.to_string());
+    }
+}
+
+pub(crate) fn is_tool_unsupported_msg(msg: &str) -> bool {
+    let s = msg.to_lowercase();
+    s.contains("tool") && (s.contains("not supported") || s.contains("unsupported") || s.contains("does not support"))
+}
 /// A wire function-call to attach to an assistant ApiMessage.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiToolCall {

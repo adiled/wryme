@@ -311,6 +311,35 @@ fn popup_key(k: KeyEvent, app: &mut App) {
             }
             _ => {}
         },
+        popup::Mode::DialEdit => match k.code {
+            KeyCode::Esc => {
+                app.popup.mode = popup::Mode::Browse;
+                app.popup.dial_input = Input::new();
+                app.popup.dial_idx = None;
+            }
+            KeyCode::Enter => popup::commit_dial_edit(app),
+            KeyCode::Left => app.popup.dial_input.move_left(),
+            KeyCode::Right => app.popup.dial_input.move_right(),
+            KeyCode::Home => app.popup.dial_input.home(),
+            KeyCode::End => app.popup.dial_input.end(),
+            KeyCode::Backspace => app.popup.dial_input.backspace(),
+            KeyCode::Delete => app.popup.dial_input.delete_forward(),
+            KeyCode::Char(c) => {
+                if ctrl {
+                    match c {
+                        'u' => app.popup.dial_input.kill_to_start(),
+                        'k' => app.popup.dial_input.kill_to_end(),
+                        'a' => app.popup.dial_input.home(),
+                        'e' => app.popup.dial_input.end(),
+                        'w' => app.popup.dial_input.kill_prev_word(),
+                        _ => {}
+                    }
+                } else {
+                    app.popup.dial_input.insert_char(c);
+                }
+            }
+            _ => {}
+        },
     }
 }
 

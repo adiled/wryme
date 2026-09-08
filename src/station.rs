@@ -48,14 +48,62 @@ pub struct Dials {
     /// Max output tokens. Hard ceiling on reply length. Unset = let the
     /// model stop when it thinks it is done.
     pub verbosity: Option<u32>,
+    /// Tinker keep: how many tool pairs survive in replay. All = keep everything.
+    pub tinker_keep: TinkerKeep,
+    /// Tinker clip: how much of each tool result body survives. Full = verbatim.
+    pub tinker_clip: TinkerClip,
 }
 
 impl Default for Dials {
     fn default() -> Self {
         Self {
             boldness: None,
-            patience: Some(Patience::Steady),
+            patience: None,
             verbosity: None,
+            tinker_keep: TinkerVal::All,
+            tinker_clip: TinkerVal::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TinkerVal {
+    All,
+    Count(usize),
+    Percent(u8),
+}
+
+pub type TinkerKeep = TinkerVal;
+pub type TinkerClip = TinkerVal;
+
+impl TinkerVal {
+    pub fn keep_n(self, total: usize) -> Option<usize> {
+        match self {
+            TinkerVal::All => None,
+            TinkerVal::Count(n) => Some(n.min(total)),
+            TinkerVal::Percent(p) => {
+                let p = (p as usize).min(100);
+                Some(((total * p).div_ceil(100)).min(total))
+            }
+        }
+    }
+    pub fn clip(self, s: &str) -> String {
+        match self {
+            TinkerVal::All => s.to_string(),
+            TinkerVal::Count(0) => String::new(),
+            TinkerVal::Count(n) => crate::api::truncate(s, n),
+            TinkerVal::Percent(0) => String::new(),
+            TinkerVal::Percent(p) => {
+                let keep = (s.len() * p as usize).div_ceil(100);
+                crate::api::truncate(s, keep)
+            }
+        }
+    }
+    pub fn label(self) -> String {
+        match self {
+            TinkerVal::All => "all".to_string(),
+            TinkerVal::Count(n) => n.to_string(),
+            TinkerVal::Percent(p) => format!("{}%", p),
         }
     }
 }
@@ -125,6 +173,10 @@ struct StationDef {
     #[serde(default)]
     verbosity: Option<u32>,
     #[serde(default)]
+    tinker_keep: Option<TinkerField>,
+    #[serde(default)]
+    tinker_clip: Option<TinkerField>,
+    #[serde(default)]
     voice: Option<String>,
 }
 
@@ -153,6 +205,39 @@ impl PatienceField {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TinkerField {
+    Integer(i64),
+    Named(String),
+}
+
+impl TinkerField {
+    fn into_val(self) -> Option<TinkerVal> {
+        match self {
+            TinkerField::Integer(n) if n >= 0 => Some(TinkerVal::Count(n as usize)),
+            TinkerField::Named(s) => {
+                let s = s.trim().to_lowercase();
+                if s == "all" {
+                    return Some(TinkerVal::All);
+                }
+                if let Some(pct) = s.strip_suffix('%') {
+                    if let Ok(p) = pct.trim().parse::<u8>() {
+                        if p <= 100 {
+                            return Some(TinkerVal::Percent(p));
+                        }
+                    }
+                }
+                if let Ok(n) = s.parse::<usize>() {
+                    return Some(TinkerVal::Count(n));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 impl StationDef {
     fn resolve(self) -> Station {
         let mut dials = Dials::default();
@@ -164,6 +249,12 @@ impl StationDef {
         }
         if self.verbosity.is_some() {
             dials.verbosity = self.verbosity;
+        }
+        if let Some(k) = self.tinker_keep.and_then(|k| k.into_val()) {
+            dials.tinker_keep = k;
+        }
+        if let Some(c) = self.tinker_clip.and_then(|c| c.into_val()) {
+            dials.tinker_clip = c;
         }
         Station {
             name: self.name,
@@ -182,6 +273,9 @@ pub fn load_all() -> Result<Vec<Station>> {
     }
 
     if let Some(path) = config_path() {
+        if !path.exists() {
+            let _ = ensure_default_file(&path);
+        }
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
@@ -193,6 +287,26 @@ pub fn load_all() -> Result<Vec<Station>> {
         }
     }
     Ok(out)
+}
+
+fn ensure_default_file(path: &PathBuf) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let body = r#"# wryme stations — canned is local, no network. All dials shown with defaults.
+[[station]]
+name = "canned"
+model = "canned replies"
+# boldness = 0.7
+patience = "steady"
+# verbosity = 8000
+tinker_keep = "all"
+tinker_clip = "all"
+# voice = "Tara"
+"#;
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 fn from_env() -> Option<Station> {

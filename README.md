@@ -131,6 +131,9 @@ The dials, all optional:
   thinking. Unset means the AI decides.
 - **`verbosity`**: the most words the AI is allowed to say. A number like
   1024 or 4096. Unset means no cap; the AI stops when it thinks it is done.
+- **`tinker_keep`**: how many tool pairs survive in replay. `all` (default),
+  a positive integer (`8`, `3`), `0` (keep none), or a percent (`50%`). Keeps the last N pairs, pair stays atomic.
+- **`tinker_clip`**: how much of each kept tool result body survives. `all` (default, verbatim), a positive integer chars (`500`, `1000`), `0` (empty body keeps `call_id`), or a percent (`50%` of original).
 - **`voice`**: speech voice for read-aloud replies. Any `say` voice on macOS
   (`Tara` at 260wpm when unset), any espeak voice on Linux. Needs `say`/`spd-say`
   on PATH; silently off otherwise.

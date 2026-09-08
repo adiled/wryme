@@ -72,7 +72,25 @@ pub(crate) async fn stream(
 
     let mut bad_rounds: u32 = 0;
     loop {
-        let (calls, assistant_content) = stream_once(client, shop, station, &conv, tx).await?;
+        let (calls, assistant_content) = match stream_once(client, shop, station, &conv, tx).await {
+            Ok(v) => v,
+            Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
+                if crate::api::is_toolless(&station.model) {
+                    return Err(e);
+                }
+                crate::api::mark_toolless(&station.model);
+                tracing::warn!(model=%station.model, "tools unsupported, retrying without tools and marking toolless");
+                let _ = tx.send(StreamEvent::Error {
+                    message: "tools unsupported by model, retrying without tools".into(),
+                });
+                // retry once without tools — next call will see is_toolless and skip tools
+                match stream_once(client, shop, station, &conv, tx).await {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
+            Err(e) => return Err(e),
+        };
         // Split pairable calls from broken ones. Broken ones never reach
         // the wire (their shape would 400 this and every replayed turn),
         // but each still answers with a clear error the model can read.
@@ -186,7 +204,25 @@ async fn stream_once(
         include_usage: bool,
     }
 
-    let tools = tools::tool_defs_chat();
+    let toolless = crate::api::is_toolless(&station.model);
+    let tools = if toolless {
+        Vec::new()
+    } else {
+        tools::tool_defs_chat()
+    };
+    let tool_choice = if toolless { "none" } else { "auto" };
+    // For toolless models, strip tool history from conv so we don't send poison.
+    let filtered_conv: Vec<serde_json::Value>;
+    let conv: &[serde_json::Value] = if toolless {
+        filtered_conv = conv
+            .iter()
+            .filter(|v| v.get("tool_calls").is_none() && v.get("tool_call_id").is_none())
+            .cloned()
+            .collect();
+        if filtered_conv.is_empty() { conv } else { &filtered_conv }
+    } else {
+        conv
+    };
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let body = Req {
@@ -197,7 +233,7 @@ async fn stream_once(
         temperature: station.dials.boldness,
         max_completion_tokens: station.dials.verbosity,
         reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
-        tool_choice: "auto",
+        tool_choice,
         tools: &tools,
     };
 
@@ -510,6 +546,8 @@ fn arg_string(v: &serde_json::Value) -> String {
     }
     serde_json::to_string(v).unwrap_or_default()
 }
+
+
 
 #[cfg(test)]
 mod tests {

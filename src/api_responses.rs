@@ -64,6 +64,17 @@ pub(crate) async fn stream(
         .await
         {
             Ok(()) => return Ok(()),
+            Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
+                if crate::api::is_toolless(&station.model) {
+                    return Err(e);
+                }
+                crate::api::mark_toolless(&station.model);
+                tracing::warn!(model=%station.model, "tools unsupported, retrying responses without tools");
+                let _ = tx.send(StreamEvent::Error {
+                    message: "tools unsupported by model, retrying without tools".into(),
+                });
+                return stream_warm(client, shop, station, messages, None, engine, tx).await;
+            }
             Err(e) => {
                 // A warm attempt can fail two ways: the shop names the
                 // problem ("previous_response_id is not supported") or it
@@ -88,7 +99,21 @@ pub(crate) async fn stream(
             }
         }
     }
-    stream_full(client, shop, station, messages, engine, tx).await
+    match stream_full(client, shop, station, messages.clone(), engine.clone(), tx).await {
+        Ok(()) => Ok(()),
+        Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
+            if crate::api::is_toolless(&station.model) {
+                return Err(e);
+            }
+            crate::api::mark_toolless(&station.model);
+            tracing::warn!(model=%station.model, "tools unsupported, retrying responses without tools");
+            let _ = tx.send(StreamEvent::Error {
+                message: "tools unsupported by model, retrying without tools".into(),
+            });
+            stream_full(client, shop, station, messages, engine, tx).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Warm window: the server retains the conversation (`store: true`).
@@ -448,7 +473,28 @@ async fn stream_once(
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content"]);
-    let tools = tools::tool_defs();
+    let toolless = crate::api::is_toolless(&station.model);
+    let tools = if toolless {
+        Vec::new()
+    } else {
+        tools::tool_defs()
+    };
+    // For toolless models strip any prior tool history from input so the server
+    // doesn't reject poisoned function_call items.
+    let filtered_input: Vec<serde_json::Value>;
+    let input: &[serde_json::Value] = if toolless {
+        filtered_input = input
+            .iter()
+            .filter(|v| {
+                let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                t != "function_call" && t != "function_call_output"
+            })
+            .cloned()
+            .collect();
+        if filtered_input.is_empty() { input } else { &filtered_input }
+    } else {
+        input
+    };
 
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
