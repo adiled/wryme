@@ -233,6 +233,8 @@ impl App {
             || saved.dials.boldness != self.active_station.dials.boldness
             || saved.dials.patience != self.active_station.dials.patience
             || saved.dials.verbosity != self.active_station.dials.verbosity
+            || saved.dials.tinker_keep != self.active_station.dials.tinker_keep
+            || saved.dials.tinker_clip != self.active_station.dials.tinker_clip
             || saved.voice != self.active_station.voice
     }
 
@@ -655,6 +657,55 @@ impl App {
             // Emit the tool-role result messages right after their assistant
             // turn, so the wire sees the call/result pair together.
             out.append(&mut results);
+        }
+        // Tinker keep/clip: prune replay, keep pair atomic. Defaults keep=all/full.
+        let keep_n = self.active_station.dials.tinker_keep.keep_n();
+        let clip = self.active_station.dials.tinker_clip;
+        if keep_n.is_some() || clip != crate::station::TinkerClip::Full {
+            // Collect pair indices: each assistant with tool_calls + following tool msgs.
+            // We prune oldest pairs to keep last N.
+            if let Some(n) = keep_n {
+                // Count total pairs = total tool_result msgs
+                let total_pairs = out.iter().filter(|m| m.role == "tool").count();
+                if total_pairs > n {
+                    let drop = total_pairs - n;
+                    let mut to_drop = drop;
+                    let mut pruned: Vec<ApiMessage> = Vec::with_capacity(out.len());
+                    for msg in out {
+                        if msg.role == "tool" && to_drop > 0 {
+                            to_drop -= 1;
+                            // also drop its paired call from preceding assistant
+                            if let Some(last) = pruned.last_mut() {
+                                if last.role == "assistant" && !last.tool_calls.is_empty() {
+                                    // find matching call_id
+                                    let id = &msg.tool_call_id;
+                                    last.tool_calls.retain(|c| c.id != *id);
+                                }
+                            }
+                            continue;
+                        }
+                        if msg.role == "assistant" && to_drop > 0 && msg.tool_calls.len() <= to_drop
+                        {
+                            // This assistant's calls are among dropped oldest - handled via tool drop above,
+                            // but if assistant has no remaining calls keep content anyway
+                            // (don't drop whole assistant turn)
+                        }
+                        pruned.push(msg);
+                    }
+                    out = pruned;
+                } else {
+                    // no keep-pruning needed, keep out as is
+                }
+            }
+            if clip != crate::station::TinkerClip::Full {
+                for m in &mut out {
+                    if m.role == "tool" {
+                        let clipped = clip.clip(&m.content);
+                        m.content = clipped.clone();
+                        m.tool_result = clipped;
+                    }
+                }
+            }
         }
         out
     }

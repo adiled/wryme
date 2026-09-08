@@ -114,6 +114,18 @@ fn serialize_block(station: &Station) -> String {
     if let Some(v) = station.dials.verbosity {
         block.push_str(&format!("verbosity = {}\n", v));
     }
+    if station.dials.tinker_keep != crate::station::TinkerKeep::All {
+        block.push_str(&format!(
+            "tinker_keep = \"{}\"\n",
+            station.dials.tinker_keep.label()
+        ));
+    }
+    if station.dials.tinker_clip != crate::station::TinkerClip::Full {
+        block.push_str(&format!(
+            "tinker_clip = \"{}\"\n",
+            station.dials.tinker_clip.label()
+        ));
+    }
     if let Some(voice) = &station.voice {
         block.push_str(&format!("voice = {}\n", toml_str(voice)));
     }
@@ -167,6 +179,8 @@ model = \"m3\"
                 boldness: Some(1.2),
                 patience: Some(Patience::Slow),
                 verbosity: None,
+                tinker_keep: crate::station::TinkerKeep::All,
+                tinker_clip: crate::station::TinkerClip::Full,
             },
             voice: None,
         };

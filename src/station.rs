@@ -48,6 +48,10 @@ pub struct Dials {
     /// Max output tokens. Hard ceiling on reply length. Unset = let the
     /// model stop when it thinks it is done.
     pub verbosity: Option<u32>,
+    /// Tinker keep: how many tool pairs survive in replay. All = keep everything.
+    pub tinker_keep: TinkerKeep,
+    /// Tinker clip: how much of each tool result body survives. Full = verbatim.
+    pub tinker_clip: TinkerClip,
 }
 
 impl Default for Dials {
@@ -56,6 +60,62 @@ impl Default for Dials {
             boldness: None,
             patience: Some(Patience::Steady),
             verbosity: None,
+            tinker_keep: TinkerKeep::All,
+            tinker_clip: TinkerClip::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TinkerKeep {
+    All,
+    Keep8,
+    Keep3,
+    Keep1,
+}
+
+impl TinkerKeep {
+    pub fn keep_n(self) -> Option<usize> {
+        match self {
+            TinkerKeep::All => None,
+            TinkerKeep::Keep8 => Some(8),
+            TinkerKeep::Keep3 => Some(3),
+            TinkerKeep::Keep1 => Some(1),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            TinkerKeep::All => "all",
+            TinkerKeep::Keep8 => "8",
+            TinkerKeep::Keep3 => "3",
+            TinkerKeep::Keep1 => "1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TinkerClip {
+    Full,
+    Clip1000,
+    Clip300,
+    Empty,
+}
+
+impl TinkerClip {
+    pub fn clip(self, s: &str) -> String {
+        match self {
+            TinkerClip::Full => s.to_string(),
+            TinkerClip::Clip1000 => crate::api::truncate(s, 1000),
+            TinkerClip::Clip300 => crate::api::truncate(s, 300),
+            TinkerClip::Empty => String::new(),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            TinkerClip::Full => "full",
+            TinkerClip::Clip1000 => "1k",
+            TinkerClip::Clip300 => "300",
+            TinkerClip::Empty => "empty",
         }
     }
 }
@@ -125,6 +185,10 @@ struct StationDef {
     #[serde(default)]
     verbosity: Option<u32>,
     #[serde(default)]
+    tinker_keep: Option<TinkerKeepField>,
+    #[serde(default)]
+    tinker_clip: Option<TinkerClipField>,
+    #[serde(default)]
     voice: Option<String>,
 }
 
@@ -153,6 +217,44 @@ impl PatienceField {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TinkerKeepField {
+    Named(String),
+}
+
+impl TinkerKeepField {
+    fn into_keep(self) -> Option<TinkerKeep> {
+        let TinkerKeepField::Named(s) = self;
+        match s.to_lowercase().as_str() {
+            "all" => Some(TinkerKeep::All),
+            "8" => Some(TinkerKeep::Keep8),
+            "3" => Some(TinkerKeep::Keep3),
+            "1" => Some(TinkerKeep::Keep1),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TinkerClipField {
+    Named(String),
+}
+
+impl TinkerClipField {
+    fn into_clip(self) -> Option<TinkerClip> {
+        let TinkerClipField::Named(s) = self;
+        match s.to_lowercase().as_str() {
+            "full" => Some(TinkerClip::Full),
+            "1k" | "1000" => Some(TinkerClip::Clip1000),
+            "300" => Some(TinkerClip::Clip300),
+            "empty" => Some(TinkerClip::Empty),
+            _ => None,
+        }
+    }
+}
+
 impl StationDef {
     fn resolve(self) -> Station {
         let mut dials = Dials::default();
@@ -164,6 +266,12 @@ impl StationDef {
         }
         if self.verbosity.is_some() {
             dials.verbosity = self.verbosity;
+        }
+        if let Some(k) = self.tinker_keep.and_then(|k| k.into_keep()) {
+            dials.tinker_keep = k;
+        }
+        if let Some(c) = self.tinker_clip.and_then(|c| c.into_clip()) {
+            dials.tinker_clip = c;
         }
         Station {
             name: self.name,
