@@ -107,6 +107,22 @@ except Exception as e:
     # Clear quarantine so Gatekeeper does not block first run
     xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 
+    # Brand WezTerm's dock icon with Wryme's W so all wryme windows group under our W
+    # (WezTerm owns the windows, so its dock icon is what groups; patch it best-effort)
+    if [[ -f "$RESC/AppIcon.icns" ]]; then
+        if [[ -d "$dest/Contents/Resources" ]]; then
+            # Backup original once
+            [[ -f "$dest/Contents/Resources/terminal.icns" && ! -f "$dest/Contents/Resources/terminal.orig.icns" ]] && cp "$dest/Contents/Resources/terminal.icns" "$dest/Contents/Resources/terminal.orig.icns" 2>/dev/null || true
+            cp "$RESC/AppIcon.icns" "$dest/Contents/Resources/terminal.icns" 2>/dev/null || true
+            cp "$RESC/AppIcon.icns" "$dest/Contents/Resources/AppIcon.icns" 2>/dev/null || true
+            # Point WezTerm's plist at our icon and re-sign ad-hoc so macOS picks it up
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$dest/Contents/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$dest/Contents/Info.plist" 2>/dev/null || true
+            codesign --force --deep --sign - "$dest" >/dev/null 2>&1 || true
+            touch "$dest" 2>/dev/null || true
+        fi
+    fi
+
     WEZTERM="$dest/Contents/MacOS/wezterm"
 }
 
@@ -144,6 +160,5 @@ if [[ -z "${WEZTERM:-}" ]]; then
 fi
 
 exec "$WEZTERM" --config-file "$CFG" start \
-    --always-new-process \
     --class wryme \
     -- "$WME"
