@@ -311,10 +311,16 @@ fn ensure_default_file(path: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let body = r#"# wryme stations — canned is local, no network.
+    let body = r#"# wryme stations — canned is local, no network. All dials shown with defaults.
 [[station]]
 name = "canned"
 model = "canned replies"
+# boldness = 0.7
+patience = "steady"
+# verbosity = 8000
+tinker_keep = "all"
+tinker_clip = "full"
+# voice = "Tara"
 "#;
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())

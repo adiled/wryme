@@ -160,11 +160,16 @@ fn ensure_default_file(path: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let body = r#"# wryme shops — add your providers here. `canned` is local, no network.
+    let body = r#"# wryme shops — add your providers here. `canned` is local, no network. All shop knobs shown.
 [[shop]]
 name = "canned"
 url = ""
 models = ["canned replies"]
+# protocol = "chat-completions" # or "responses"
+# window = "full" # or "warm"
+# key = ""
+# key_env = "OPENAI_API_KEY"
+# headers = { }
 "#;
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
