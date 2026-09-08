@@ -61,8 +61,6 @@ except Exception as e:
         exit 1
     fi
 
-    # Download with a visible progress hint
-    osascript -e 'display notification "Downloading WezTerm…" with title "wryme"' >/dev/null 2>&1 || true
     if ! curl -fL --progress-bar "$url" -o "$tmp/wezterm.zip"; then
         osascript -e 'display dialog "WezTerm download failed. Check your internet and try again, or install WezTerm from https://wezterm.org/install/macos.html" buttons {"OK"} default button "OK" with icon stop' >/dev/null 2>&1 || true
         exit 1
@@ -113,9 +111,6 @@ except Exception as e:
 }
 
 if [[ -z "$WEZTERM" ]]; then
-    # Auto-install silently — no prompt, just a notification
-    osascript -e 'display notification "Installing WezTerm (one-time, ~30 MB)…" with title "wryme"' >/dev/null 2>&1 || true
-
     if command -v brew >/dev/null 2>&1; then
         # Prefer brew when available (handles updates + cask quarantine)
         if ! brew install --cask wezterm 2>&1; then
