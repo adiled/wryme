@@ -14,7 +14,7 @@
 use crate::app::App;
 use crate::input::Input;
 use crate::shop::Shop;
-use crate::station::{Patience, Station};
+use crate::station::{Dials, Patience, Station, TinkerVal};
 
 /// Popup lifecycle state. Default is closed.
 #[derive(Debug, Default)]
@@ -54,29 +54,60 @@ pub enum Mode {
 pub enum Row {
     SectionHeader(&'static str),
     Model,
-    Boldness,
-    Patience,
-    Verbosity,
+    Dial(usize),         // index into DIALS — automatically renders from Station::Dials
     SavedStation(usize), // index into App.stations
     UpdateAction,        // only present when origin is set AND dirty
     SaveAsAction,
     Blank,
 }
 
+pub struct DialMeta {
+    pub name: &'static str,
+    pub label: fn(&Dials) -> String,
+    pub cycle: fn(&mut Dials, i32),
+}
+
+pub fn dial_metas() -> Vec<DialMeta> {
+    vec![
+        DialMeta {
+            name: "boldness",
+            label: |d| boldness_label(d.boldness),
+            cycle: |d, delta| cycle_boldness_dials(d, delta),
+        },
+        DialMeta {
+            name: "patience",
+            label: |d| patience_label(d.patience).to_string(),
+            cycle: |d, delta| cycle_patience_dials(d, delta),
+        },
+        DialMeta {
+            name: "verbosity",
+            label: |d| verbosity_label(d.verbosity),
+            cycle: |d, delta| cycle_verbosity_dials(d, delta),
+        },
+        DialMeta {
+            name: "tinker_keep",
+            label: |d| d.tinker_keep.label(),
+            cycle: |d, delta| cycle_tinker_keep_dials(d, delta),
+        },
+        DialMeta {
+            name: "tinker_clip",
+            label: |d| d.tinker_clip.label(),
+            cycle: |d, delta| cycle_tinker_clip_dials(d, delta),
+        },
+    ]
+}
+
 /// Build the row list from current app state. Order is fixed: active
-/// section header, model, three dials, blank, saved header, each saved
+/// section header, model, dials (auto from Dials), blank, saved header, each saved
 /// station (skipping the demo placeholder), blank, conditional update
 /// action, save-as action.
 pub fn rows(app: &App) -> Vec<Row> {
-    let mut out = vec![
-        Row::SectionHeader("active"),
-        Row::Model,
-        Row::Boldness,
-        Row::Patience,
-        Row::Verbosity,
-        Row::Blank,
-        Row::SectionHeader("saved"),
-    ];
+    let mut out = vec![Row::SectionHeader("active"), Row::Model];
+    for i in 0..dial_metas().len() {
+        out.push(Row::Dial(i));
+    }
+    out.push(Row::Blank);
+    out.push(Row::SectionHeader("saved"));
     for (i, st) in app.stations.iter().enumerate() {
         if st.name == "demo" {
             continue;
@@ -154,9 +185,11 @@ pub fn adjust(app: &mut App, delta: i32) {
     let row = r.get(app.popup.selected).cloned();
     match row {
         Some(Row::Model) => cycle_model(app, delta),
-        Some(Row::Boldness) => cycle_boldness(app, delta),
-        Some(Row::Patience) => cycle_patience(app, delta),
-        Some(Row::Verbosity) => cycle_verbosity(app, delta),
+        Some(Row::Dial(idx)) => {
+            if let Some(meta) = dial_metas().get(idx) {
+                (meta.cycle)(&mut app.active_station.dials, delta);
+            }
+        }
         _ => {}
     }
 }
@@ -181,7 +214,7 @@ pub fn activate(app: &mut App) {
             app.popup.mode = Mode::SaveAs;
             app.popup.name_input = Input::new();
         }
-        Some(Row::Model | Row::Boldness | Row::Patience | Row::Verbosity) => {
+        Some(Row::Model | Row::Dial(_)) => {
             adjust(app, 1);
         }
         _ => {}
@@ -314,20 +347,7 @@ const BOLDNESS_PRESETS: &[(&str, f32)] = &[
 ];
 
 fn cycle_boldness(app: &mut App, delta: i32) {
-    let states: Vec<Option<f32>> = std::iter::once(None)
-        .chain(BOLDNESS_PRESETS.iter().map(|(_, v)| Some(*v)))
-        .collect();
-    let cur = states
-        .iter()
-        .position(|s| match (s, app.active_station.dials.boldness) {
-            (None, None) => true,
-            (Some(a), Some(b)) => (*a - b).abs() < 1e-6,
-            _ => false,
-        })
-        .unwrap_or(0);
-    let n = states.len() as i32;
-    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-    app.active_station.dials.boldness = states[next];
+    cycle_boldness_dials(&mut app.active_station.dials, delta);
 }
 
 pub fn boldness_label(v: Option<f32>) -> String {
@@ -346,23 +366,7 @@ pub fn boldness_label(v: Option<f32>) -> String {
 }
 
 fn cycle_patience(app: &mut App, delta: i32) {
-    let states: &[Option<Patience>] = &[
-        None,
-        Some(Patience::Bare),
-        Some(Patience::Swift),
-        Some(Patience::Quick),
-        Some(Patience::Steady),
-        Some(Patience::Slow),
-        Some(Patience::Deep),
-        Some(Patience::Max),
-    ];
-    let cur = states
-        .iter()
-        .position(|s| *s == app.active_station.dials.patience)
-        .unwrap_or(0);
-    let n = states.len() as i32;
-    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-    app.active_station.dials.patience = states[next];
+    cycle_patience_dials(&mut app.active_station.dials, delta);
 }
 
 pub fn patience_label(v: Option<Patience>) -> &'static str {
@@ -380,16 +384,7 @@ const VERBOSITY_PRESETS: &[(&str, u32)] = &[
 ];
 
 fn cycle_verbosity(app: &mut App, delta: i32) {
-    let states: Vec<Option<u32>> = std::iter::once(None)
-        .chain(VERBOSITY_PRESETS.iter().map(|(_, v)| Some(*v)))
-        .collect();
-    let cur = states
-        .iter()
-        .position(|s| *s == app.active_station.dials.verbosity)
-        .unwrap_or(0);
-    let n = states.len() as i32;
-    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-    app.active_station.dials.verbosity = states[next];
+    cycle_verbosity_dials(&mut app.active_station.dials, delta);
 }
 
 pub fn verbosity_label(v: Option<u32>) -> String {
@@ -403,6 +398,110 @@ pub fn verbosity_label(v: Option<u32>) -> String {
             }
         }
     }
+}
+
+const TINKER_KEEP_PRESETS: &[crate::station::TinkerVal] = &[
+    crate::station::TinkerVal::All,
+    crate::station::TinkerVal::Count(0),
+    crate::station::TinkerVal::Count(1),
+    crate::station::TinkerVal::Count(3),
+    crate::station::TinkerVal::Count(8),
+    crate::station::TinkerVal::Count(16),
+    crate::station::TinkerVal::Percent(50),
+];
+
+fn cycle_tinker_keep(app: &mut App, delta: i32) {
+    cycle_tinker_keep_dials(&mut app.active_station.dials, delta);
+}
+
+pub fn tinker_keep_label(v: crate::station::TinkerVal) -> String {
+    v.label()
+}
+
+const TINKER_CLIP_PRESETS: &[crate::station::TinkerVal] = &[
+    crate::station::TinkerVal::All,
+    crate::station::TinkerVal::Count(0),
+    crate::station::TinkerVal::Count(300),
+    crate::station::TinkerVal::Count(1000),
+    crate::station::TinkerVal::Percent(50),
+];
+
+fn cycle_tinker_clip(app: &mut App, delta: i32) {
+    cycle_tinker_clip_dials(&mut app.active_station.dials, delta);
+}
+
+pub fn tinker_clip_label(v: crate::station::TinkerVal) -> String {
+    v.label()
+}
+
+pub fn cycle_boldness_dials(dials: &mut Dials, delta: i32) {
+    let states: Vec<Option<f32>> = std::iter::once(None)
+        .chain(BOLDNESS_PRESETS.iter().map(|(_, v)| Some(*v)))
+        .collect();
+    let cur = states
+        .iter()
+        .position(|s| match (s, dials.boldness) {
+            (None, None) => true,
+            (Some(a), Some(b)) => (*a - b).abs() < 1e-6,
+            _ => false,
+        })
+        .unwrap_or(0);
+    let n = states.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.boldness = states[next];
+}
+
+pub fn cycle_patience_dials(dials: &mut Dials, delta: i32) {
+    let states: &[Option<Patience>] = &[
+        None,
+        Some(Patience::Bare),
+        Some(Patience::Swift),
+        Some(Patience::Quick),
+        Some(Patience::Steady),
+        Some(Patience::Slow),
+        Some(Patience::Deep),
+        Some(Patience::Max),
+    ];
+    let cur = states
+        .iter()
+        .position(|s| *s == dials.patience)
+        .unwrap_or(0);
+    let n = states.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.patience = states[next];
+}
+
+pub fn cycle_verbosity_dials(dials: &mut Dials, delta: i32) {
+    let states: Vec<Option<u32>> = std::iter::once(None)
+        .chain(VERBOSITY_PRESETS.iter().map(|(_, v)| Some(*v)))
+        .collect();
+    let cur = states
+        .iter()
+        .position(|s| *s == dials.verbosity)
+        .unwrap_or(0);
+    let n = states.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.verbosity = states[next];
+}
+
+pub fn cycle_tinker_keep_dials(dials: &mut Dials, delta: i32) {
+    let cur = TINKER_KEEP_PRESETS
+        .iter()
+        .position(|s| *s == dials.tinker_keep)
+        .unwrap_or(0);
+    let n = TINKER_KEEP_PRESETS.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.tinker_keep = TINKER_KEEP_PRESETS[next];
+}
+
+pub fn cycle_tinker_clip_dials(dials: &mut Dials, delta: i32) {
+    let cur = TINKER_CLIP_PRESETS
+        .iter()
+        .position(|s| *s == dials.tinker_clip)
+        .unwrap_or(0);
+    let n = TINKER_CLIP_PRESETS.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.tinker_clip = TINKER_CLIP_PRESETS[next];
 }
 
 /// Cycle the tab bar: Station <-> Help. Returns to Browse mode and

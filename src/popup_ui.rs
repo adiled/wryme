@@ -65,29 +65,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                         Span::styled(app.active_station.model.clone(), style),
                     ]));
                 }
-                popup::Row::Boldness => {
+                popup::Row::Dial(idx) => {
                     let style = focus_style(selected);
-                    lines.push(Line::from(vec![
-                        Span::styled(marker, style),
-                        Span::styled("boldness    ", style),
-                        Span::styled(popup::boldness_label(app.active_station.dials.boldness), style),
-                    ]));
-                }
-                popup::Row::Patience => {
-                    let style = focus_style(selected);
-                    lines.push(Line::from(vec![
-                        Span::styled(marker, style),
-                        Span::styled("patience    ", style),
-                        Span::styled(popup::patience_label(app.active_station.dials.patience), style),
-                    ]));
-                }
-                popup::Row::Verbosity => {
-                    let style = focus_style(selected);
-                    lines.push(Line::from(vec![
-                        Span::styled(marker, style),
-                        Span::styled("verbosity   ", style),
-                        Span::styled(popup::verbosity_label(app.active_station.dials.verbosity), style),
-                    ]));
+                    if let Some(meta) = popup::dial_metas().get(*idx) {
+                        let label = (meta.label)(&app.active_station.dials);
+                        let name = format!("{:<12}", meta.name);
+                        lines.push(Line::from(vec![
+                            Span::styled(marker, style),
+                            Span::styled(name, style),
+                            Span::styled(label, style),
+                        ]));
+                    }
                 }
                 popup::Row::SavedStation(idx) => {
                     let st = &app.stations[*idx];
@@ -145,8 +133,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // but never exceeds the terminal, and is at least enough to show a
     // useful slice (so the user can scroll when content overflows).
     let modal_w = (area.width as f32 * 0.60).max(50.0).min(area.width as f32) as u16;
-    let modal_h = (lines.len() as u16 + 4)
-        .clamp(10, area.height.min(area.height));
+    let modal_h = (lines.len() as u16 + 4).clamp(10, area.height.min(area.height));
     let modal_x = area.x + (area.width - modal_w) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_h)) / 2;
     let modal_area = Rect {
@@ -166,12 +153,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let scroll = app.popup.scroll;
 
     // Slice the visible window of lines.
-    let visible: Vec<Line<'static>> = lines
-        .iter()
-        .skip(scroll)
-        .take(body_h)
-        .cloned()
-        .collect();
+    let visible: Vec<Line<'static>> = lines.iter().skip(scroll).take(body_h).cloned().collect();
 
     // Clear underneath so the modal does not show through.
     f.render_widget(Clear, modal_area);
@@ -204,7 +186,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if lines.len() > body_h {
         let ratio = scroll as f32 / max_scroll.max(1) as f32;
         let bar_h = (body_h as f32 * 0.3).max(1.0) as u16;
-        let bar_y = modal_area.y + 1 + (ratio * (body_h.saturating_sub(bar_h as usize) as f32)) as u16;
+        let bar_y =
+            modal_area.y + 1 + (ratio * (body_h.saturating_sub(bar_h as usize) as f32)) as u16;
         let bar_rect = Rect {
             x: modal_area.x + modal_area.width.saturating_sub(2),
             y: bar_y,
