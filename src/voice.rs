@@ -30,7 +30,8 @@ fn spawn_say(body: &str, voice: Option<&str>) -> Option<Child> {
     if let Some(v) = voice {
         c.arg("-v").arg(v);
     }
-    c.arg(body).spawn().ok()
+    // body may start with '-' — '--' ends option parsing so `say: invalid option` never hits.
+    c.arg("--").arg(body).spawn().ok()
 }
 
 static SPEECH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -50,7 +51,7 @@ fn synth_file(body: &str, voice: Option<&str>, cur: &Cur) -> Option<std::path::P
             c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
         }
     }
-    let spawned = c.arg("-o").arg(&path).arg(body).spawn();
+    let spawned = c.arg("-o").arg(&path).arg("--").arg(body).spawn();
     let Ok(child) = spawned else {
         let _ = std::fs::remove_file(&path);
         return None;

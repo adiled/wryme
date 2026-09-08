@@ -175,16 +175,21 @@ async fn stream_warm(
                 output: output.clone(),
             });
             next_input.push(serde_json::json!({
-                "type": "system",
-                "content": output,
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": output }],
             }));
         }
         if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
             bad_rounds += 1;
             if bad_rounds > 2 {
                 return Ok(());
             }
-            prepend_preamble_counted(&mut next_input, &engine, 0);
+            // preamble is top-of-conversation only — follow-up tool rounds reuse the warm
+            // server context (store:true) so no preamble re-injection.
             prev_id = Some(new_id);
             input = next_input;
             continue;
@@ -208,7 +213,6 @@ async fn stream_warm(
                 "output": output,
             }));
         }
-        prepend_preamble_counted(&mut next_input, &engine, 0);
         prev_id = Some(new_id);
         input = next_input;
     }
@@ -239,7 +243,7 @@ async fn stream_full(
         .iter()
         .flat_map(|m| json_msg(m))
         .collect();
-    let mut preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
+    let _preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
     // Plant any finished async jobs into the input as a check-call +
     // result pair, so the model sees the outcome and continues.
@@ -281,11 +285,15 @@ async fn stream_full(
                 output: output.clone(),
             });
             follow.push(serde_json::json!({
-                "type": "system",
-                "content": output,
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": output }],
             }));
         }
         if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
             // Nothing to execute: re-ask with the error notes so the model
             // can correct itself, but stop feeding a model that won't.
             bad_rounds += 1;
@@ -321,10 +329,8 @@ async fn stream_full(
             }));
         }
         input.extend(follow);
-        // Re-pin the preamble: the model may have promoted a compartment
-        // to the preamble this round. Old preamble items are swapped out
-        // so they never duplicate down the input.
-        preamble_len = prepend_preamble_counted(&mut input, &engine, preamble_len);
+        // preamble is top-of-conversation only — not re-pinned on every tool
+        // follow-up (would be insane on long stateless replays).
     }
 }
 

@@ -100,6 +100,9 @@ pub(crate) async fn stream(
             }));
         }
         if paired.is_empty() {
+            if broken.is_empty() {
+                return Ok(());
+            }
             bad_rounds += 1;
             if bad_rounds > 2 {
                 return Ok(());
