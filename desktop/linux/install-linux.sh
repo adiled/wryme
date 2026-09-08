@@ -18,7 +18,7 @@ APP_ENTRY="$HOME/.local/share/applications/wryme.desktop"
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$(dirname "$APP_ENTRY")"
 
-cp "$HERE/wme" "$HERE/wezterm.lua" "$HERE/wryme-launcher.sh" "$INSTALL_DIR/"
+cp "$HERE/wme" "$HERE/wezterm.lua" "$HERE/wryme-launcher.sh" "$HERE/wryme.png" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/wryme-launcher.sh" "$INSTALL_DIR/wme"
 
 ln -sf "$INSTALL_DIR/wryme-launcher.sh" "$BIN_DIR/wryme"

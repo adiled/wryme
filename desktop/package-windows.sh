@@ -24,6 +24,8 @@ cp "$BIN" "$STAGE/wme.exe"
 cp desktop/config/wezterm.lua "$STAGE/wezterm.lua"
 cp desktop/windows/wryme-run.cmd "$STAGE/wryme-run.cmd"
 cp desktop/windows/wryme-launcher.vbs "$STAGE/wryme-launcher.vbs"
+cp desktop/windows/wryme.png "$STAGE/wryme.png"
+cp desktop/windows/wryme.ico "$STAGE/wryme.ico"
 
 powershell -NoProfile -Command \
   "Compress-Archive -Path '$STAGE/*' -DestinationPath 'wryme-windows-x86_64.zip' -Force"

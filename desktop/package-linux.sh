@@ -27,6 +27,7 @@ cp desktop/config/wezterm.lua "$STAGE/wezterm.lua"
 cp desktop/linux/wryme-launcher.sh "$STAGE/wryme-launcher.sh"
 cp desktop/linux/install-linux.sh "$STAGE/install.sh"
 cp desktop/linux/wryme.desktop "$STAGE/wryme.desktop"
+cp desktop/linux/wryme.png "$STAGE/wryme.png"
 chmod +x "$STAGE/wryme-launcher.sh" "$STAGE/install.sh"
 
 tar czf "wryme-linux-$ARCH.tar.gz" -C dist wryme-linux

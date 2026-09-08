@@ -26,6 +26,9 @@ cp "$BIN" "$STAGE/Contents/Resources/wme"
 cp desktop/config/wezterm.lua "$STAGE/Contents/Resources/wezterm.lua"
 cp desktop/macos/wryme-launcher.sh "$STAGE/Contents/MacOS/wryme-launcher"
 chmod +x "$STAGE/Contents/MacOS/wryme-launcher"
+if [[ -f desktop/macos/AppIcon.icns ]]; then
+    cp desktop/macos/AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
+fi
 
 sed "s/1\.1\.4/$VERSION/g" desktop/macos/Info.plist > "$STAGE/Contents/Info.plist"
 
