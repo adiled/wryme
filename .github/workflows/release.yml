@@ -26,10 +26,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
-            target: x86_64-apple-darwin
-            package: desktop/package-macos.sh
-            artifact: wryme-darwin-x86_64.zip
           - os: macos-14
             target: aarch64-apple-darwin
             package: desktop/package-macos.sh
@@ -43,6 +39,7 @@ jobs:
             package: desktop/package-linux.sh
             artifact: wryme-linux-x86_64.deb
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -78,17 +75,14 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            *.zip
-            *.tar.gz
-            *.deb
-            dist/*.zip
-            dist/*.tar.gz
-            dist/*.deb
+            dist/${{ matrix.artifact }}
+            ${{ matrix.artifact }}
           if-no-files-found: error
 
   release:
     needs: [publish-crates, desktop]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
