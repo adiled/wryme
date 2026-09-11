@@ -79,6 +79,8 @@ if "%DO_UPDATE%"=="1" (
       "$zip=Join-Path $tmp 'bundle.zip'; try{ Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 90 -UseBasicParsing }catch{ (Get-Date).ToString() | Out-File '%STAMP%' -Force; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue; exit };" ^
       "try{ Expand-Archive -Path $zip -DestinationPath $tmp -Force }catch{ (Get-Date).ToString() | Out-File '%STAMP%' -Force; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue; exit };" ^
       "$new=Get-ChildItem -Path $tmp -Filter 'wme.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($new){ Copy-Item $new.FullName '%WME%.new' -Force; Move-Item '%WME%.new' '%WME%' -Force };" ^
+      "$newCfg=Get-ChildItem -Path $tmp -Filter 'wezterm.lua' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($newCfg){ Copy-Item $newCfg.FullName '%CFG%.new' -Force; Move-Item '%CFG%.new' '%CFG%' -Force };" ^
+      "$newRun=Get-ChildItem -Path $tmp -Filter 'wryme-run.cmd' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($newRun){ Copy-Item $newRun.FullName '%WME%.runnew' -Force; Move-Item '%WME%.runnew' '%~f0' -Force };" ^
       "(Get-Date).ToString() | Out-File '%STAMP%' -Force; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue" >nul 2>&1
 )
 

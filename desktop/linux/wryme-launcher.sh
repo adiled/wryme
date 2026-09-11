@@ -9,6 +9,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WME="$HERE/wme"
 CFG="$HERE/wezterm.lua"
+LAUNCHER="$HERE/wryme-launcher.sh"
 
 # --- Locate wezterm ---------------------------------------------------------
 find_wezterm() {
@@ -102,9 +103,18 @@ print('1' if parse('$tag')>parse('$cur') else '0')
     [[ -z "$new_wme" ]] && { date +%s > "$stamp" 2>/dev/null || true; return 0; }
     chmod +x "$new_wme" 2>/dev/null || true
     cp "$new_wme" "$WME.new" 2>/dev/null && chmod +x "$WME.new" 2>/dev/null && mv "$WME.new" "$WME" 2>/dev/null || true
+    # Ship the new config + launcher too: "New Window" spawns from
+    # default_prog, which the launcher command line does not cover.
+    local new_cfg new_launcher
+    new_cfg="$(find "$tmp" -type f -name "wezterm.lua" | head -1 || true)"
+    new_launcher="$(find "$tmp" -type f -name "wryme-launcher.sh" | head -1 || true)"
+    [[ -z "$new_cfg" || ! -f "$new_cfg" ]] || cp "$new_cfg" "$CFG.new" 2>/dev/null && mv "$CFG.new" "$CFG" 2>/dev/null || true
+    [[ -z "$new_launcher" || ! -f "$new_launcher" ]] || cp "$new_launcher" "$LAUNCHER.new" 2>/dev/null && chmod +x "$LAUNCHER.new" 2>/dev/null && mv "$LAUNCHER.new" "$LAUNCHER" 2>/dev/null || true
     # also update installed copy if this is the dist copy (install.sh will copy on next install)
     if [[ "$HERE" != "$HOME/.local/share/wryme" && -x "$HOME/.local/share/wryme/wme" ]]; then
         cp "$WME" "$HOME/.local/share/wryme/wme" 2>/dev/null || true
+        cp "$CFG" "$HOME/.local/share/wryme/wezterm.lua" 2>/dev/null || true
+        cp "$LAUNCHER" "$HOME/.local/share/wryme/wryme-launcher.sh" 2>/dev/null || true
     fi
     date +%s > "$stamp" 2>/dev/null || true
 }

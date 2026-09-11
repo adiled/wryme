@@ -297,6 +297,12 @@ if alias:
     chmod +x "$new_wme" 2>/dev/null || true
     # Atomic replace
     cp "$new_wme" "$WME.new" 2>/dev/null && chmod +x "$WME.new" 2>/dev/null && mv "$WME.new" "$WME" 2>/dev/null || true
+    # Ship the new config too: "New Window" spawns from default_prog,
+    # which the launcher command line does not cover. wme and wezterm.lua
+    # always live together in the bundle Resources/.
+    local new_cfg
+    new_cfg="$(find "$tmp" -type f -name "wezterm.lua" | head -1 || true)"
+    [[ -z "$new_cfg" || ! -f "$new_cfg" ]] || cp "$new_cfg" "$CFG.new" 2>/dev/null && mv "$CFG.new" "$CFG" 2>/dev/null || true
     xattr -c "$WME" 2>/dev/null || true
     # Re-sign the outer .app if we are inside one (so Gatekeeper stays happy)
     local app_root
