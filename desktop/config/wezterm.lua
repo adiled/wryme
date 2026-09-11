@@ -14,9 +14,14 @@ local wezterm = require('wezterm')
 
 local config = wezterm.config_builder()
 
--- Fill the window with wryme. (The launcher also passes the absolute path to
--- wme on the command line; this is the fallback when opened directly.)
-config.default_prog = { 'wme' }
+-- Fill the window with wryme.
+-- Use an absolute path derived from this file's own directory (wme always
+-- lives beside wezterm.lua in the bundle's Resources/). "New Window" spawns
+-- from default_prog and ignores the launcher's command line, so we must NOT
+-- rely on `wme` being on the PATH — dock-launched apps get a minimal PATH
+-- (e.g. /usr/bin:/bin:/usr/sbin:/sbin) that usually doesn't contain it.
+local here = wezterm.config_dir
+config.default_prog = { here .. '/wme' }
 
 -- Quiet flat palette. Calm, low-contrast background for the TUI.
 config.colors = {
