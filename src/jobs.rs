@@ -145,7 +145,7 @@ pub fn claim_due() -> Vec<(u64, String)> {
 async fn run_command(command: &str, id: u64) -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut child = match Command::new(&shell)
-        .arg("-c")
+        .arg("-l").arg("-c")
         .arg(command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
