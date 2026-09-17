@@ -16,7 +16,12 @@ set -euo pipefail
 #   Wryme.app/Contents/Resources/wezterm.lua  <- app-like WezTerm config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESC="$SCRIPT_DIR/../Resources"
-WME="$RESC/wme"
+# Prefer wme from PATH (installed via cargo install), fall back to bundled.
+if command -v wme >/dev/null 2>&1; then
+    WME="$(command -v wme)"
+else
+    WME="$RESC/wme"
+fi
 CFG="$RESC/wezterm.lua"
 
 # --- Locate wezterm ---------------------------------------------------------

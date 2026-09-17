@@ -7,7 +7,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WME="$HERE/wme"
+# Prefer wme from PATH (installed via cargo install), fall back to bundled.
+if command -v wme >/dev/null 2>&1; then
+    WME="$(command -v wme)"
+else
+    WME="$HERE/wme"
+fi
 CFG="$HERE/wezterm.lua"
 LAUNCHER="$HERE/wryme-launcher.sh"
 
