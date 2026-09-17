@@ -52,6 +52,12 @@ struct Args {
     #[arg(long)]
     station: Option<String>,
 
+    /// One-shot mode: send this prompt and print the reply to stdout,
+    /// then exit. No TUI is entered. Combine with --model to pin the
+    /// model and --system to prepend a system prompt.
+    #[arg(short, long)]
+    prompt: Option<String>,
+
     /// Optional system prompt prepended to every request.
     #[arg(long)]
     system: Option<String>,
@@ -93,6 +99,11 @@ async fn main() -> Result<()> {
         })?;
 
     let client = Client::new().context("building api client")?;
+
+    // One-shot mode: no TUI, just print the reply.
+    if let Some(prompt) = args.prompt.as_deref() {
+        return one_shot(&client, &active, &active_shop, args.system.as_deref(), prompt).await;
+    }
     tracing::info!(
         shop = %active_shop.name,
         model = %active.model,
@@ -119,6 +130,82 @@ async fn main() -> Result<()> {
 
     restore_terminal(&mut terminal).ok();
     result
+}
+
+/// One-shot mode: send a single prompt and print the reply to stdout.
+/// No TUI is entered. StreamEvents are drained and only the assistant
+/// text (Delta) is printed; reasoning (Brain), tool calls, and usage are
+/// skipped. Errors go to stderr with a non-zero exit.
+async fn one_shot(
+    client: &Client,
+    station: &station::Station,
+    shop: &shop::Shop,
+    system: Option<&str>,
+    prompt: &str,
+) -> Result<()> {
+    let mut messages: Vec<api::ApiMessage> = Vec::new();
+    if let Some(sys) = system {
+        messages.push(api::ApiMessage {
+            role: "system".into(),
+            content: sys.to_string(),
+            images: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: String::new(),
+            tool_result: String::new(),
+        });
+    }
+    messages.push(api::ApiMessage {
+        role: "user".into(),
+        content: prompt.to_string(),
+        images: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: String::new(),
+        tool_result: String::new(),
+    });
+
+    // One-shot mode keeps no memory: open the book engine in a throwaway
+    // temp dir so the `book` tool and preamble stay empty and isolated.
+    let engine = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot")).expect("open book"),
+    ));
+    let (tx, mut rx) = mpsc::unbounded_channel::<api::StreamEvent>();
+    let task = tokio::spawn({
+        let shop = shop.clone();
+        let station = station.clone();
+        let client = client.clone();
+        async move {
+            client
+                .stream_completion(shop, station, messages, None, engine, tx)
+                .await;
+        }
+    });
+
+    let mut out = String::new();
+    let mut err: Option<String> = None;
+    let mut done = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            api::StreamEvent::Delta { text } => out.push_str(&text),
+            api::StreamEvent::Error { message } => err = Some(message),
+            api::StreamEvent::Done => {
+                done = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    task.await.ok();
+
+    if let Some(e) = err {
+        eprintln!("wme: {e}");
+        return Err(anyhow::anyhow!(e));
+    }
+    if !done {
+        eprintln!("wme: stream ended without Done");
+        return Err(anyhow::anyhow!("stream ended without Done"));
+    }
+    print!("{out}");
+    Ok(())
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {

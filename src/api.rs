@@ -103,42 +103,44 @@ pub struct Client {
 }
 impl Client {
     pub fn new() -> Result<Self> {
-        let http = reqwest::Client::builder()
-             .user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")))
-             .proxy(Self::read_proxy_settings())
-             .build()
-             .context("building http client")?;
+        let mut builder = reqwest::Client::builder()
+             .user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")));
+        if let Some(proxy) = Self::read_proxy_settings() {
+            builder = builder.proxy(proxy);
+        }
+        let http = builder.build().context("building http client")?;
         Ok(Self { http })
      }
 
     /// Read proxy settings from HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars.
-    /// If NO_PROXY is not set, no hosts are excluded (so localhost goes
-    /// through the proxy). If NO_PROXY *is* set, it is parsed and applied.
-    fn read_proxy_settings() -> reqwest::Proxy {
+    /// None when no proxy env var is set. If NO_PROXY is not set, no hosts
+    /// are excluded (so localhost goes through the proxy). If NO_PROXY *is*
+    /// set, it is parsed and applied.
+    fn read_proxy_settings() -> Option<reqwest::Proxy> {
         let proxy_url = std::env::var("HTTP_PROXY")
              .or_else(|_| std::env::var("http_proxy"))
              .or_else(|_| std::env::var("HTTPS_PROXY"))
              .or_else(|_| std::env::var("https_proxy"))
-             .ok();
+             .ok()?;
 
-        match proxy_url {
-            Some(url) => {
-                let mut proxy = reqwest::Proxy::all(&url).unwrap();
-                 // If NO_PROXY is set, apply it so common exclusions
-                 // (localhost, 127.0.0.1, [::1]) work as the user expects.
-                if let Ok(no_proxy_str) =
-                        std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy"))
-                {
-                    let no_proxy = reqwest::NoProxy::from_string(&no_proxy_str);
-                    proxy = proxy.no_proxy(no_proxy);
-                }
-                proxy
+        let proxy = match reqwest::Proxy::all(&proxy_url) {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                // Invalid proxy URL in env: skip proxy rather than crash.
+                eprintln!("wryme: ignoring invalid proxy URL {proxy_url:?}: {e}");
+                return None;
             }
-            None => {
-                 // No proxy env vars set — no proxy at all.
-                reqwest::Proxy::all("").unwrap()
-            }
+        };
+        let mut proxy = proxy;
+        // If NO_PROXY is set, apply it so common exclusions
+        // (localhost, 127.0.0.1, [::1]) work as the user expects.
+        if let Ok(no_proxy_str) =
+                std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy"))
+        {
+            let no_proxy = reqwest::NoProxy::from_string(&no_proxy_str);
+            proxy = proxy.no_proxy(no_proxy);
         }
+        Some(proxy)
     }
     /// Panic-proof wrapper: guarantees Error + Done so a turn can never
     /// wedge `in_flight` forever.
