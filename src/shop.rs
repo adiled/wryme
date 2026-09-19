@@ -10,7 +10,7 @@
 //      for the "just install and point it somewhere" case.
 //   3. ~/.config/wryme/shops.toml. Any number of named shops.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -145,8 +145,8 @@ pub fn load_all() -> Result<Vec<Shop>> {
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let parsed: ShopsFile = toml::from_str(&text)
-                .with_context(|| format!("parsing {}", path.display()))?;
+            let parsed: ShopsFile =
+                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
             for def in parsed.shop {
                 out.push(def.resolve());
             }
@@ -276,10 +276,7 @@ async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> 
     if !shop.key.is_empty() {
         req = req.bearer_auth(&shop.key);
     }
-    let resp = req
-        .send()
-        .await
-        .with_context(|| format!("GET {}", url))?;
+    let resp = req.send().await.with_context(|| format!("GET {}", url))?;
     if !resp.status().is_success() {
         return Err(anyhow!("upstream {}", resp.status()));
     }
@@ -332,10 +329,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
         };
         assert_eq!(def(None).resolve().window, WindowMode::Full);
-        assert_eq!(
-            def(Some("warm".into())).resolve().window,
-            WindowMode::Warm
-        );
+        assert_eq!(def(Some("warm".into())).resolve().window, WindowMode::Warm);
     }
 
     #[test]

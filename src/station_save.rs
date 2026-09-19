@@ -6,7 +6,7 @@
 // end of the file. Update finds the [[station]] block whose `name` field
 // matches the target's name and replaces just those lines.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 
 use crate::station::Station;

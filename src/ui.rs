@@ -13,11 +13,11 @@
 //   └──────────────────────────────────────┘
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 

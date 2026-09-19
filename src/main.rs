@@ -4,14 +4,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{
-        Event, EventStream, KeyEventKind, DisableMouseCapture, EnableMouseCapture,
-    },
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::Stdout;
 use tokio::sync::mpsc;
 
@@ -24,7 +22,6 @@ mod demo;
 mod explore;
 mod input;
 mod jobs;
-mod tools;
 mod keys;
 mod md;
 mod popup;
@@ -32,6 +29,7 @@ mod popup_ui;
 mod shop;
 mod station;
 mod station_save;
+mod tools;
 mod ui;
 mod voice;
 
@@ -102,7 +100,14 @@ async fn main() -> Result<()> {
 
     // One-shot mode: no TUI, just print the reply.
     if let Some(prompt) = args.prompt.as_deref() {
-        return one_shot(&client, &active, &active_shop, args.system.as_deref(), prompt).await;
+        return one_shot(
+            &client,
+            &active,
+            &active_shop,
+            args.system.as_deref(),
+            prompt,
+        )
+        .await;
     }
     tracing::info!(
         shop = %active_shop.name,
@@ -220,7 +225,11 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -411,4 +420,3 @@ async fn run(
     }
     Ok(())
 }
-

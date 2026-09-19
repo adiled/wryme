@@ -1,7 +1,7 @@
 [package]
 name = "wryme"
 version = "1.7.10"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "wryme • that small, calm window where agents come to meet you"
 repository = "https://github.com/adiled/wryme"

@@ -273,10 +273,7 @@ pub fn is_book_tool(name: &str) -> bool {
 /// Run the invisible book tool. Locks the shared engine. The engine
 /// records every turn itself, so `deem` just points the unattributed
 /// rows at a compartment.
-async fn book_execute(
-    engine: &Arc<Mutex<book::Engine>>,
-    arguments: &str,
-) -> String {
+async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(v) => v,
         Err(_) => return format!("{BOOK_NAME}: could not parse arguments"),
@@ -284,14 +281,22 @@ async fn book_execute(
     let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
     match action {
         "find" => {
-            let query = v.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+            let query = v
+                .get("query")
+                .and_then(|q| q.as_str())
+                .unwrap_or("")
+                .to_string();
             let mut e = engine.lock().unwrap();
             e.note_lookup();
             let hits = book::match_compartments(&e.book, &query);
             render_find(&query, &hits)
         }
         "open" => {
-            let topic = v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let topic = v
+                .get("topic")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             let mut e = engine.lock().unwrap();
             match e.open(&topic) {
                 Ok(Some(text)) => text,
@@ -300,7 +305,11 @@ async fn book_execute(
             }
         }
         "read" => {
-            let topic = v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let topic = v
+                .get("topic")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             let e = engine.lock().unwrap();
             match book::read_compartment(&e.book, &topic) {
                 Ok(Some(msgs)) if !msgs.is_empty() => book::render_compartment(&msgs),
@@ -317,7 +326,11 @@ async fn book_execute(
             }
         }
         "dismiss" => {
-            let topic = v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let topic = v
+                .get("topic")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             let mut e = engine.lock().unwrap();
             e.dismiss(&topic);
             format!("dropped \"{topic}\" from the preamble")
@@ -332,18 +345,18 @@ fn render_find(query: &str, hits: &[&book::CompartmentMeta]) -> String {
     }
     let mut out = format!("pages matching \"{query}\":\n");
     for m in hits {
-        out.push_str(&format!(
-            "  {} — open: {}\n",
-            m.topic,
-            m.open.join(", ")
-        ));
+        out.push_str(&format!("  {} — open: {}\n", m.topic, m.open.join(", ")));
     }
     out
 }
 
 fn bookmark_from(v: &serde_json::Value) -> Bookmark {
     Bookmark {
-        topic: v.get("topic").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        topic: v
+            .get("topic")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
         tags: str_list(v, "tags"),
         people: str_list(v, "people"),
         facts: str_list(v, "facts"),
@@ -355,7 +368,11 @@ fn bookmark_from(v: &serde_json::Value) -> Bookmark {
 fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -474,10 +491,7 @@ mod tests {
     fn tool_defs_advertises_four_tools() {
         let defs = tool_defs();
         assert_eq!(defs.len(), 4);
-        let names: Vec<&str> = defs
-            .iter()
-            .map(|d| d["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&explore::tool_name().as_str()));
         assert!(names.contains(&check_name().as_str()));
@@ -485,7 +499,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_defs_chat_uses_nested_function_wrapper() {        // OpenAI Chat Completions (+ Ollama compat) requires
+    fn tool_defs_chat_uses_nested_function_wrapper() {
+        // OpenAI Chat Completions (+ Ollama compat) requires
         // {"type":"function","function":{name,description,parameters}}.
         // Flat shape is silently ignored -> model says "no tools".
         let defs = tool_defs_chat();

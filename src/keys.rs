@@ -28,14 +28,13 @@ fn attached_images(text: &str) -> Vec<String> {
         return Vec::new();
     }
     let img = matches!(
-        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
         Some("png" | "jpg" | "jpeg" | "gif" | "webp")
     );
-    if img {
-        vec![t.to_string()]
-    } else {
-        Vec::new()
-    }
+    if img { vec![t.to_string()] } else { Vec::new() }
 }
 
 use crate::api::{Client, StreamEvent};
@@ -106,12 +105,17 @@ pub fn handle_key(
                 return;
             }
             app.stop_voice();
-            if let Some(t) = in_flight.take() {
-                t.abort();
-                app.finish_streaming();
-                app.note("cancelled");
-            } else if !app.status.is_empty() {
-                app.note("");
+            match in_flight.take() {
+                Some(t) => {
+                    t.abort();
+                    app.finish_streaming();
+                    app.note("cancelled");
+                }
+                _ => {
+                    if !app.status.is_empty() {
+                        app.note("");
+                    }
+                }
             }
         }
         KeyCode::Enter => {
@@ -202,8 +206,15 @@ pub fn handle_mouse(m: MouseEvent, app: &mut App) {
     // When the station popup is open, the wheel scrolls the popup body
     // (two rows per tick), not the chat view behind it.
     if app.popup.mode != popup::Mode::Closed {
-        if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
-            let delta = if matches!(m.kind, MouseEventKind::ScrollUp) { 1 } else { -1 };
+        if matches!(
+            m.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                1
+            } else {
+                -1
+            };
             popup::scroll(app, delta * 2);
         }
         return;
@@ -377,7 +388,9 @@ mod tests {
         let (mime, b64) = crate::api::image_data_url(&path.to_string_lossy()).unwrap();
         assert_eq!(mime, "image/png");
         use base64::Engine;
-        let dec = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        let dec = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
         assert_eq!(&dec[..8], b"\x89PNG\r\n\x1a\n");
         std::fs::remove_file(&path).ok();
     }

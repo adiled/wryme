@@ -228,7 +228,12 @@ fn fuzzy(term: &str, names: &[String]) -> Vec<String> {
 fn rc_entries() -> Vec<RcEntry> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut out = Vec::new();
-    for f in ["~/.zshrc", "~/.bashrc", "~/.profile", "~/.config/fish/config.fish"] {
+    for f in [
+        "~/.zshrc",
+        "~/.bashrc",
+        "~/.profile",
+        "~/.config/fish/config.fish",
+    ] {
         let rel = f.trim_start_matches('~').trim_start_matches('/');
         let path = Path::new(&home).join(rel);
         if !path.is_file() {
@@ -272,7 +277,9 @@ fn function_name(line: &str) -> Option<String> {
     if t.contains('(') && t.contains('{') {
         let name = t.split('(').next()?.trim();
         if !name.is_empty()
-            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
         {
             return Some(name.to_string());
         }
@@ -388,11 +395,13 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
 
         let old = std::env::var("PATH").ok();
-        std::env::set_var("PATH", &dir);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("PATH", &dir) };
         assert_eq!(which("hello_tool").unwrap(), bin.display().to_string());
         assert!(path_bins().contains(&"hello_tool".to_string()));
         if let Some(p) = old {
-            std::env::set_var("PATH", p);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("PATH", p) };
         }
         let _ = fs::remove_dir_all(&dir);
     }

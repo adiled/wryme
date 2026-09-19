@@ -4,11 +4,11 @@
 // popup LOOKS like."
 
 use ratatui::{
+    Frame,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 
 use crate::app::App;

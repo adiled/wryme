@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn scroll_keeps_caret_at_right_edge() {
         let mut i = Input::new();
-        i.insert_str("a");               // 1 col, caret at 1
+        i.insert_str("a"); // 1 col, caret at 1
         assert_eq!(i.scroll_offset(10), 0);
         i.insert_str("bcdefghijklmnop"); // caret now at 16
         assert_eq!(i.scroll_offset(10), 7); // caret pinned at the right edge

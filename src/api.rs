@@ -16,6 +16,8 @@
 //                       previous_response_id next turn for session pinning
 //   Done                clean end of stream
 //   Error { message }   anything we couldn't classify as success
+use crate::shop::{Protocol, Shop};
+use crate::station::Station;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use serde::Serialize;
@@ -23,8 +25,6 @@ use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
-use crate::shop::{Protocol, Shop};
-use crate::station::Station;
 
 pub(crate) static TOOLLESS_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -47,7 +47,10 @@ pub(crate) fn mark_toolless(model: &str) {
 
 pub(crate) fn is_tool_unsupported_msg(msg: &str) -> bool {
     let s = msg.to_lowercase();
-    s.contains("tool") && (s.contains("not supported") || s.contains("unsupported") || s.contains("does not support"))
+    s.contains("tool")
+        && (s.contains("not supported")
+            || s.contains("unsupported")
+            || s.contains("does not support"))
 }
 /// A wire function-call to attach to an assistant ApiMessage.
 #[derive(Debug, Clone, Serialize)]
@@ -75,9 +78,15 @@ pub struct ApiMessage {
 }
 #[derive(Debug)]
 pub enum StreamEvent {
-    Delta { text: String },
-    Brain { text: String },
-    ToolCall { name: Option<String> },
+    Delta {
+        text: String,
+    },
+    Brain {
+        text: String,
+    },
+    ToolCall {
+        name: Option<String>,
+    },
     /// A tool call/result pair completed: persist it onto the current
     /// assistant message so the next turn's history carries the transcript.
     ToolResult {
@@ -86,16 +95,25 @@ pub enum StreamEvent {
         arguments: String,
         output: String,
     },
-    ResponseId { id: String },
+    ResponseId {
+        id: String,
+    },
     /// The shop rejected a warm window (`previous_response_id`
     /// unsupported): the UI should pin this shop to full windows and
     /// persist that, so the fallback trips once ever, not every turn.
-    WindowUnsupported { shop: String },
+    WindowUnsupported {
+        shop: String,
+    },
     /// Token usage for the finished turn (prompt + completion), when the
     /// server reports it: chat usage chunk, or responses completed event.
-    Usage { input: u64, output: u64 },
+    Usage {
+        input: u64,
+        output: u64,
+    },
     Done,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 #[derive(Clone)]
 pub struct Client {
@@ -103,14 +121,14 @@ pub struct Client {
 }
 impl Client {
     pub fn new() -> Result<Self> {
-        let mut builder = reqwest::Client::builder()
-             .user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")));
+        let mut builder =
+            reqwest::Client::builder().user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")));
         if let Some(proxy) = Self::read_proxy_settings() {
             builder = builder.proxy(proxy);
         }
         let http = builder.build().context("building http client")?;
         Ok(Self { http })
-     }
+    }
 
     /// Read proxy settings from HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars.
     /// None when no proxy env var is set. If NO_PROXY is not set, no hosts
@@ -118,10 +136,10 @@ impl Client {
     /// set, it is parsed and applied.
     fn read_proxy_settings() -> Option<reqwest::Proxy> {
         let proxy_url = std::env::var("HTTP_PROXY")
-             .or_else(|_| std::env::var("http_proxy"))
-             .or_else(|_| std::env::var("HTTPS_PROXY"))
-             .or_else(|_| std::env::var("https_proxy"))
-             .ok()?;
+            .or_else(|_| std::env::var("http_proxy"))
+            .or_else(|_| std::env::var("HTTPS_PROXY"))
+            .or_else(|_| std::env::var("https_proxy"))
+            .ok()?;
 
         let proxy = match reqwest::Proxy::all(&proxy_url) {
             Ok(proxy) => proxy,
@@ -134,9 +152,7 @@ impl Client {
         let mut proxy = proxy;
         // If NO_PROXY is set, apply it so common exclusions
         // (localhost, 127.0.0.1, [::1]) work as the user expects.
-        if let Ok(no_proxy_str) =
-                std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy"))
-        {
+        if let Ok(no_proxy_str) = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")) {
             let no_proxy = reqwest::NoProxy::from_string(&no_proxy_str);
             proxy = proxy.no_proxy(no_proxy);
         }

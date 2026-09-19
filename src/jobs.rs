@@ -145,7 +145,8 @@ pub fn claim_due() -> Vec<(u64, String)> {
 async fn run_command(command: &str, id: u64) -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut child = match Command::new(&shell)
-        .arg("-l").arg("-c")
+        .arg("-l")
+        .arg("-c")
         .arg(command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -261,7 +262,10 @@ mod tests {
             .expect("timed out")
             .expect("channel closed");
         let due = claim_due();
-        assert!(due.iter().any(|(id, out)| *id == h.id && out.contains("done")));
+        assert!(
+            due.iter()
+                .any(|(id, out)| *id == h.id && out.contains("done"))
+        );
         // claim_due removes every finished job, including ours.
         assert!(poll(h.id).is_none());
     }
@@ -297,8 +301,9 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(has_due());
         let due = claim_due();
-        assert!(due
-            .iter()
-            .any(|(id, out)| *id == h.id && out.contains("late")));
+        assert!(
+            due.iter()
+                .any(|(id, out)| *id == h.id && out.contains("late"))
+        );
     }
 }

@@ -11,16 +11,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::api::{ApiMessage, Client, StreamEvent, find_event_boundary, truncate};
 use crate::book;
 use crate::shop::Shop;
-use crate::tools;
 use crate::station::Station;
+use crate::tools;
 
 /// One tool call the model made, assembled from the streamed fragments.
 struct ChatToolCall {
@@ -40,10 +40,7 @@ pub(crate) async fn stream(
     // Local conversation we grow across follow-up requests. Starts as the
     // incoming history (which already carries the preamble system
     // messages); tool calls and their results get appended here.
-    let mut conv: Vec<serde_json::Value> = messages
-        .iter()
-        .filter_map(|m| json_msg(m))
-        .collect();
+    let mut conv: Vec<serde_json::Value> = messages.iter().filter_map(|m| json_msg(m)).collect();
 
     // Plant any finished async jobs back into the conversation as a
     // check-call + result pair, so the model sees the outcome naturally.
@@ -104,8 +101,8 @@ pub(crate) async fn stream(
             }));
         }
         for c in &broken {
-            let output =
-                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let output = "error: unusable tool call — every call needs an id and a function name"
+                .to_string();
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: c.id.clone(),
                 name: c.name.clone(),
@@ -219,7 +216,11 @@ async fn stream_once(
             .filter(|v| v.get("tool_calls").is_none() && v.get("tool_call_id").is_none())
             .cloned()
             .collect();
-        if filtered_conv.is_empty() { conv } else { &filtered_conv }
+        if filtered_conv.is_empty() {
+            conv
+        } else {
+            &filtered_conv
+        }
     } else {
         conv
     };
@@ -229,7 +230,9 @@ async fn stream_once(
         model: &station.model,
         messages: conv,
         stream: true,
-        stream_options: StreamOptions { include_usage: true },
+        stream_options: StreamOptions {
+            include_usage: true,
+        },
         temperature: station.dials.boldness,
         max_completion_tokens: station.dials.verbosity,
         reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
@@ -334,16 +337,21 @@ fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
         })
     };
     if !m.tool_calls.is_empty() {
-        let tcs: Vec<serde_json::Value> = m.tool_calls.iter().filter(|c| {
-            // Never replay unpaired calls: empty ids poison future turns.
-            !c.id.is_empty() && !c.name.is_empty()
-        }).map(|c| {
-            serde_json::json!({
-                "id": c.id,
-                "type": "function",
-                "function": { "name": c.name, "arguments": c.arguments },
+        let tcs: Vec<serde_json::Value> = m
+            .tool_calls
+            .iter()
+            .filter(|c| {
+                // Never replay unpaired calls: empty ids poison future turns.
+                !c.id.is_empty() && !c.name.is_empty()
             })
-        }).collect();
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "type": "function",
+                    "function": { "name": c.name, "arguments": c.arguments },
+                })
+            })
+            .collect();
         if tcs.is_empty() {
             base.as_object_mut().map(|o| o.remove("tool_calls"));
         } else {
@@ -389,7 +397,10 @@ fn handle_event(
                     if input + output > 0 {
                         let _ = tx.send(StreamEvent::Usage { input, output });
                     } else if let Some(t) = total.filter(|t| *t > 0) {
-                        let _ = tx.send(StreamEvent::Usage { input: t, output: 0 });
+                        let _ = tx.send(StreamEvent::Usage {
+                            input: t,
+                            output: 0,
+                        });
                     }
                 }
                 for choice in chunk.choices {
@@ -547,8 +558,6 @@ fn arg_string(v: &serde_json::Value) -> String {
     serde_json::to_string(v).unwrap_or_default()
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,7 +680,8 @@ mod tests {
     }
 
     #[test]
-    fn usage_chunk_emits_usage_event() {        let (tx, mut rx) = channel();
+    fn usage_chunk_emits_usage_event() {
+        let (tx, mut rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
         handle_event(
@@ -682,11 +692,18 @@ mod tests {
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Usage { input: 1200, output: 300 }));
+        assert!(matches!(
+            ev,
+            StreamEvent::Usage {
+                input: 1200,
+                output: 300
+            }
+        ));
     }
 
     #[test]
-    fn usage_chunk_parses_cleanly() {        let (tx, _rx) = channel();
+    fn usage_chunk_parses_cleanly() {
+        let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
         handle_event(

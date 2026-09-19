@@ -73,17 +73,16 @@ fn synth_file(body: &str, voice: Option<&str>, cur: &Cur) -> Option<std::path::P
 /// or failed.
 fn wait_releasable(cur: &Cur) -> bool {
     loop {
-        let done = if let Ok(mut guard) = cur.lock() {
-            match guard.as_mut() {
+        let done = match cur.lock() {
+            Ok(mut guard) => match guard.as_mut() {
                 Some(child) => match child.try_wait() {
                     Ok(Some(status)) => Some(status.success()),
                     Ok(None) => None,
                     Err(_) => Some(false),
                 },
                 None => Some(false),
-            }
-        } else {
-            None
+            },
+            _ => None,
         };
         match done {
             Some(ok) => return ok,
@@ -148,7 +147,7 @@ pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
     queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    r#gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub name: Option<String>,
 }
 
@@ -156,10 +155,10 @@ impl Speaker {
     pub fn new(voice: Option<String>) -> Self {
         let current = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
         let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let r#gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cur = current.clone();
         let cnt = queued.clone();
-        let thread_gen = gen.clone();
+        let thread_gen = r#gen.clone();
         let thread_voice = voice.clone();
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
@@ -229,13 +228,13 @@ impl Speaker {
             tx: Some(tx),
             current,
             queued,
-            gen,
+            r#gen,
             name: voice,
         }
     }
 
     pub fn say(&self, text: String) {
-        let g = self.gen.load(std::sync::atomic::Ordering::Relaxed);
+        let g = self.r#gen.load(std::sync::atomic::Ordering::Relaxed);
         if self.tx.is_some() {
             self.queued
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -259,7 +258,8 @@ impl Speaker {
     }
 
     pub fn stop(&mut self) {
-        self.gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.r#gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Stop);
         }

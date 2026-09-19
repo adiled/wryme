@@ -950,15 +950,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
 
-        assert!(deem_span(
-            &mut book,
-            &Bookmark {
-                topic: "t".into(),
-                ..Default::default()
-            }
-        )
-        .unwrap()
-        .contains("no new turns"));
+        assert!(
+            deem_span(
+                &mut book,
+                &Bookmark {
+                    topic: "t".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .contains("no new turns")
+        );
         assert_eq!(book.watermark, 0);
 
         book.pending.push(msg("user", "one", book.next_row));
@@ -978,15 +980,17 @@ mod tests {
         assert_eq!(compartment(&book, "t").unwrap().spans, vec![(0, 1)]);
 
         // Nothing new to deem now.
-        assert!(deem_span(
-            &mut book,
-            &Bookmark {
-                topic: "t".into(),
-                ..Default::default()
-            }
-        )
-        .unwrap()
-        .contains("no new turns"));
+        assert!(
+            deem_span(
+                &mut book,
+                &Bookmark {
+                    topic: "t".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .contains("no new turns")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

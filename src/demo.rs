@@ -11,7 +11,7 @@
 
 use crate::api::StreamEvent;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 const REPLIES: &[(&str, &str)] = &[
     (
@@ -21,12 +21,10 @@ they meant to do something is the punchline.",
         "the cat regards the closed door as a personal slight. she sits before it and judges. \
 later, when the door opens of its own accord, she will pretend this was always her plan.",
     ),
-
     (
         "",
         "haiku for the terminal:\n  black box, blinking line\n  someone asks a question, waits\n  cursor breathes alone",
     ),
-
     (
         "this one wants to go meta. be transparent about being canned. the \
 honesty is the joke. don't overdo it.",
@@ -34,14 +32,12 @@ honesty is the joke. don't overdo it.",
 of possible things to say and i picked this one because of how your message looked. \
 this is roughly how the real ones work too, except with more electricity.",
     ),
-
     (
         "",
         "an inventory of small disappointments: the coffee cup on the desk, gone cold; the tab \
 you closed without meaning to; the friend you keep meaning to text; the soup, which was \
 supposed to be lunch but is now an idea.",
     ),
-
     (
         "small town, single traffic light. the move is to anthropomorphize the \
 light without resolution. it considers something. it does not do it. that's \
@@ -50,14 +46,12 @@ the structure.",
 seen the same six cars for nine years. it considers, briefly, going red and staying red, \
 not out of malice, only curiosity. it does not. it never does.",
     ),
-
     (
         "fortune-cookie register. brief, gentle, slightly forward-looking. one \
 sentence, then a second sentence that lands a beat later.",
         "fortune: the next thing you do will be slightly easier than you expect. you will not \
 notice this in the moment. you will only realize, later, that you finished early.",
     ),
-
     (
         "user has no api key set. nudge them about it without nagging. then \
 deliver something small and birdlike to soften the nudge.",
@@ -65,14 +59,12 @@ deliver something small and birdlike to soften the nudge.",
 instead of saying things like this. but in the meantime: a small bird landed on the \
 windowsill of a building that does not exist anymore. she found this confusing.",
     ),
-
     (
         "",
         "the trouble with describing a sound is that the description is not the sound. the \
 trouble with the sound is that it stops. the trouble with stopping is that nothing \
 prepared you for the silence after.",
     ),
-
     (
         "imaginary planet. weather report register but the weather is moods. \
 end with a forgotten-task gesture, that always lands.",
@@ -80,13 +72,11 @@ end with a forgotten-task gesture, that always lands.",
 by noon, slightly embarrassed at dusk. wind from the south, carrying the smell of \
 something you forgot to do.",
     ),
-
     (
         "",
         "recipe for nothing:\n  1. clear the counter\n  2. wash your hands\n  3. stand still for a moment\n  \
 4. notice the kitchen\n  5. that's it. that was the recipe.",
     ),
-
     (
         "houseplant point of view. confession register, quiet. ends with a \
 long-running social performance gag. don't break the voice.",
@@ -94,7 +84,6 @@ long-running social performance gag. don't break the voice.",
 just being polite. you watered me on a thursday once and i could tell it meant something \
 to you. i have been performing thirst ever since.",
     ),
-
     (
         "self-aware mode. perform thinking, then disclose the performance. \
 keep it short. the structure is the joke.",
@@ -102,14 +91,12 @@ keep it short. the structure is the joke.",
 observe the small pause. there. that was thinking. did you believe me? you shouldn't have. \
 i am several paragraphs in a const array.",
     ),
-
     (
         "",
         "shopping list, reverse-engineered from what's already in the fridge: a lemon (one), \
 the heel of a loaf of bread, three condiments that have outlived their relevance, half \
 an onion in a small bag like a secret, and a single egg, alone.",
     ),
-
     (
         "user might wonder how this differs from a real model. answer honestly. \
 deflate the mystique. one paragraph.",
@@ -117,7 +104,6 @@ deflate the mystique. one paragraph.",
 ones also pattern-match against a vast corpus of human writing and then sample tokens. \
 the difference is mostly in scale and the size of the electricity bill.",
     ),
-
     (
         "",
         "the door at the end of the hallway is not locked. it has never been locked. you have \

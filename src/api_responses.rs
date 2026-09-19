@@ -17,16 +17,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::api::{find_event_boundary, truncate, ApiMessage, Client, StreamEvent};
+use crate::api::{ApiMessage, Client, StreamEvent, find_event_boundary, truncate};
 use crate::book;
 use crate::shop::{Shop, WindowMode};
-use crate::tools;
 use crate::station::{Patience, Station};
+use crate::tools;
 
 /// A function call the model made during one response stream.
 struct FuncCall {
@@ -134,10 +134,7 @@ async fn stream_warm(
         .find(|m| m.role == "system")
         .map(|m| m.content.as_str());
 
-    let conv_msgs: Vec<&ApiMessage> = messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .collect();
+    let conv_msgs: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
     let mut prev_id = previous_response_id;
     let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
@@ -147,10 +144,7 @@ async fn stream_warm(
             .flat_map(|m| json_msg(m))
             .collect()
     } else {
-        conv_msgs
-            .iter()
-            .flat_map(|m| json_msg(m))
-            .collect()
+        conv_msgs.iter().flat_map(|m| json_msg(m)).collect()
     };
     prepend_preamble_counted(&mut input, &engine, 0);
 
@@ -191,8 +185,8 @@ async fn stream_warm(
             .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
         let mut next_input = Vec::new();
         for c in &broken {
-            let output =
-                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let output = "error: unusable tool call — every call needs an id and a function name"
+                .to_string();
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: c.call_id.clone(),
                 name: c.name.clone(),
@@ -259,15 +253,9 @@ async fn stream_full(
         .find(|m| m.role == "system")
         .map(|m| m.content.as_str());
 
-    let conv_msgs: Vec<&ApiMessage> = messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .collect();
+    let conv_msgs: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
-    let mut input: Vec<serde_json::Value> = conv_msgs
-        .iter()
-        .flat_map(|m| json_msg(m))
-        .collect();
+    let mut input: Vec<serde_json::Value> = conv_msgs.iter().flat_map(|m| json_msg(m)).collect();
     let _preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
     // Plant any finished async jobs into the input as a check-call +
@@ -301,8 +289,8 @@ async fn stream_full(
         let mut follow = Vec::new();
         follow.extend(reasoning_items);
         for c in &broken {
-            let output =
-                "error: unusable tool call — every call needs an id and a function name".to_string();
+            let output = "error: unusable tool call — every call needs an id and a function name"
+                .to_string();
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: c.call_id.clone(),
                 name: c.name.clone(),
@@ -375,10 +363,11 @@ fn prepend_preamble_counted(
 ) -> usize {
     let drain = old_len.min(input.len());
     input.drain(..drain);
-    let (preambles, prod) = if let Ok(mut e) = engine.lock() {
-        (e.preamble(), e.take_prod())
-    } else {
-        return 0;
+    let (preambles, prod) = match engine.lock() {
+        Ok(mut e) => (e.preamble(), e.take_prod()),
+        _ => {
+            return 0;
+        }
     };
     let mut items: Vec<serde_json::Value> = preambles
         .into_iter()
@@ -491,7 +480,11 @@ async fn stream_once(
             })
             .cloned()
             .collect();
-        if filtered_input.is_empty() { input } else { &filtered_input }
+        if filtered_input.is_empty() {
+            input
+        } else {
+            &filtered_input
+        }
     } else {
         input
     };
@@ -585,7 +578,11 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
         if !m.content.is_empty() {
             items.push(serde_json::json!({ "role": m.role, "content": m.content }));
         }
-        for c in m.tool_calls.iter().filter(|c| !c.id.is_empty() && !c.name.is_empty()) {
+        for c in m
+            .tool_calls
+            .iter()
+            .filter(|c| !c.id.is_empty() && !c.name.is_empty())
+        {
             items.push(serde_json::json!({
                 "type": "function_call",
                 "call_id": c.id,
@@ -661,11 +658,16 @@ fn handle_event(
                     .and_then(|u| u.get("output_tokens"))
                     .and_then(|n| n.as_u64())
                     .unwrap_or(0);
-                let total = usage.and_then(|u| u.get("total_tokens")).and_then(|n| n.as_u64());
+                let total = usage
+                    .and_then(|u| u.get("total_tokens"))
+                    .and_then(|n| n.as_u64());
                 if input + output > 0 {
                     let _ = tx.send(StreamEvent::Usage { input, output });
                 } else if let Some(t) = total.filter(|t| *t > 0) {
-                    let _ = tx.send(StreamEvent::Usage { input: t, output: 0 });
+                    let _ = tx.send(StreamEvent::Usage {
+                        input: t,
+                        output: 0,
+                    });
                 }
             }
             "response.failed" => {
@@ -698,22 +700,24 @@ fn handle_event(
                 {
                     *new_id = Some(id.to_string());
                     tracing::Span::current().record("response_id", id);
-                    let _ = tx.send(StreamEvent::ResponseId {
-                        id: id.to_string(),
-                    });
+                    let _ = tx.send(StreamEvent::ResponseId { id: id.to_string() });
                 }
             }
             "response.output_text.delta" => {
                 if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
                     if !d.is_empty() {
-                        let _ = tx.send(StreamEvent::Delta { text: d.to_string() });
+                        let _ = tx.send(StreamEvent::Delta {
+                            text: d.to_string(),
+                        });
                     }
                 }
             }
             "response.reasoning_summary_text.delta" => {
                 if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
                     if !d.is_empty() {
-                        let _ = tx.send(StreamEvent::Brain { text: d.to_string() });
+                        let _ = tx.send(StreamEvent::Brain {
+                            text: d.to_string(),
+                        });
                     }
                 }
             }
@@ -909,7 +913,11 @@ mod tests {
             arguments: "{}".into(),
         });
         let items = json_msg(&asst);
-        assert!(items.iter().all(|i| i.get("type").and_then(|t| t.as_str()) != Some("function_call")));
+        assert!(
+            items
+                .iter()
+                .all(|i| i.get("type").and_then(|t| t.as_str()) != Some("function_call"))
+        );
 
         let mut tool = api_msg("tool");
         tool.tool_call_id = "".into();
@@ -932,7 +940,13 @@ mod tests {
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Usage { input: 345, output: 69 }));
+        assert!(matches!(
+            ev,
+            StreamEvent::Usage {
+                input: 345,
+                output: 69
+            }
+        ));
     }
 
     #[test]
@@ -961,7 +975,9 @@ mod tests {
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("max_output_tokens")));
+        assert!(
+            matches!(ev, StreamEvent::Error { message } if message.contains("max_output_tokens"))
+        );
     }
 
     #[test]
@@ -995,7 +1011,8 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_done_item_is_captured() {        let (tx, _rx) = channel();
+    fn reasoning_done_item_is_captured() {
+        let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut id = None;
