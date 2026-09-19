@@ -1,71 +1,86 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+# release.sh - bump version, sync lockfile, tag, and push.
+# Usage: ./release.sh [patch|minor|major]
 #
-# wryme release script
+# Examples:
+#     ./release.sh patch            # bumps 1.7.10 -> 1.7.11
+#     ./release.sh minor            # bumps 1.7.10 -> 1.8.0
+#     ./release.sh major            # bumps 1.7.10 -> 2.0.0
 #
-# Usage: ./release.sh [patch|minor|major|version]
-#   patch: 1.0.0 -> 1.0.1 (default)
-#   minor: 1.0.0 -> 1.1.0
-#   major: 1.0.0 -> 2.0.0
-#   version: specific e.g., 2.0.0
-#
+# Core (always): Cargo.toml + Cargo.lock.
 
-set -e
+# --- Project add-ons (optional) ----------------------------------------------
+# Extra files kept in version lockstep with Cargo.toml. Leave empty for plain
+# Rust projects. Example: (orchd-osx/build.zig.zon orchd-apple/build.zig.zon)
+EXTRA_VERSIONED_FILES=()
+# -----------------------------------------------------------------------------
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-
-VERSION=$(cat VERSION)
-TYPE="${1:-patch}"
-
-increment_version() {
-    local version=$1
-    local type=$2
-    IFS='.' read -ra VER <<< "$version"
-
-    case "$type" in
-        patch) VER[2]=$((VER[2] + 1)) ;;
-        minor) VER[1]=$((VER[1] + 1)); VER[2]=0 ;;
-        major) VER[0]=$((VER[0] + 1)); VER[1]=0; VER[2]=0 ;;
-    esac
-
-    echo "${VER[0]}.${VER[1]}.${VER[2]}"
-}
-
-if [[ "$TYPE" =~ ^(patch|minor|major)$ ]]; then
-    NEW_VERSION=$(increment_version "$VERSION" "$TYPE")
-    log_info "Releasing wryme v$VERSION -> v$NEW_VERSION ($TYPE bump)"
-else
-    NEW_VERSION="$TYPE"
-    log_info "Releasing wryme v$NEW_VERSION (specific)"
+BRANCH="$(git branch --show-current)"
+if [[ "$BRANCH" != "main" ]]; then
+  echo "error: must be on main (currently on '$BRANCH')" >&2
+  exit 1
 fi
 
-echo "$NEW_VERSION" > VERSION
+# Sync with origin
+git fetch origin main
+git reset --hard origin/main
 
-# Keep Cargo.toml's version in sync with VERSION
-sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+# Determine version
+NEW_VER=""
+case "${1:-patch}" in
+  patch)
+    OLD_VER="$(grep '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VER"
+    NEW_VER="$MAJOR.$MINOR.$((PATCH + 1))"
+     ;;
+  minor)
+    OLD_VER="$(grep '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VER"
+    NEW_VER="$MAJOR.$((MINOR + 1)).0"
+     ;;
+  major)
+    OLD_VER="$(grep '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VER"
+    NEW_VER="$((MAJOR + 1)).0.0"
+     ;;
+  *)
+    echo "error: unknown bump type '${1}' (use patch|minor|major)" >&2
+    exit 1
+     ;;
+esac
 
-# Keep Cargo.lock's own wryme entry in sync too, so `cargo build --locked`
-# and the published crate don't drift.
-sed -i '' "/^name = \"wryme\"/,/^version = \"[0-9.]*\"/s/version = \"[0-9.]*\"/version = \"$NEW_VERSION\"/" Cargo.lock
+# Files kept in version lockstep with Cargo.toml
+VERSIONED_FILES=(Cargo.toml "${EXTRA_VERSIONED_FILES[@]}")
 
-git add -A
-git commit -m "Release v$NEW_VERSION" || true
-git tag -d "v$NEW_VERSION" 2>/dev/null || true
-git tag "v$NEW_VERSION"
+# Every versioned file must already carry OLD_VER, or versions have drifted.
+for f in "${VERSIONED_FILES[@]}"; do
+  if ! grep -q "\"$OLD_VER\"" "$f"; then
+    echo "error: $f does not contain version $OLD_VER (files out of sync?)" >&2
+    exit 1
+  fi
+done
 
-log_info "Tagged v$NEW_VERSION"
-log_info "Pushing to remote..."
+# Bump versions in all lockstep files:
+#   Cargo.toml      -> `version = "x.y.z"`
+#   build.zig.zon   -> `.version = "x.y.z"`   (fingerprint is name-bound, unchanged)
+for f in "${VERSIONED_FILES[@]}"; do
+  sed -i '' -e "s/^version = \"$OLD_VER\"/version = \"$NEW_VER\"/" \
+            -e "s/\.version = \"$OLD_VER\"/.version = \"$NEW_VER\"/" "$f"
+done
 
-if [ -z "$(git remote get-url origin 2>/dev/null)" ]; then
-    git remote add origin git@github.com:adiled/wryme.git 2>/dev/null || true
+# Update Cargo.lock to match
+cargo generate-lockfile
+
+# Verify no uncommitted changes aside from version bump
+if ! git diff --quiet -- "${VERSIONED_FILES[@]}" Cargo.lock; then
+  git add "${VERSIONED_FILES[@]}" Cargo.lock
+  git commit -m "chore: bump to $NEW_VER"
 fi
 
-git push -u origin main && git push origin "v$NEW_VERSION" || log_warn "Push failed"
-
-log_info "=== Done ==="
+# Tag and push
+TAG="v$NEW_VER"
+git tag -a "$TAG" -m "v$NEW_VER"
+git push origin main --tags
+echo "Released $TAG ✓"
