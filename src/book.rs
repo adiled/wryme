@@ -750,8 +750,8 @@ fn merge_spans(spans: &mut Vec<(u64, u64)>) {
 fn index_schema() -> SchemaRef {
     let fields = vec![
         Field::new("opened_at", DataType::Int64, false),
-        // legacy column name — existing books read it
-        Field::new("updated_at", DataType::Int64, false),
+        // newer books write last_inked; reads fall back to the old name
+        Field::new("last_inked", DataType::Int64, false),
         Field::new("topic", DataType::Utf8, false),
         Field::new("tags", DataType::Utf8, true),
         Field::new("people", DataType::Utf8, true),
@@ -853,7 +853,11 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     for batch in reader {
         let batch = batch?;
         let opened = batch.column_by_name("opened_at").unwrap();
-        let last_inked = batch.column_by_name("updated_at").unwrap();
+        // old books carry the pre-rename column
+        let last_inked = batch
+            .column_by_name("last_inked")
+            .or_else(|| batch.column_by_name("updated_at"))
+            .unwrap();
         let topic = batch.column_by_name("topic").unwrap();
         let tags = batch.column_by_name("tags").unwrap();
         let people = batch.column_by_name("people").unwrap();
@@ -1255,6 +1259,55 @@ mod tests {
         let hits = match_compartments(&book, "bottles");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].topic, "olive oil bottles");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_book_reads_legacy_updated_at_column() {
+        let dir = tmpdir("legacy_col");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("stream")).unwrap();
+        // an index written before the rename — column says updated_at
+        let schema = Schema::new(vec![
+            Field::new("opened_at", DataType::Int64, false),
+            Field::new("updated_at", DataType::Int64, false),
+            Field::new("topic", DataType::Utf8, false),
+            Field::new("tags", DataType::Utf8, true),
+            Field::new("people", DataType::Utf8, true),
+            Field::new("facts", DataType::Utf8, true),
+            Field::new("plans", DataType::Utf8, true),
+            Field::new("open", DataType::Utf8, true),
+            Field::new("spans", DataType::Utf8, true),
+            Field::new("life_tokens", DataType::Int64, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(schema.clone()),
+            vec![
+                std::sync::Arc::new(Int64Array::from(vec![1])),
+                std::sync::Arc::new(Int64Array::from(vec![2])),
+                std::sync::Arc::new(StringArray::from(vec!["garden"])),
+                std::sync::Arc::new(StringArray::from(vec![Some("roses")])),
+                std::sync::Arc::new(StringArray::from(vec![Some("")])),
+                std::sync::Arc::new(StringArray::from(vec![Some("soil loves sun")])),
+                std::sync::Arc::new(StringArray::from(vec![Some("")])),
+                std::sync::Arc::new(StringArray::from(vec![Some("")])),
+                std::sync::Arc::new(StringArray::from(vec![Some("0:1")])),
+                std::sync::Arc::new(Int64Array::from(vec![10])),
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(dir.join("index.parquet")).unwrap();
+        let mut writer = ArrowWriter::try_new(file, std::sync::Arc::new(schema), None).unwrap();
+        writer.write(&batch).unwrap();
+        let _ = writer.close().unwrap();
+
+        // the fallback read maps the old column into last_inked
+        let book = open_book(&dir).unwrap();
+        let page = compartment(&book, "garden").unwrap();
+        assert_eq!(page.last_inked, 2);
+        assert_eq!(page.tags, vec!["roses"]);
+        assert_eq!(page.facts, vec!["soil loves sun"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
