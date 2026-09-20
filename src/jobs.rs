@@ -143,8 +143,8 @@ pub fn claim_due() -> Vec<(u64, String)> {
 /// stderr into the registry's `partial` as it arrives, then return the
 /// final output (stdout + stderr + exit code).
 async fn run_command(command: &str, id: u64) -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut child = match Command::new(&shell)
+    let shell = crate::shell_env::shell();
+    let mut child = match Command::new(shell)
         .arg("-l")
         .arg("-c")
         .arg(command)

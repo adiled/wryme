@@ -25,8 +25,7 @@ use crate::jobs;
 /// `zsh`, `bash`, `fish`. The model sees exactly the shell the human
 /// uses.
 pub fn shell_name() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    explore::shell_basename(&shell)
+    explore::shell_basename(crate::shell_env::shell())
 }
 
 /// What we tell the model. Emphasise: it IS the terminal, keep commands
@@ -96,8 +95,7 @@ pub async fn execute(
 
 /// The async-job check tool: `<shell>_check`, e.g. `zsh_check`.
 pub fn check_name() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    format!("{}_check", explore::shell_basename(&shell))
+    format!("{}_check", explore::shell_basename(crate::shell_env::shell()))
 }
 
 pub const CHECK_DESCRIPTION: &str = "\

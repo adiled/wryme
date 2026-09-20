@@ -24,8 +24,8 @@ use crate::api::truncate;
 /// The tool name the model calls. It's named after the user's real login
 /// shell: `zsh_explore` on a zsh machine, `bash_explore` on bash, etc.
 pub fn tool_name() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    format!("{}_explore", shell_basename(&shell))
+    let shell = crate::shell_env::shell();
+    format!("{}_explore", shell_basename(shell))
 }
 
 pub(crate) fn shell_basename(shell: &str) -> String {

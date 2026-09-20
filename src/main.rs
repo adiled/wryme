@@ -27,6 +27,7 @@ mod md;
 mod popup;
 mod popup_ui;
 mod shop;
+mod shell_env;
 mod station;
 mod station_save;
 mod tools;
@@ -64,6 +65,11 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+    // Adopt the user's real login shell + PATH before anything else, so a
+    // GUI-launched wme (Dock/Finder, minimal launchd PATH, no $SHELL) sees
+    // the same machine a terminal-launched one does. Makes the shell tool
+    // and its discovery deterministic across every launcher.
+    shell_env::bootstrap();
     let _sentry = sentry::init(sentry::ClientOptions {
         dsn: std::env::var("SENTRY_DSN")
             .ok()
