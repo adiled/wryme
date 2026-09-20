@@ -230,30 +230,19 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let used = app.usage_ctx + app.usage_out;
     let mut trailer: Vec<Span<'static>> = Vec::new();
     if used > 0 {
-        trailer.push(Span::styled(
-            format_k(used),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    if let Some((ink, fill)) = app
-        .reservoir
-        .lock()
-        .ok()
-        .and_then(|r| r.dip(&app.active_station.name))
-    {
-        if fill.is_some() || ink != crate::reservoir::Ink::Brisk {
-            let label = match fill {
-                Some(p) => format!("ink {p}%"),
-                None => format!("ink: {}", ink.label()),
-            };
-            let color = match ink {
-                crate::reservoir::Ink::Brisk => Color::DarkGray,
-                crate::reservoir::Ink::Thinning => Color::Yellow,
-                crate::reservoir::Ink::RunningDry => Color::LightRed,
-                crate::reservoir::Ink::Dry => Color::Red,
-            };
-            trailer.insert(0, Span::styled(label, Style::default().fg(color)));
-        }
+        let fill = app
+            .reservoir
+            .lock()
+            .ok()
+            .and_then(|r| r.dip(&app.active_station.name))
+            .unwrap_or(0.0);
+        let color = if fill >= 0.5 {
+            let t = ((fill - 0.5) / 0.5).clamp(0.0, 1.0);
+            Color::Rgb(255, (255.0 * (1.0 - t)) as u8, 0)
+        } else {
+            Color::DarkGray
+        };
+        trailer.push(Span::styled(format_k(used), Style::default().fg(color)));
     }
     if !trailer.is_empty() {
         let left_w: usize = pieces

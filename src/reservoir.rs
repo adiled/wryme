@@ -14,17 +14,6 @@ pub enum Ink {
     Dry,
 }
 
-impl Ink {
-    pub fn label(self) -> &'static str {
-        match self {
-            Ink::Brisk => "brisk",
-            Ink::Thinning => "thinning",
-            Ink::RunningDry => "running dry",
-            Ink::Dry => "dry",
-        }
-    }
-}
-
 const THIN_AT: f64 = 0.60;
 const RUNNING_DRY_AT: f64 = 0.80;
 const DRY_AT: f64 = 0.95;
@@ -65,7 +54,7 @@ pub struct Reservoir {
     full: bool,
     prod_ink: Ink,
     ink: Ink,
-    fill: Option<u64>,
+    fill: f64,
     soft: bool,
 }
 
@@ -85,7 +74,7 @@ impl Default for Reservoir {
             full: true,
             prod_ink: Ink::Brisk,
             ink: Ink::Brisk,
-            fill: None,
+            fill: 0.0,
             soft: false,
         }
     }
@@ -130,6 +119,8 @@ impl Reservoir {
         self.turn_model = None;
         self.turn_in = 0;
         self.turn_out = 0;
+        self.ink = Ink::Brisk;
+        self.fill = 0.0;
     }
 
     pub fn note_round(&mut self, station: &str, model: &str, input: u64, output: u64, full: bool) {
@@ -205,8 +196,9 @@ impl Reservoir {
         self.soft = self.canary();
         self.ink = self.level(ceiling, record_in, self.soft);
         self.fill = match ceiling {
-            Some(c) if c > 0 && self.full => Some(((turn_in * 100) / c).min(100)),
-            _ => None,
+            Some(c) if c > 0 && self.full => (turn_in as f64 / c as f64).min(1.0),
+            _ if record_in > 0 => (turn_in as f64 / record_in as f64).min(1.0),
+            _ => 0.0,
         };
         self.turn_station = None;
         self.turn_model = None;
@@ -220,6 +212,7 @@ impl Reservoir {
             m.ceiling = Some(m.ceiling.map_or(c, |old| old.min(c)));
             self.save();
             self.ink = Ink::Dry;
+            self.fill = 1.0;
             if first {
                 return Some(format!(
                     "the ink ran dry at {c} tokens — the book holds everything; \
@@ -230,6 +223,7 @@ impl Reservoir {
         let m = self.stations.get(station);
         if m.and_then(|m| m.ceiling).map(|c| self.turn_in >= c * DRY_AT as u64).unwrap_or(false) {
             self.ink = Ink::Dry;
+            self.fill = 1.0;
             return Some(
                 "the window ran dry — the book holds everything; start a fresh window"
                     .to_string(),
@@ -264,8 +258,8 @@ impl Reservoir {
         })
     }
 
-    pub fn dip(&self, station: &str) -> Option<(Ink, Option<u64>)> {
-        self.stations.get(station).map(|_| (self.ink, self.fill))
+    pub fn dip(&self, station: &str) -> Option<f64> {
+        self.stations.get(station).map(|_| self.fill)
     }
 
     pub fn loop_guard(&self, station: &str) -> LoopGuard {
