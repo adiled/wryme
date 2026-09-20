@@ -228,20 +228,49 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         }),
     ));
     let used = app.usage_ctx + app.usage_out;
+    let mut trailer: Vec<Span<'static>> = Vec::new();
     if used > 0 {
-        let label = format_k(used);
+        trailer.push(Span::styled(
+            format_k(used),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if let Some((ink, fill)) = app
+        .reservoir
+        .lock()
+        .ok()
+        .and_then(|r| r.gauge(&app.active_station.model))
+    {
+        if fill.is_some() || ink != crate::reservoir::Ink::Brisk {
+            let label = match fill {
+                Some(p) => format!("ink {p}%"),
+                None => format!("ink: {}", ink.label()),
+            };
+            let color = match ink {
+                crate::reservoir::Ink::Brisk => Color::DarkGray,
+                crate::reservoir::Ink::Thinning => Color::Yellow,
+                crate::reservoir::Ink::RunningDry => Color::LightRed,
+                crate::reservoir::Ink::Dry => Color::Red,
+            };
+            trailer.insert(0, Span::styled(label, Style::default().fg(color)));
+        }
+    }
+    if !trailer.is_empty() {
         let left_w: usize = pieces
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
+        let tr_w: usize = trailer
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
         let bar_w = chunks[2].width as usize;
-        let uw = UnicodeWidthStr::width(label.as_str());
-        if bar_w > left_w + uw + 2 {
-            pieces.push(Span::raw(" ".repeat(bar_w - left_w - uw)));
+        if bar_w > left_w + tr_w + 2 {
+            pieces.push(Span::raw(" ".repeat(bar_w - left_w - tr_w)));
         } else {
             pieces.push(Span::raw("  "));
         }
-        pieces.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+        pieces.extend(trailer);
     }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);

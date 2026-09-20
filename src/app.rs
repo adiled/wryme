@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::api::{ApiMessage, ApiToolCall};
 use crate::book;
 use crate::popup::Popup;
+use crate::reservoir::Reservoir;
 use crate::shop::Shop;
 use crate::station::Station;
 
@@ -157,6 +158,9 @@ pub struct App {
     /// so the streaming protocol and the background delivery can both
     /// reach it (the invisible `book` tool locks it in the flow).
     pub engine: Arc<Mutex<book::Engine>>,
+    /// The reservoir: per-model learned ceilings and the window's ink
+    /// level. Shared the same way as the engine.
+    pub reservoir: Arc<Mutex<Reservoir>>,
     /// Monotonic counter for logical turns; bumped by begin_assistant and
     /// stamped onto every cluster of that turn.
     turn_counter: u64,
@@ -212,6 +216,7 @@ impl App {
             engine: Arc::new(Mutex::new(
                 book::open_engine(&book_dir()).expect("open book"),
             )),
+            reservoir: Arc::new(Mutex::new(Reservoir::load())),
             turn_counter: 0,
             last_stream_was_brain: false,
         }
@@ -477,6 +482,37 @@ impl App {
                 }
             }
 
+            // Close the reservoir's record for this turn: one synthesized
+            // Record per turn, fed to the brainrot canary.
+            let user_text = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let brain_text: String = self
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.brain.is_empty())
+                .map(|m| m.brain.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let tool_chars: u64 = self
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant && m.turn_id == tid)
+                .map(|m| {
+                    m.tool_events
+                        .iter()
+                        .map(|t| t.arguments.len() + t.result.len())
+                        .sum::<usize>() as u64
+                })
+                .sum();
+            if let Ok(mut res) = self.reservoir.lock() {
+                res.end_turn(user_text, &brain_text, tool_chars);
+            }
+
             // Drop empty clusters of this turn so the screen does not show a
             // confusing empty bubble. Server hiccups and pre-delta errors are
             // common causes. If upstream sent an error, the status bar already
@@ -526,6 +562,20 @@ impl App {
             // The book-writing prod: a quiet system reminder the engine
             // slips the agent once when an unattributed thread is weightful.
             if let Some(prod) = engine.take_prod() {
+                out.push(ApiMessage {
+                    role: "system".into(),
+                    content: prod,
+                    images: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: String::new(),
+                    tool_result: String::new(),
+                });
+            }
+        }
+        // The reservoir prod: once per ink-band escalation, steer the agent
+        // toward deeming before the window runs dry.
+        if let Ok(mut res) = self.reservoir.lock() {
+            if let Some(prod) = res.take_prod() {
                 out.push(ApiMessage {
                     role: "system".into(),
                     content: prod,

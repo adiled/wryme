@@ -132,6 +132,7 @@ pub fn handle_key(
                 tracing::info!("window start");
             }
             app.push_user(text, images);
+            let _ = app.reservoir.lock().map(|mut r| r.turn_started());
             app.begin_assistant();
             app.stop_voice();
             app.unmute_voice();
@@ -147,10 +148,11 @@ pub fn handle_key(
             let station = app.active_station.clone();
             let client = client.clone();
             let engine = app.engine.clone();
+            let reservoir = app.reservoir.clone();
             let tx = tx.clone();
             *in_flight = Some(tokio::spawn(async move {
                 client
-                    .stream_completion(shop, station, msgs, prev_id, engine, tx)
+                    .stream_completion(shop, station, msgs, prev_id, engine, reservoir, tx)
                     .await;
             }));
         }

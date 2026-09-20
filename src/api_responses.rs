@@ -49,6 +49,7 @@ pub(crate) async fn stream(
     messages: Vec<ApiMessage>,
     previous_response_id: Option<String>,
     engine: Arc<Mutex<book::Engine>>,
+    reservoir: Arc<Mutex<crate::reservoir::Reservoir>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     if shop.window == WindowMode::Warm {
@@ -93,13 +94,13 @@ pub(crate) async fn stream(
                     let _ = tx.send(StreamEvent::WindowUnsupported {
                         shop: shop.name.clone(),
                     });
-                    return stream_full(client, shop, station, messages, engine, tx).await;
+                    return stream_full(client, shop, station, messages, engine, reservoir, tx).await;
                 }
                 return Err(e);
             }
         }
     }
-    match stream_full(client, shop, station, messages.clone(), engine.clone(), tx).await {
+    match stream_full(client, shop, station, messages.clone(), engine.clone(), reservoir.clone(), tx).await {
         Ok(()) => Ok(()),
         Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
             if crate::api::is_toolless(&station.model) {
@@ -110,7 +111,7 @@ pub(crate) async fn stream(
             let _ = tx.send(StreamEvent::Error {
                 message: "tools unsupported by model, retrying without tools".into(),
             });
-            stream_full(client, shop, station, messages, engine, tx).await
+            stream_full(client, shop, station, messages, engine, reservoir, tx).await
         }
         Err(e) => Err(e),
     }
@@ -169,7 +170,7 @@ async fn stream_warm(
 
     let mut bad_rounds: u32 = 0;
     loop {
-        let (calls, new_id, _) = stream_once(
+        let (calls, new_id, _, _) = stream_once(
             client,
             shop,
             station,
@@ -246,6 +247,7 @@ async fn stream_full(
     station: &Station,
     messages: Vec<ApiMessage>,
     engine: Arc<Mutex<book::Engine>>,
+    reservoir: Arc<Mutex<crate::reservoir::Reservoir>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     let instructions: Option<&str> = messages
@@ -281,7 +283,7 @@ async fn stream_full(
 
     let mut bad_rounds: u32 = 0;
     loop {
-        let (calls, _new_id, reasoning_items) =
+        let (calls, _new_id, reasoning_items, last_in) =
             stream_once(client, shop, station, &input, None, false, instructions, tx).await?;
         let (paired, broken): (Vec<_>, Vec<_>) = calls
             .into_iter()
@@ -341,6 +343,17 @@ async fn stream_full(
                 "output": output,
             }));
         }
+        // Trip: a stateless Full replay re-sends the whole transcript per
+        // round; stop before one more round crosses into the dry band.
+        if let Ok(res) = reservoir.lock() {
+            if res
+                .loop_guard(&station.model)
+                .trips(true, last_in, crate::reservoir::ROUND_GROWTH_EST)
+            {
+                tracing::warn!(model=%station.model, in=%last_in, "ink dry in tool loop — stopping the turn");
+                return Ok(());
+            }
+        }
         input.extend(follow);
         // preamble is top-of-conversation only — not re-pinned on every tool
         // follow-up (would be insane on long stateless replays).
@@ -394,9 +407,9 @@ fn prepend_preamble_counted(
 
 /// One request/response round. Streams content/brain/tool events to `tx`,
 /// collects any function calls the model made plus completed reasoning
-/// items (for stateless resume), and returns them with the new response
-/// id (captured for the UI; never replayed — `store: false` keeps no
-/// server state).
+/// items (for stateless resume), the new response id (captured for the UI;
+/// never replayed — `store: false` keeps no server state), and the
+/// reported prompt size.
 async fn stream_once(
     client: &Client,
     shop: &Shop,
@@ -406,7 +419,7 @@ async fn stream_once(
     store: bool,
     instructions: Option<&str>,
     tx: &UnboundedSender<StreamEvent>,
-) -> Result<(Vec<FuncCall>, String, Vec<serde_json::Value>)> {
+) -> Result<(Vec<FuncCall>, String, Vec<serde_json::Value>, u64)> {
     #[derive(Serialize)]
     struct ResponsesReq<'a> {
         model: &'a str,
@@ -535,6 +548,7 @@ async fn stream_once(
     let mut calls: Vec<FuncCall> = Vec::new();
     let mut reasoning_items: Vec<serde_json::Value> = Vec::new();
     let mut new_id: Option<String> = None;
+    let mut last_in: u64 = 0;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading sse chunk")?;
@@ -545,15 +559,29 @@ async fn stream_once(
             };
             let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
             let event = &event_bytes[..end.body_len];
-            handle_event(event, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
+            handle_event(
+                event,
+                tx,
+                &mut calls,
+                &mut reasoning_items,
+                &mut new_id,
+                &mut last_in,
+            )?;
         }
     }
     if !buf.is_empty() {
-        handle_event(&buf, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
+        handle_event(
+            &buf,
+            tx,
+            &mut calls,
+            &mut reasoning_items,
+            &mut new_id,
+            &mut last_in,
+        )?;
     }
 
     let new_id = new_id.context("no response.created seen")?;
-    Ok((calls, new_id, reasoning_items))
+    Ok((calls, new_id, reasoning_items, last_in))
 }
 
 fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
@@ -628,6 +656,7 @@ fn handle_event(
     calls: &mut Vec<FuncCall>,
     reasoning: &mut Vec<serde_json::Value>,
     new_id: &mut Option<String>,
+    last_in: &mut u64,
 ) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
     for line in text.lines() {
@@ -662,8 +691,10 @@ fn handle_event(
                     .and_then(|u| u.get("total_tokens"))
                     .and_then(|n| n.as_u64());
                 if input + output > 0 {
+                    *last_in = input;
                     let _ = tx.send(StreamEvent::Usage { input, output });
                 } else if let Some(t) = total.filter(|t| *t > 0) {
+                    *last_in = t;
                     let _ = tx.send(StreamEvent::Usage {
                         input: t,
                         output: 0,
@@ -931,12 +962,14 @@ mod tests {
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut id = None;
+        let mut last_in = 0;
         handle_event(
             b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":345,\"output_tokens\":69,\"total_tokens\":414}}}\n\n",
             &tx,
             &mut calls,
             &mut reasoning,
             &mut id,
+        &mut last_in,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -955,12 +988,14 @@ mod tests {
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut id = None;
+        let mut last_in = 0;
         handle_event(
             b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n",
             &tx,
             &mut calls,
             &mut reasoning,
             &mut id,
+        &mut last_in,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -972,6 +1007,7 @@ mod tests {
             &mut calls,
             &mut reasoning,
             &mut id,
+        &mut last_in,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -988,14 +1024,17 @@ mod tests {
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut id = None;
+        let mut last_in = 0;
         handle_event(
             b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"\"}}\n\n",
             &tx, &mut calls, &mut reasoning, &mut id,
+        &mut last_in,
         )
         .unwrap();
         handle_event(
             b"data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
             &tx, &mut calls, &mut reasoning, &mut id,
+        &mut last_in,
         )
         .unwrap();
         assert_eq!(calls.len(), 1);
@@ -1016,12 +1055,14 @@ mod tests {
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut id = None;
+        let mut last_in = 0;
         handle_event(
             b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
             &tx,
             &mut calls,
             &mut reasoning,
             &mut id,
+        &mut last_in,
         )
         .unwrap();
         assert_eq!(reasoning.len(), 1);
