@@ -343,11 +343,9 @@ async fn stream_full(
                 "output": output,
             }));
         }
-        // Trip: a stateless Full replay re-sends the whole transcript per
-        // round; stop before one more round crosses into the dry band.
         if let Ok(res) = reservoir.lock() {
             if res
-                .loop_guard(&station.model)
+                .loop_guard(&station.name)
                 .trips(true, last_in, crate::reservoir::ROUND_GROWTH_EST)
             {
                 tracing::warn!(model=%station.model, in=%last_in, "ink dry in tool loop — stopping the turn");

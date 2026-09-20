@@ -239,7 +239,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         .reservoir
         .lock()
         .ok()
-        .and_then(|r| r.gauge(&app.active_station.model))
+        .and_then(|r| r.dip(&app.active_station.name))
     {
         if fill.is_some() || ink != crate::reservoir::Ink::Brisk {
             let label = match fill {

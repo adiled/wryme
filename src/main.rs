@@ -377,10 +377,11 @@ async fn run(
                         // tokens accumulate across the window.
                         app.usage_ctx = input;
                         app.usage_out += output;
+                        let station = app.active_station.name.clone();
                         let model = app.active_station.model.clone();
                         let full = app.active_shop.window == crate::shop::WindowMode::Full;
                         if let Ok(mut res) = app.reservoir.lock() {
-                            res.note_round(&model, input, output, full);
+                            res.note_round(&station, &model, input, output, full);
                         }
                     }
                     StreamEvent::Done => {
@@ -403,12 +404,12 @@ async fn run(
                     }
                     StreamEvent::Error { message } => {
                         tracing::error!(err = %message, "turn error");
-                        let model = app.active_station.model.clone();
+                        let station = app.active_station.name.clone();
                         let friendly = app
                             .reservoir
                             .lock()
                             .ok()
-                            .and_then(|mut r| r.note_error(&model, &message));
+                            .and_then(|mut r| r.note_error(&station, &message));
                         match friendly {
                             Some(f) => app.note(f),
                             None => app.note(format!("upstream: {message}")),

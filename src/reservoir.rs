@@ -1,9 +1,3 @@
-// The reservoir — the window's ink supply.
-// Watches prompt size vs a learned ceiling, smells the soft death, and
-// prods the agent to deem before the ink runs dry. Instrument: ccft's
-// pure brainrot functions over per-turn Records synthesized from wryme's
-// own telemetry. No ledger files, no daemon.
-
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -36,14 +30,10 @@ const RUNNING_DRY_AT: f64 = 0.80;
 const DRY_AT: f64 = 0.95;
 const MIN_CEILING: u64 = 1_000;
 const MAX_CEILING: u64 = 50_000_000;
-/// Estimated tokens a tool follow-up round adds in Full mode.
 pub const ROUND_GROWTH_EST: u64 = 1_500;
 const CANARY_MIN_RECORDS: usize = 8;
-/// bot_score above this, or a stall trend at this × the window median.
 const CANARY_BOT_SCORE: u32 = 70;
 const CANARY_STALL_RATIO: f64 = 1.5;
-/// Past this fraction of the largest prompt ever handled, the next
-/// request is uncharted water.
 const RECORD_FRACTION: f64 = 0.92;
 
 fn now_secs() -> f64 {
@@ -54,7 +44,7 @@ fn now_secs() -> f64 {
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ModelInk {
+pub struct StationInk {
     pub ceiling: Option<u64>,
     pub record_in: u64,
     pub turns: u64,
@@ -63,11 +53,12 @@ pub struct ModelInk {
 #[derive(Debug)]
 pub struct Reservoir {
     path: PathBuf,
-    models: HashMap<String, ModelInk>,
+    stations: HashMap<String, StationInk>,
     records: Vec<Record>,
     seen: HashSet<String>,
     start_time: Option<SystemTime>,
     start: Option<Instant>,
+    turn_station: Option<String>,
     turn_model: Option<String>,
     turn_in: u64,
     turn_out: u64,
@@ -82,11 +73,12 @@ impl Default for Reservoir {
     fn default() -> Self {
         Self {
             path: reservoir_path(),
-            models: HashMap::new(),
+            stations: HashMap::new(),
             records: Vec::new(),
             seen: HashSet::new(),
             start_time: None,
             start: None,
+            turn_station: None,
             turn_model: None,
             turn_in: 0,
             turn_out: 0,
@@ -113,8 +105,8 @@ impl Reservoir {
         let mut r = Self::default();
         r.path = path;
         if let Ok(text) = std::fs::read_to_string(&r.path) {
-            if let Ok(models) = serde_json::from_str::<HashMap<String, ModelInk>>(&text) {
-                r.models = models;
+            if let Ok(stations) = serde_json::from_str::<HashMap<String, StationInk>>(&text) {
+                r.stations = stations;
             }
         }
         r
@@ -122,41 +114,40 @@ impl Reservoir {
 
     fn save(&self) {
         let _ = std::fs::create_dir_all(self.path.parent().unwrap_or(&self.path));
-        if let Ok(text) = serde_json::to_string(&self.models) {
+        if let Ok(text) = serde_json::to_string(&self.stations) {
             let _ = std::fs::write(&self.path, text);
         }
     }
 
-    fn model_mut(&mut self, model: &str) -> &mut ModelInk {
-        self.models.entry(model.to_string()).or_default()
+    fn station_mut(&mut self, name: &str) -> &mut StationInk {
+        self.stations.entry(name.to_string()).or_default()
     }
 
     pub fn turn_started(&mut self) {
         self.start_time = Some(SystemTime::now());
         self.start = Some(Instant::now());
+        self.turn_station = None;
         self.turn_model = None;
         self.turn_in = 0;
         self.turn_out = 0;
     }
 
-    /// `full`: the shop re-sends the whole transcript per round, so the
-    /// last reported prompt size is the true window depth.
-    pub fn note_round(&mut self, model: &str, input: u64, output: u64, full: bool) {
+    pub fn note_round(&mut self, station: &str, model: &str, input: u64, output: u64, full: bool) {
         self.full = full;
+        self.turn_station = Some(station.to_string());
         self.turn_model = Some(model.to_string());
         self.turn_in = input;
         self.turn_out += output;
     }
 
-    /// Synthesize one Record and recompute the ink level. No-op on turns
-    /// with no usage (aborted early) so the record stream stays clean.
     pub fn end_turn(&mut self, user_text: &str, brain_text: &str, tool_chars: u64) {
         if self.turn_in == 0 && self.turn_out == 0 {
             return;
         }
-        let Some(model) = self.turn_model.clone() else {
+        let Some(station) = self.turn_station.clone() else {
             return;
         };
+        let model = self.turn_model.clone().unwrap_or_default();
         let now = now_secs();
         let ts = self
             .start_time
@@ -202,7 +193,7 @@ impl Reservoir {
         }
 
         let turn_in = self.turn_in;
-        let m = self.model_mut(&model);
+        let m = self.station_mut(&station);
         m.turns += 1;
         if turn_in > m.record_in {
             m.record_in = turn_in;
@@ -217,15 +208,14 @@ impl Reservoir {
             Some(c) if c > 0 && self.full => Some(((turn_in * 100) / c).min(100)),
             _ => None,
         };
+        self.turn_station = None;
         self.turn_model = None;
     }
 
-    /// Learn the ceiling from a context wall, arm the dry prod, and hand
-    /// back a friendly status line when the ink ran out.
-    pub fn note_error(&mut self, model: &str, message: &str) -> Option<String> {
+    pub fn note_error(&mut self, station: &str, message: &str) -> Option<String> {
         let learned = learn_ceiling(message);
         if let Some(c) = learned {
-            let m = self.model_mut(model);
+            let m = self.station_mut(station);
             let first = m.ceiling.is_none();
             m.ceiling = Some(m.ceiling.map_or(c, |old| old.min(c)));
             self.save();
@@ -237,7 +227,7 @@ impl Reservoir {
                 ));
             }
         }
-        let m = self.models.get(model);
+        let m = self.stations.get(station);
         if m.and_then(|m| m.ceiling).map(|c| self.turn_in >= c * DRY_AT as u64).unwrap_or(false) {
             self.ink = Ink::Dry;
             return Some(
@@ -248,7 +238,6 @@ impl Reservoir {
         None
     }
 
-    /// Delivered once per escalation — a band never nags.
     pub fn take_prod(&mut self) -> Option<String> {
         let ink = self.ink;
         if ink <= self.prod_ink {
@@ -275,21 +264,18 @@ impl Reservoir {
         })
     }
 
-    pub fn gauge(&self, model: &str) -> Option<(Ink, Option<u64>)> {
-        self.models.get(model).map(|_| (self.ink, self.fill))
+    pub fn dip(&self, station: &str) -> Option<(Ink, Option<u64>)> {
+        self.stations.get(station).map(|_| (self.ink, self.fill))
     }
 
-    pub fn loop_guard(&self, model: &str) -> LoopGuard {
-        let est = self.models.get(model).map(|m| {
+    pub fn loop_guard(&self, station: &str) -> LoopGuard {
+        let est = self.stations.get(station).map(|m| {
             m.ceiling
                 .unwrap_or_else(|| if m.record_in > 0 { m.record_in * 11 / 10 } else { 0 })
         }).filter(|&e| e > 0);
         LoopGuard { est }
     }
 
-    /// Soft death: brainrot's bot score over a self-baseline, plus a raw
-    /// stall trend (latency per output token). Both need history to be
-    /// honest.
     fn canary(&self) -> bool {
         if self.records.len() < CANARY_MIN_RECORDS {
             return false;
@@ -313,8 +299,6 @@ impl Reservoir {
         l > CANARY_STALL_RATIO * p && l > 0.0
     }
 
-    /// Geometric on the learned ceiling in Full windows; canary and
-    /// uncharted-water proximity otherwise.
     fn level(&self, ceiling: Option<u64>, record_in: u64, soft: bool) -> Ink {
         if let Some(c) = ceiling {
             if c > 0 && self.full {
@@ -344,15 +328,12 @@ impl Reservoir {
     }
 }
 
-/// Snapshot for the protocol tool loop — no locking, consulted once per round.
 #[derive(Debug, Clone, Copy)]
 pub struct LoopGuard {
     est: Option<u64>,
 }
 
 impl LoopGuard {
-    /// True when one more Full-window tool round would cross into the dry
-    /// band. `full`: the shop re-sends the whole transcript each round.
     pub fn trips(&self, full: bool, last_in: u64, per_round_est: u64) -> bool {
         if !full {
             return false;
@@ -370,9 +351,6 @@ impl LoopGuard {
 fn learn_ceiling(msg: &str) -> Option<u64> {
     let lower = msg.to_lowercase();
     let bytes = lower.as_bytes();
-    // Anchor: tight byte ranges around each ceiling word. Usage counts
-    // ("you requested 203017 tokens") sit away from these words; the
-    // ceiling sits on "maximum"/"context"/"window"/"limit".
     let mut anchors: Vec<(usize, usize)> = Vec::new();
     for w in ["maximum", "max", "context", "window", "limit"] {
         let mut from = 0;
@@ -438,17 +416,17 @@ mod tests {
     fn phases_follow_the_ceiling() {
         let mut r = Reservoir::default();
         let m = "m1";
-        r.model_mut(m).ceiling = Some(100_000);
-        r.note_round(m, 10_000, 100, true);
+        r.station_mut(m).ceiling = Some(100_000);
+        r.note_round(m, "m1", 10_000, 100, true);
         r.end_turn("hi there", "", 0);
         assert_eq!(r.ink, Ink::Brisk);
-        r.note_round(m, 65_000, 100, true);
+        r.note_round(m, "m1", 65_000, 100, true);
         r.end_turn("b", "", 0);
         assert_eq!(r.ink, Ink::Thinning);
-        r.note_round(m, 90_000, 100, true);
+        r.note_round(m, "m1", 90_000, 100, true);
         r.end_turn("c", "", 0);
         assert_eq!(r.ink, Ink::RunningDry);
-        r.note_round(m, 98_000, 100, true);
+        r.note_round(m, "m1", 98_000, 100, true);
         r.end_turn("d", "", 0);
         assert_eq!(r.ink, Ink::Dry);
     }
@@ -457,12 +435,12 @@ mod tests {
     fn prod_escalates_once_per_band() {
         let mut r = Reservoir::default();
         let m = "m2";
-        r.model_mut(m).ceiling = Some(100_000);
-        r.note_round(m, 65_000, 1, true);
+        r.station_mut(m).ceiling = Some(100_000);
+        r.note_round(m, "m2", 65_000, 1, true);
         r.end_turn("x", "", 0);
         assert!(r.take_prod().is_some());
         assert!(r.take_prod().is_none());
-        r.note_round(m, 90_000, 1, true);
+        r.note_round(m, "m2", 90_000, 1, true);
         r.end_turn("y", "", 0);
         let p = r.take_prod().expect("running dry delivers once");
         assert!(p.contains("running dry"));
@@ -472,11 +450,11 @@ mod tests {
     #[test]
     fn record_in_tracks_max_prompt() {
         let mut r = Reservoir::default();
-        r.note_round("m3", 500, 10, true);
+        r.note_round("m3", "m3", 500, 10, true);
         r.end_turn("a b c d e f g h i j k l m n o p q r s t", "", 0);
-        r.note_round("m3", 1200, 10, true);
+        r.note_round("m3", "m3", 1200, 10, true);
         r.end_turn("more words for balance here today", "", 0);
-        assert_eq!(r.models["m3"].record_in, 1200);
+        assert_eq!(r.stations["m3"].record_in, 1200);
     }
 
     #[test]
@@ -490,8 +468,8 @@ mod tests {
     #[test]
     fn loop_guard_trips_only_near_the_wall() {
         let mut r = Reservoir::default();
-        r.model_mut("g").ceiling = Some(100_000);
-        r.note_round("g", 94_000, 10, true);
+        r.station_mut("g").ceiling = Some(100_000);
+        r.note_round("g", "g", 94_000, 10, true);
         r.end_turn("test", "", 0);
         let guard = r.loop_guard("g");
         assert!(guard.trips(true, 94_000, 1_500));

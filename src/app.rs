@@ -158,8 +158,6 @@ pub struct App {
     /// so the streaming protocol and the background delivery can both
     /// reach it (the invisible `book` tool locks it in the flow).
     pub engine: Arc<Mutex<book::Engine>>,
-    /// The reservoir: per-model learned ceilings and the window's ink
-    /// level. Shared the same way as the engine.
     pub reservoir: Arc<Mutex<Reservoir>>,
     /// Monotonic counter for logical turns; bumped by begin_assistant and
     /// stamped onto every cluster of that turn.
@@ -482,8 +480,6 @@ impl App {
                 }
             }
 
-            // Close the reservoir's record for this turn: one synthesized
-            // Record per turn, fed to the brainrot canary.
             let user_text = self
                 .messages
                 .iter()
@@ -572,8 +568,6 @@ impl App {
                 });
             }
         }
-        // The reservoir prod: once per ink-band escalation, steer the agent
-        // toward deeming before the window runs dry.
         if let Ok(mut res) = self.reservoir.lock() {
             if let Some(prod) = res.take_prod() {
                 out.push(ApiMessage {
