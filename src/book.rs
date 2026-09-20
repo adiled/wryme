@@ -54,7 +54,9 @@ pub struct Bookmark {
 #[derive(Debug, Clone)]
 pub struct CompartmentMeta {
     pub opened_at: i64,
-    pub updated_at: i64,
+    /// last deem millis — the "where we left off" signal, first-class in
+    /// find results and rendered bookmarks.
+    pub last_inked: i64,
     pub topic: String,
     pub tags: Vec<String>,
     pub people: Vec<String>,
@@ -66,6 +68,8 @@ pub struct CompartmentMeta {
     pub spans: Vec<(u64, u64)>,
     /// Weight of the compartment: sum of content bytes of its spans.
     pub life_tokens: i64,
+    /// last few rows as text, in-memory only; feeds find scoring + excerpt.
+    pub tail: String,
 }
 
 /// One turn in the continuous stream. `content` is the rendered text the
@@ -100,6 +104,8 @@ pub struct Book {
     /// the engine's weight signal for the prod.
     unattr_tokens: i64,
     unattr_turns: i64,
+    /// last few unattributed rows; gifted to a page on deem.
+    unattr_tail: Vec<(String, String)>,
     index: Vec<CompartmentMeta>,
     /// Rows not yet flushed to a stream segment.
     pending: Vec<StreamRow>,
@@ -140,6 +146,29 @@ const WEIGHT_BYTES: i64 = 1600;
 /// Turns of distance from an establishing-related lookup that shield the
 /// thread from a prod (the agent is actively reminiscing over it).
 const LOOKUP_GAP: u64 = 5;
+
+/// page tail rows, in-memory only (rebuilt at open, refreshed at deem)
+const TAIL_ROWS: usize = 2;
+/// tail text cap — one page never eats the index
+const TAIL_MAX_CHARS: usize = 400;
+/// excerpt cap for find results
+const EXCERPT_MAX_CHARS: usize = 240;
+/// recency bonus on the find score; surfaces the just-left page when term
+/// scores tie, always below the term weights so a real match wins
+const RECENT_4H_MS: i64 = 4 * 3_600_000;
+const RECENT_1D_MS: i64 = 24 * 3_600_000;
+const RECENT_7D_MS: i64 = 7 * 24 * 3_600_000;
+const BONUS_RECENT_4H: i64 = 12;
+const BONUS_RECENT_1D: i64 = 6;
+const BONUS_RECENT_7D: i64 = 2;
+/// find term weights: topic > distilled content > labels
+const WEIGHT_TOPIC_EXACT: i64 = 200;
+const WEIGHT_TOPIC_WORD: i64 = 10;
+const WEIGHT_META_WORD: i64 = 3;
+const WEIGHT_LIGHT_WORD: i64 = 1;
+const WEIGHT_TAIL_WORD: i64 = 4;
+/// cap on listed find results — the model picks, never audits
+pub const FIND_SHOW: usize = 6;
 
 /// Open the engine (book + empty preamble) in `dir`.
 pub fn open_engine(dir: &Path) -> Result<Engine> {
@@ -200,6 +229,10 @@ impl Engine {
         book.next_row += 1;
         book.unattr_tokens += content.len() as i64;
         book.unattr_turns += 1;
+        book.unattr_tail.push((role.to_string(), content.to_string()));
+        if book.unattr_tail.len() > TAIL_ROWS {
+            book.unattr_tail.remove(0);
+        }
         // Flush to disk now, so every turn is durable even if the agent
         // never deems and the app exits. The stream truly writes
         // continuously; deeming later only points rows at pages.
@@ -274,7 +307,9 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     // "new without deem" registry; a page is only a page if it is about
     // something.
     index.retain(|m| !m.topic.trim().is_empty());
-    let next_row = read_stream_max_row(dir)?;
+    // the one open-time stream parse feeds max row + tails; find stays in-memory.
+    let rows = read_stream_on_disk(dir)?;
+    let next_row = rows.last().map(|r| r.row_id + 1).unwrap_or(0);
     let next_seg = read_stream_max_seg(dir)? + 1;
 
     let summary_path = dir.join("life_summary.txt");
@@ -291,6 +326,16 @@ pub fn open_book(dir: &Path) -> Result<Book> {
         .unwrap_or(0)
         .min(next_row);
 
+    // tail = last rows of last span; frontier tail feeds a deem after restart
+    for meta in index.iter_mut() {
+        meta.tail = meta
+            .spans
+            .last()
+            .map(|(s, e)| format_tail(&tail_entries(&rows, *s, *e)))
+            .unwrap_or_default();
+    }
+    let unattr_tail = tail_entries(&rows, watermark, next_row);
+
     Ok(Book {
         dir: dir.to_path_buf(),
         next_row,
@@ -298,6 +343,7 @@ pub fn open_book(dir: &Path) -> Result<Book> {
         watermark,
         unattr_tokens: 0,
         unattr_turns: 0,
+        unattr_tail,
         index,
         pending: vec![],
         life_summary,
@@ -344,7 +390,7 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
         None => {
             book.index.push(CompartmentMeta {
                 opened_at: now,
-                updated_at: now,
+                last_inked: now,
                 topic: topic.to_string(),
                 tags: vec![],
                 people: vec![],
@@ -353,6 +399,7 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
                 open: vec![],
                 spans: vec![],
                 life_tokens: 0,
+                tail: String::new(),
             });
             book.index.len() - 1
         }
@@ -371,18 +418,21 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
     meta.facts = bookmark.facts.clone();
     meta.plans = bookmark.plans.clone();
     meta.open = bookmark.open.clone();
-    meta.updated_at = now;
+    meta.last_inked = now;
+    // frontier tail = the page's freshest rows
+    meta.tail = format_tail(&book.unattr_tail);
     flush_stream(book)?;
     book.watermark = end;
     book.unattr_tokens = 0;
     book.unattr_turns = 0;
+    book.unattr_tail.clear();
     write_index(book)?;
     Ok(format!(
         "deemed rows {start}..{end} into \"{topic}\"; bookmark refreshed"
     ))
 }
 
-/// Refresh a page's distilled state (and updated_at) without deeming new
+/// Refresh a page's distilled state (and last_inked) without deeming new
 /// rows. Called when a thread is re-established and the AI re-distills
 /// what matters. Addressed by topic.
 pub fn update_bookmark(book: &mut Book, topic: &str, bookmark: &Bookmark) -> Result<()> {
@@ -395,7 +445,7 @@ pub fn update_bookmark(book: &mut Book, topic: &str, bookmark: &Bookmark) -> Res
     meta.facts = bookmark.facts.clone();
     meta.plans = bookmark.plans.clone();
     meta.open = bookmark.open.clone();
-    meta.updated_at = now_ms();
+    meta.last_inked = now_ms();
     write_index(book)?;
     Ok(())
 }
@@ -441,6 +491,10 @@ pub fn read_compartment(book: &Book, topic: &str) -> Result<Option<Vec<Message>>
 pub fn render_bookmark(meta: &CompartmentMeta) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n", meta.topic));
+    // ground truth for "where did we leave off" — `open` distilling can go stale
+    if meta.last_inked > 0 {
+        out.push_str(&format!("Last inked: {}\n", relative_ago(meta.last_inked)));
+    }
     if !meta.people.is_empty() {
         out.push_str(&format!("People: {}\n", meta.people.join(", ")));
     }
@@ -478,12 +532,72 @@ pub fn set_life_summary(book: &mut Book, summary: &str) -> Result<()> {
     Ok(())
 }
 
-/// Deterministic retrieval: match grandma's words against the index
-/// columns (topic / tags / people / facts / plans / open). No embeddings —
-/// just keyword overlap over the metadata, which a columnar scan makes
-/// cheap at scale.
+/// "3h ago"-style millis label — recency a model can act on
+pub fn relative_ago(ms: i64) -> String {
+    let diff = (now_ms() - ms).max(0) / 1000;
+    if diff < 60 {
+        return "just now".to_string();
+    }
+    let mins = diff / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    if days < 365 {
+        return format!("{days}d ago");
+    }
+    format!("{}y ago", days / 365)
+}
+
+/// tail clipped for find results
+pub fn tail_excerpt(meta: &CompartmentMeta) -> String {
+    if meta.tail.is_empty() {
+        return String::new();
+    }
+    let mut out: String = meta.tail.chars().take(EXCERPT_MAX_CHARS).collect();
+    if meta.tail.chars().count() > EXCERPT_MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// The last `TAIL_ROWS` rows inside [start, end), oldest first.
+fn tail_entries(rows: &[StreamRow], start: u64, end: u64) -> Vec<(String, String)> {
+    rows.iter()
+        .filter(|r| r.row_id >= start && r.row_id < end)
+        .rev()
+        .take(TAIL_ROWS)
+        .map(|r| (r.role.clone(), r.content.clone()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+/// "role: content"-lines, capped
+pub fn format_tail(entries: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (role, content) in entries {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("{role}: {content}"));
+    }
+    if out.chars().count() > TAIL_MAX_CHARS {
+        out = out.chars().take(TAIL_MAX_CHARS).collect();
+        out.push('…');
+    }
+    out
+}
+
+/// weighted keyword match: topic > distilled content > labels; freshness
+/// tiebreak; in-memory tails, so find never reads the stream
 pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a CompartmentMeta> {
-    let q = query.to_lowercase();
+    let q = query.trim().to_lowercase();
     let words: Vec<String> = q
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
@@ -492,24 +606,62 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
     if words.is_empty() {
         return vec![];
     }
-    let mut hits: Vec<(&CompartmentMeta, usize)> = book
+    let now = now_ms();
+    let mut hits: Vec<(&CompartmentMeta, i64)> = book
         .index
         .iter()
         .filter_map(|m| {
-            let hay = format!(
-                "{} {} {} {} {} {}",
-                m.topic.to_lowercase(),
-                m.tags.join(" ").to_lowercase(),
-                m.people.join(" ").to_lowercase(),
-                m.facts.join(" ").to_lowercase(),
-                m.plans.join(" ").to_lowercase(),
-                m.open.join(" ").to_lowercase(),
-            );
-            let score = words.iter().filter(|w| hay.contains(w.as_str())).count();
+            let topic = m.topic.to_lowercase();
+            let facts = m.facts.join(" ").to_lowercase();
+            let plans = m.plans.join(" ").to_lowercase();
+            let open = m.open.join(" ").to_lowercase();
+            let tags = m.tags.join(" ").to_lowercase();
+            let people = m.people.join(" ").to_lowercase();
+            let tail = m.tail.to_lowercase();
+            let mut score: i64 = 0;
+            if topic == q {
+                score += WEIGHT_TOPIC_EXACT;
+            }
+            for w in &words {
+                if topic.contains(w.as_str()) {
+                    score += WEIGHT_TOPIC_WORD;
+                }
+                if facts.contains(w.as_str()) {
+                    score += WEIGHT_META_WORD;
+                }
+                if plans.contains(w.as_str()) {
+                    score += WEIGHT_META_WORD;
+                }
+                if open.contains(w.as_str()) {
+                    score += WEIGHT_META_WORD;
+                }
+                if tail.contains(w.as_str()) {
+                    score += WEIGHT_TAIL_WORD;
+                }
+                if tags.contains(w.as_str()) {
+                    score += WEIGHT_LIGHT_WORD;
+                }
+                if people.contains(w.as_str()) {
+                    score += WEIGHT_LIGHT_WORD;
+                }
+            }
+            if score > 0 {
+                // freshness, always below term weights above
+                let age = now - m.last_inked;
+                score += if age <= RECENT_4H_MS {
+                    BONUS_RECENT_4H
+                } else if age <= RECENT_1D_MS {
+                    BONUS_RECENT_1D
+                } else if age <= RECENT_7D_MS {
+                    BONUS_RECENT_7D
+                } else {
+                    0
+                };
+            }
             (score > 0).then_some((m, score))
         })
         .collect();
-    hits.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    hits.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.last_inked.cmp(&a.0.last_inked)));
     hits.into_iter().map(|(m, _)| m).collect()
 }
 
@@ -528,11 +680,12 @@ fn flush_stream(book: &mut Book) -> Result<()> {
     Ok(())
 }
 
-fn read_stream(book: &Book) -> Result<Vec<StreamRow>> {
+/// disk rows sorted by row_id; the one parse at open feeds tails too
+fn read_stream_on_disk(dir: &Path) -> Result<Vec<StreamRow>> {
     let mut all = Vec::new();
-    let dir = stream_dir(book);
-    if dir.exists() {
-        for entry in std::fs::read_dir(&dir)? {
+    let stream_dir = dir.join("stream");
+    if let Ok(entries) = std::fs::read_dir(&stream_dir) {
+        for entry in entries {
             let entry = entry?;
             let path = entry.path();
             if path.extension().map(|e| e == "parquet").unwrap_or(false) {
@@ -540,30 +693,15 @@ fn read_stream(book: &Book) -> Result<Vec<StreamRow>> {
             }
         }
     }
-    all.extend(book.pending.iter().cloned());
     all.sort_by_key(|r| r.row_id);
     Ok(all)
 }
 
-/// The highest row id already on disk — so the frontier resumes correctly
-/// across restarts.
-fn read_stream_max_row(dir: &Path) -> Result<u64> {
-    let stream_dir = dir.join("stream");
-    if !stream_dir.exists() {
-        return Ok(0);
-    }
-    let mut max = 0u64;
-    for entry in std::fs::read_dir(&stream_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "parquet").unwrap_or(false) {
-            let seg = read_stream_segment(&path)?;
-            for r in &seg {
-                max = max.max(r.row_id + 1);
-            }
-        }
-    }
-    Ok(max)
+fn read_stream(book: &Book) -> Result<Vec<StreamRow>> {
+    let mut all = read_stream_on_disk(&book.dir)?;
+    all.extend(book.pending.iter().cloned());
+    all.sort_by_key(|r| r.row_id);
+    Ok(all)
 }
 
 /// The highest stream segment number on disk — so the flush counter
@@ -612,6 +750,7 @@ fn merge_spans(spans: &mut Vec<(u64, u64)>) {
 fn index_schema() -> SchemaRef {
     let fields = vec![
         Field::new("opened_at", DataType::Int64, false),
+        // legacy column name — existing books read it
         Field::new("updated_at", DataType::Int64, false),
         Field::new("topic", DataType::Utf8, false),
         Field::new("tags", DataType::Utf8, true),
@@ -638,7 +777,7 @@ fn stream_schema() -> SchemaRef {
 
 fn write_index(book: &Book) -> Result<()> {
     let opened = Int64Array::from(book.index.iter().map(|m| m.opened_at).collect::<Vec<_>>());
-    let updated = Int64Array::from(book.index.iter().map(|m| m.updated_at).collect::<Vec<_>>());
+    let last_inked = Int64Array::from(book.index.iter().map(|m| m.last_inked).collect::<Vec<_>>());
     let topic = StringArray::from(
         book.index
             .iter()
@@ -687,7 +826,7 @@ fn write_index(book: &Book) -> Result<()> {
         index_schema(),
         vec![
             std::sync::Arc::new(opened),
-            std::sync::Arc::new(updated),
+            std::sync::Arc::new(last_inked),
             std::sync::Arc::new(topic),
             std::sync::Arc::new(tags),
             std::sync::Arc::new(people),
@@ -714,7 +853,7 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     for batch in reader {
         let batch = batch?;
         let opened = batch.column_by_name("opened_at").unwrap();
-        let updated = batch.column_by_name("updated_at").unwrap();
+        let last_inked = batch.column_by_name("updated_at").unwrap();
         let topic = batch.column_by_name("topic").unwrap();
         let tags = batch.column_by_name("tags").unwrap();
         let people = batch.column_by_name("people").unwrap();
@@ -726,7 +865,7 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
         for i in 0..batch.num_rows() {
             metas.push(CompartmentMeta {
                 opened_at: as_i64(opened, i),
-                updated_at: as_i64(updated, i),
+                last_inked: as_i64(last_inked, i),
                 topic: as_str(topic, i),
                 tags: split(&as_str(tags, i)),
                 people: split(&as_str(people, i)),
@@ -735,6 +874,8 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
                 open: split(&as_str(open, i)),
                 spans: split_spans(&as_str(spans, i)),
                 life_tokens: as_i64(tokens, i),
+                // tails rebuilt at open; index stays distilled
+                tail: String::new(),
             });
         }
     }
@@ -1063,6 +1204,57 @@ mod tests {
         let rows = read_stream(&book3).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2].content, "third turn");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_ranks_by_tail_content_and_last_inked() {
+        let dir = tmpdir("find_rank");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut book = open_book(&dir).unwrap();
+        let now = now_ms();
+
+        // Fresher page, topic phrase + matching tail content.
+        book.unattr_tail.push(("user".into(), "the press loves olive oil".into()));
+        book.index.push(CompartmentMeta {
+            opened_at: now - 1000,
+            last_inked: now - 3_600_000,
+            topic: "olive oil".into(),
+            tags: vec![],
+            people: vec![],
+            facts: vec![],
+            plans: vec![],
+            open: vec![],
+            spans: vec![(0, 2)],
+            life_tokens: 0,
+            tail: format_tail(&book.unattr_tail),
+        });
+        // Older page, topic only, no tail.
+        book.index.push(CompartmentMeta {
+            opened_at: now - 2000,
+            last_inked: now - 10 * 24 * 3_600_000,
+            topic: "olive oil bottles".into(),
+            tags: vec![],
+            people: vec![],
+            facts: vec![],
+            plans: vec![],
+            open: vec![],
+            spans: vec![],
+            life_tokens: 0,
+            tail: String::new(),
+        });
+
+        // Tail content + freshness beat the equally-topic'd older page.
+        let hits = match_compartments(&book, "olive oil press");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].topic, "olive oil");
+        assert!(tail_excerpt(hits[0]).contains("press loves olive oil"));
+        // Stale, wordless page loses to a pure topic hit on the query's
+        // strongest term.
+        let hits = match_compartments(&book, "bottles");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].topic, "olive oil bottles");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

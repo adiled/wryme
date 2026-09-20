@@ -198,7 +198,10 @@ Quiet memory — this is how you remember across windows and restarts. \
 Call it in the flow, without announcing it. A memory is a page: a \
 distilled bookmark plus the stretches of conversation it points into. \
 Pages are addressed by their topic — never a number. Actions:\n\
-  find    {query} — search memory for a page. Returns matched pages.\n  open    {topic} — pull a page into this conversation as its \
+  find    {query} — search memory. Returns the best-matching pages, ranked\n\
+          with the freshest activity first; each hit shows the page's topic,\n\
+          when it was last inked, and a tail excerpt. Pick the one page that\n\
+          fits the moment and open it — do not open several just to compare.\n  open    {topic} — pull a page into this conversation as its \
           preamble; you get its distilled state and the whole thread.\n  read    {topic} — read a page's thread without promoting it.\n  deem    {topic, tags, people, facts, plans, open} — attribute this \
           stretch of conversation to the page named by topic and refresh \
           its distilled bookmark (what you remember, so the next visit \
@@ -339,11 +342,28 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
 
 fn render_find(query: &str, hits: &[&book::CompartmentMeta]) -> String {
     if hits.is_empty() {
-        return format!("no compartments match \"{query}\"");
+        return format!("no pages match \"{query}\"");
     }
-    let mut out = format!("pages matching \"{query}\":\n");
-    for m in hits {
-        out.push_str(&format!("  {} — open: {}\n", m.topic, m.open.join(", ")));
+    let total = hits.len();
+    let shown = total.min(book::FIND_SHOW);
+    let mut out = format!("pages matching \"{query}\" — {shown} best of {total}:\n");
+    for m in hits.iter().take(shown) {
+        out.push_str(&format!(
+            "  \"{}\" (last inked {})",
+            m.topic,
+            book::relative_ago(m.last_inked)
+        ));
+        if !m.open.is_empty() {
+            out.push_str(&format!(" — open: {}", m.open.join(", ")));
+        }
+        out.push('\n');
+        let excerpt = book::tail_excerpt(m);
+        if !excerpt.is_empty() {
+            out.push_str(&format!("      … {excerpt}\n"));
+        }
+    }
+    if total > shown {
+        out.push_str(&format!("  …and {} more matching pages\n", total - shown));
     }
     out
 }
