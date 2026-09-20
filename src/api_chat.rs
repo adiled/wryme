@@ -35,7 +35,6 @@ pub(crate) async fn stream(
     station: &Station,
     messages: Vec<ApiMessage>,
     engine: Arc<Mutex<book::Engine>>,
-    reservoir: Arc<Mutex<crate::reservoir::Reservoir>>,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     // Local conversation we grow across follow-up requests. Starts as the
@@ -70,23 +69,25 @@ pub(crate) async fn stream(
 
     let mut bad_rounds: u32 = 0;
     loop {
-        let (calls, assistant_content, last_in) =
-            match stream_once(client, shop, station, &conv, tx).await {
-                Ok(v) => v,
-                Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
-                    if crate::api::is_toolless(&station.model) {
-                        return Err(e);
-                    }
-                    crate::api::mark_toolless(&station.model);
-                    tracing::warn!(model=%station.model, "tools unsupported, retrying without tools and marking toolless");
-                    let _ = tx.send(StreamEvent::Error {
-                        message: "tools unsupported by model, retrying without tools".into(),
-                    });
-                    // retry once without tools — next call will see is_toolless and skip tools
-                    stream_once(client, shop, station, &conv, tx).await?
+        let (calls, assistant_content) = match stream_once(client, shop, station, &conv, tx).await {
+            Ok(v) => v,
+            Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
+                if crate::api::is_toolless(&station.model) {
+                    return Err(e);
                 }
-                Err(e) => return Err(e),
-            };
+                crate::api::mark_toolless(&station.model);
+                tracing::warn!(model=%station.model, "tools unsupported, retrying without tools and marking toolless");
+                let _ = tx.send(StreamEvent::Error {
+                    message: "tools unsupported by model, retrying without tools".into(),
+                });
+                // retry once without tools — next call will see is_toolless and skip tools
+                match stream_once(client, shop, station, &conv, tx).await {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
+            Err(e) => return Err(e),
+        };
         // Split pairable calls from broken ones. Broken ones never reach
         // the wire (their shape would 400 this and every replayed turn),
         // but each still answers with a clear error the model can read.
@@ -160,32 +161,20 @@ pub(crate) async fn stream(
                 "content": output,
             }));
         }
-        if shop.window == crate::shop::WindowMode::Full {
-            if let Ok(res) = reservoir.lock() {
-                if res
-                    .loop_guard(&station.name)
-                    .trips(true, last_in, crate::reservoir::ROUND_GROWTH_EST)
-                {
-                    tracing::warn!(model=%station.model, in=%last_in, "ink dry in tool loop — stopping the turn");
-                    break;
-                }
-            }
-        }
         // Loop: re-request with the grown conversation.
     }
-    Ok(())
 }
 
 /// One request/response round. Streams content/brain/tool events to `tx`,
 /// assembles any tool calls into `Vec<ChatToolCall>`, and returns them
-/// plus the assistant text streamed this round and the reported prompt size.
+/// plus the assistant text streamed this round.
 async fn stream_once(
     client: &Client,
     shop: &Shop,
     station: &Station,
     conv: &[serde_json::Value],
     tx: &UnboundedSender<StreamEvent>,
-) -> Result<(Vec<ChatToolCall>, String, u64)> {
+) -> Result<(Vec<ChatToolCall>, String)> {
     #[derive(Serialize)]
     struct Req<'a> {
         model: &'a str,
@@ -277,7 +266,6 @@ async fn stream_once(
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut calls: Vec<ChatToolCall> = Vec::new();
     let mut assistant_content = String::new();
-    let mut last_in: u64 = 0;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading sse chunk")?;
@@ -288,11 +276,11 @@ async fn stream_once(
             };
             let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
             let event = &event_bytes[..end.body_len];
-            handle_event(event, tx, &mut calls, &mut assistant_content, &mut last_in)?;
+            handle_event(event, tx, &mut calls, &mut assistant_content)?;
         }
     }
     if !buf.is_empty() {
-        handle_event(&buf, tx, &mut calls, &mut assistant_content, &mut last_in)?;
+        handle_event(&buf, tx, &mut calls, &mut assistant_content)?;
     }
 
     // Surface the tool name for the UI label once per call.
@@ -302,7 +290,7 @@ async fn stream_once(
         });
     }
 
-    Ok((calls, assistant_content, last_in))
+    Ok((calls, assistant_content))
 }
 
 fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
@@ -378,7 +366,6 @@ fn handle_event(
     tx: &UnboundedSender<StreamEvent>,
     calls: &mut Vec<ChatToolCall>,
     assistant_content: &mut String,
-    last_in: &mut u64,
 ) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
     for line in text.lines() {
@@ -408,10 +395,8 @@ fn handle_event(
                         .unwrap_or(0);
                     let total = u.get("total_tokens").and_then(|n| n.as_u64());
                     if input + output > 0 {
-                        *last_in = input;
                         let _ = tx.send(StreamEvent::Usage { input, output });
                     } else if let Some(t) = total.filter(|t| *t > 0) {
-                        *last_in = t;
                         let _ = tx.send(StreamEvent::Usage {
                             input: t,
                             output: 0,
@@ -589,13 +574,11 @@ mod tests {
         let (tx, mut rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
-        let mut last_in = 0;
         handle_event(
             b"data: {\"choices\":[{\"delta\":{\"refusal\":\"sorry\"}}]}\n\n",
             &tx,
             &mut calls,
             &mut content,
-        &mut last_in,
         )
         .unwrap();
         assert!(content.contains("sorry"));
@@ -608,13 +591,11 @@ mod tests {
         let (tx, mut rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
-        let mut last_in = 0;
         handle_event(
             b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
             &tx,
             &mut calls,
             &mut content,
-        &mut last_in,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -625,7 +606,6 @@ mod tests {
             &tx,
             &mut calls,
             &mut content,
-        &mut last_in,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -637,13 +617,11 @@ mod tests {
         let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
-        let mut last_in = 0;
         handle_event(
             b"data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}}]}\n\n",
             &tx,
             &mut calls,
             &mut content,
-        &mut last_in,
         )
         .unwrap();
         assert_eq!(calls.len(), 1);
@@ -706,13 +684,11 @@ mod tests {
         let (tx, mut rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
-        let mut last_in = 0;
         handle_event(
             b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":300,\"total_tokens\":1500}}\n\n",
             &tx,
             &mut calls,
             &mut content,
-        &mut last_in,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -730,13 +706,11 @@ mod tests {
         let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
-        let mut last_in = 0;
         handle_event(
             b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\ndata: [DONE]\n\n",
             &tx,
             &mut calls,
             &mut content,
-        &mut last_in,
         )
         .unwrap();
         assert!(calls.is_empty());

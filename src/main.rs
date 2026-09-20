@@ -180,10 +180,6 @@ async fn one_shot(
     let engine = std::sync::Arc::new(std::sync::Mutex::new(
         crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot")).expect("open book"),
     ));
-    // Throwaway reservoir too: one-shot mode records nothing.
-    let reservoir = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::reservoir::Reservoir::default(),
-    ));
     let (tx, mut rx) = mpsc::unbounded_channel::<api::StreamEvent>();
     let task = tokio::spawn({
         let shop = shop.clone();
@@ -191,7 +187,7 @@ async fn one_shot(
         let client = client.clone();
         async move {
             client
-                .stream_completion(shop, station, messages, None, engine, reservoir, tx)
+                .stream_completion(shop, station, messages, None, engine, tx)
                 .await;
         }
     });
@@ -431,11 +427,10 @@ async fn run(
                     let station = app.active_station.clone();
                     let client = client.clone();
                     let engine = app.engine.clone();
-                    let reservoir = app.reservoir.clone();
                     let tx = tx.clone();
                     in_flight_task = Some(tokio::spawn(async move {
                         client
-                            .stream_completion(shop, station, msgs, prev_id, engine, reservoir, tx)
+                            .stream_completion(shop, station, msgs, prev_id, engine, tx)
                             .await;
                     }));
                 }

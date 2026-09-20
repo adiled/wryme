@@ -167,7 +167,6 @@ impl Client {
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
-        reservoir: std::sync::Arc<std::sync::Mutex<crate::reservoir::Reservoir>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
         let r = AssertUnwindSafe(self.dispatch(
@@ -176,7 +175,6 @@ impl Client {
             messages,
             previous_response_id,
             engine,
-            reservoir,
             tx.clone(),
         ))
         .catch_unwind()
@@ -196,7 +194,6 @@ impl Client {
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
-        reservoir: std::sync::Arc<std::sync::Mutex<crate::reservoir::Reservoir>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
         let span = tracing::info_span!(
@@ -220,7 +217,7 @@ impl Client {
                 Ok(())
             }
             Protocol::ChatCompletions => {
-                crate::api_chat::stream(self, &shop, &station, messages, engine, reservoir, &tx).await
+                crate::api_chat::stream(self, &shop, &station, messages, engine, &tx).await
             }
             Protocol::Responses => {
                 crate::api_responses::stream(
@@ -230,7 +227,6 @@ impl Client {
                     messages,
                     previous_response_id,
                     engine,
-                    reservoir,
                     &tx,
                 )
                 .await

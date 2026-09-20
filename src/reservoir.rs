@@ -6,24 +6,11 @@ use ccft::brainrot::{Aggregate, Baseline, bot_score};
 use ccft::ledger::Record;
 use ccft::lex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Ink {
-    Brisk,
-    Thinning,
-    RunningDry,
-    Dry,
-}
-
-const THIN_AT: f64 = 0.60;
-const RUNNING_DRY_AT: f64 = 0.80;
 const DRY_AT: f64 = 0.95;
 const MIN_CEILING: u64 = 1_000;
 const MAX_CEILING: u64 = 50_000_000;
-pub const ROUND_GROWTH_EST: u64 = 1_500;
-const CANARY_MIN_RECORDS: usize = 8;
-const CANARY_BOT_SCORE: u32 = 70;
-const CANARY_STALL_RATIO: f64 = 1.5;
-const RECORD_FRACTION: f64 = 0.92;
+const STATIC_MIN_RECORDS: usize = 4;
+pub const STATIC_BOT_SCORE: u32 = 70;
 
 fn now_secs() -> f64 {
     SystemTime::now()
@@ -52,10 +39,8 @@ pub struct Reservoir {
     turn_in: u64,
     turn_out: u64,
     full: bool,
-    prod_ink: Ink,
-    ink: Ink,
     fill: f64,
-    soft: bool,
+    static_score: u32,
 }
 
 impl Default for Reservoir {
@@ -72,10 +57,8 @@ impl Default for Reservoir {
             turn_in: 0,
             turn_out: 0,
             full: true,
-            prod_ink: Ink::Brisk,
-            ink: Ink::Brisk,
             fill: 0.0,
-            soft: false,
+            static_score: 0,
         }
     }
 }
@@ -119,7 +102,6 @@ impl Reservoir {
         self.turn_model = None;
         self.turn_in = 0;
         self.turn_out = 0;
-        self.ink = Ink::Brisk;
         self.fill = 0.0;
     }
 
@@ -190,14 +172,11 @@ impl Reservoir {
             m.record_in = turn_in;
         }
         let ceiling = m.ceiling;
-        let record_in = m.record_in;
         self.save();
 
-        self.soft = self.canary();
-        self.ink = self.level(ceiling, record_in, self.soft);
+        self.refresh_static();
         self.fill = match ceiling {
             Some(c) if c > 0 && self.full => (turn_in as f64 / c as f64).min(1.0),
-            _ if record_in > 0 => (turn_in as f64 / record_in as f64).min(1.0),
             _ => 0.0,
         };
         self.turn_station = None;
@@ -211,7 +190,6 @@ impl Reservoir {
             let first = m.ceiling.is_none();
             m.ceiling = Some(m.ceiling.map_or(c, |old| old.min(c)));
             self.save();
-            self.ink = Ink::Dry;
             self.fill = 1.0;
             if first {
                 return Some(format!(
@@ -222,7 +200,6 @@ impl Reservoir {
         }
         let m = self.stations.get(station);
         if m.and_then(|m| m.ceiling).map(|c| self.turn_in >= c * DRY_AT as u64).unwrap_or(false) {
-            self.ink = Ink::Dry;
             self.fill = 1.0;
             return Some(
                 "the window ran dry — the book holds everything; start a fresh window"
@@ -232,113 +209,22 @@ impl Reservoir {
         None
     }
 
-    pub fn take_prod(&mut self) -> Option<String> {
-        let ink = self.ink;
-        if ink <= self.prod_ink {
-            return None;
-        }
-        self.prod_ink = ink;
-        Some(match ink {
-            Ink::Thinning => {
-                "\n[ink] The ink is thinning — this may be a good moment to deem \
-                 the older threads into the book while the window still has room."
-                    .to_string()
-            }
-            Ink::RunningDry => {
-                "\n[ink] The window's ink is running dry. Deem this stretch into \
-                 the book and draw the turn to a clean close — a fresh window \
-                 reopens the book in one step."
-                    .to_string()
-            }
-            _ => {
-                "\n[ink] The window is dry — the book holds everything. Bring the \
-                 turn to a close; a fresh window reopens your pages in one step."
-                    .to_string()
-            }
-        })
-    }
-
     pub fn dip(&self, station: &str) -> Option<f64> {
         self.stations.get(station).map(|_| self.fill)
     }
 
-    pub fn loop_guard(&self, station: &str) -> LoopGuard {
-        let est = self.stations.get(station).map(|m| {
-            m.ceiling
-                .unwrap_or_else(|| if m.record_in > 0 { m.record_in * 11 / 10 } else { 0 })
-        }).filter(|&e| e > 0);
-        LoopGuard { est }
+    pub fn static_figure(&self) -> u32 {
+        self.static_score
     }
 
-    fn canary(&self) -> bool {
-        if self.records.len() < CANARY_MIN_RECORDS {
-            return false;
+    fn refresh_static(&mut self) {
+        if self.records.len() < STATIC_MIN_RECORDS {
+            self.static_score = 0;
+            return;
         }
         let a = Aggregate::ingest(self.records.iter().cloned());
         let b = Baseline::from_records(&self.records);
-        if bot_score(&a, &b) >= CANARY_BOT_SCORE {
-            return true;
-        }
-        let with_out: Vec<&Record> = self.records.iter().filter(|r| r.out > 0).collect();
-        if with_out.len() < 6 {
-            return false;
-        }
-        let mspt = |rs: &[&Record]| {
-            let mut v: Vec<f64> = rs.iter().map(|r| r.lat as f64 / r.out as f64).collect();
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            v[v.len() / 2]
-        };
-        let (last, prior) = with_out.split_at(with_out.len().saturating_sub(3));
-        let (l, p) = (mspt(last), mspt(prior));
-        l > CANARY_STALL_RATIO * p && l > 0.0
-    }
-
-    fn level(&self, ceiling: Option<u64>, record_in: u64, soft: bool) -> Ink {
-        if let Some(c) = ceiling {
-            if c > 0 && self.full {
-                let f = self.turn_in as f64 / c as f64;
-                if f >= DRY_AT {
-                    return Ink::Dry;
-                }
-                if f >= RUNNING_DRY_AT {
-                    return Ink::RunningDry;
-                }
-                if f >= THIN_AT {
-                    return Ink::Thinning;
-                }
-                return Ink::Brisk;
-            }
-        }
-        if soft {
-            return Ink::RunningDry;
-        }
-        if self.turn_in > 0
-            && record_in > 0
-            && self.turn_in as f64 >= record_in as f64 * RECORD_FRACTION
-        {
-            return Ink::Thinning;
-        }
-        Ink::Brisk
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct LoopGuard {
-    est: Option<u64>,
-}
-
-impl LoopGuard {
-    pub fn trips(&self, full: bool, last_in: u64, per_round_est: u64) -> bool {
-        if !full {
-            return false;
-        }
-        let Some(est) = self.est else {
-            return false;
-        };
-        if last_in == 0 || est == 0 {
-            return false;
-        }
-        last_in + per_round_est > (est as f64 * DRY_AT) as u64
+        self.static_score = bot_score(&a, &b);
     }
 }
 
@@ -407,41 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn phases_follow_the_ceiling() {
-        let mut r = Reservoir::default();
-        let m = "m1";
-        r.station_mut(m).ceiling = Some(100_000);
-        r.note_round(m, "m1", 10_000, 100, true);
-        r.end_turn("hi there", "", 0);
-        assert_eq!(r.ink, Ink::Brisk);
-        r.note_round(m, "m1", 65_000, 100, true);
-        r.end_turn("b", "", 0);
-        assert_eq!(r.ink, Ink::Thinning);
-        r.note_round(m, "m1", 90_000, 100, true);
-        r.end_turn("c", "", 0);
-        assert_eq!(r.ink, Ink::RunningDry);
-        r.note_round(m, "m1", 98_000, 100, true);
-        r.end_turn("d", "", 0);
-        assert_eq!(r.ink, Ink::Dry);
-    }
-
-    #[test]
-    fn prod_escalates_once_per_band() {
-        let mut r = Reservoir::default();
-        let m = "m2";
-        r.station_mut(m).ceiling = Some(100_000);
-        r.note_round(m, "m2", 65_000, 1, true);
-        r.end_turn("x", "", 0);
-        assert!(r.take_prod().is_some());
-        assert!(r.take_prod().is_none());
-        r.note_round(m, "m2", 90_000, 1, true);
-        r.end_turn("y", "", 0);
-        let p = r.take_prod().expect("running dry delivers once");
-        assert!(p.contains("running dry"));
-        assert!(r.take_prod().is_none());
-    }
-
-    #[test]
     fn record_in_tracks_max_prompt() {
         let mut r = Reservoir::default();
         r.note_round("m3", "m3", 500, 10, true);
@@ -457,17 +308,5 @@ mod tests {
         r.turn_started();
         r.end_turn("", "", 0);
         assert!(r.records.is_empty());
-    }
-
-    #[test]
-    fn loop_guard_trips_only_near_the_wall() {
-        let mut r = Reservoir::default();
-        r.station_mut("g").ceiling = Some(100_000);
-        r.note_round("g", "g", 94_000, 10, true);
-        r.end_turn("test", "", 0);
-        let guard = r.loop_guard("g");
-        assert!(guard.trips(true, 94_000, 1_500));
-        assert!(!guard.trips(true, 50_000, 1_500));
-        assert!(!guard.trips(false, 94_000, 1_500));
     }
 }

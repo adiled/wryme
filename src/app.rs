@@ -568,18 +568,6 @@ impl App {
                 });
             }
         }
-        if let Ok(mut res) = self.reservoir.lock() {
-            if let Some(prod) = res.take_prod() {
-                out.push(ApiMessage {
-                    role: "system".into(),
-                    content: prod,
-                    images: Vec::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: String::new(),
-                    tool_result: String::new(),
-                });
-            }
-        }
         let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
             // Skip an empty streaming placeholder. We send the history
