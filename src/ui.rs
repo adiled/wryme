@@ -172,6 +172,14 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     } else {
         Color::Cyan
     };
+    let heart_score = app
+        .reservoir
+        .lock()
+        .ok()
+        .map(|r| r.static_figure())
+        .unwrap_or(0);
+    let ht = (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
+    let heart_color = hue_lit(120.0 * (1.0 - ht));
     let mut pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
@@ -186,7 +194,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             format!("via {}", app.active_shop.name),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(dot),
+        Span::styled(" \u{2764}\u{FE0E} ", heart_color),
         Span::raw(format!("{} msg", app.messages.len())),
     ];
     if app.voice_on {
@@ -228,20 +236,38 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         }),
     ));
     let used = app.usage_ctx + app.usage_out;
+    let mut trailer: Vec<Span<'static>> = Vec::new();
     if used > 0 {
-        let label = format_k(used);
+        let fill = app
+            .reservoir
+            .lock()
+            .ok()
+            .and_then(|r| r.dip(&app.active_station.name))
+            .unwrap_or(0.0);
+        let color = if fill >= 0.5 {
+            let t = ((fill - 0.5) / 0.5).clamp(0.0, 1.0);
+            Color::Rgb(255, (255.0 * (1.0 - t)) as u8, 0)
+        } else {
+            Color::DarkGray
+        };
+        trailer.push(Span::styled(format_k(used), Style::default().fg(color)));
+    }
+    if !trailer.is_empty() {
         let left_w: usize = pieces
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
+        let tr_w: usize = trailer
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
         let bar_w = chunks[2].width as usize;
-        let uw = UnicodeWidthStr::width(label.as_str());
-        if bar_w > left_w + uw + 2 {
-            pieces.push(Span::raw(" ".repeat(bar_w - left_w - uw)));
+        if bar_w > left_w + tr_w + 2 {
+            pieces.push(Span::raw(" ".repeat(bar_w - left_w - tr_w)));
         } else {
             pieces.push(Span::raw("  "));
         }
-        pieces.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+        pieces.extend(trailer);
     }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, chunks[2]);
@@ -283,6 +309,29 @@ fn is_error_status(s: &str) -> bool {
         || s.starts_with("stopped:")
         || s.starts_with("save failed")
         || s.starts_with("update failed")
+}
+
+/// HSL(0.45/0.85, hue) -> Rgb. The heart's continuum: green at 120°,
+/// yellow at 60°, red at 0° — a single sweep over the figure, no blocks.
+fn hue_lit(hue: f64) -> Color {
+    let l = 0.45_f64;
+    let s = 0.85_f64;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (hue.rem_euclid(360.0) / 60.0).floor() as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Color::Rgb(
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
 }
 
 /// Wrapped error box over the bottom-right half of the screen, stacked

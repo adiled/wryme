@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::api::{ApiMessage, ApiToolCall};
 use crate::book;
 use crate::popup::Popup;
+use crate::reservoir::Reservoir;
 use crate::shop::Shop;
 use crate::station::Station;
 
@@ -157,6 +158,7 @@ pub struct App {
     /// so the streaming protocol and the background delivery can both
     /// reach it (the invisible `book` tool locks it in the flow).
     pub engine: Arc<Mutex<book::Engine>>,
+    pub reservoir: Arc<Mutex<Reservoir>>,
     /// Monotonic counter for logical turns; bumped by begin_assistant and
     /// stamped onto every cluster of that turn.
     turn_counter: u64,
@@ -212,6 +214,7 @@ impl App {
             engine: Arc::new(Mutex::new(
                 book::open_engine(&book_dir()).expect("open book"),
             )),
+            reservoir: Arc::new(Mutex::new(Reservoir::load())),
             turn_counter: 0,
             last_stream_was_brain: false,
         }
@@ -475,6 +478,35 @@ impl App {
                 if let Ok(mut e) = self.engine.lock() {
                     e.record_turn("assistant", &joined);
                 }
+            }
+
+            let user_text = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let brain_text: String = self
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.brain.is_empty())
+                .map(|m| m.brain.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let tool_chars: u64 = self
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant && m.turn_id == tid)
+                .map(|m| {
+                    m.tool_events
+                        .iter()
+                        .map(|t| t.arguments.len() + t.result.len())
+                        .sum::<usize>() as u64
+                })
+                .sum();
+            if let Ok(mut res) = self.reservoir.lock() {
+                res.end_turn(user_text, &brain_text, tool_chars);
             }
 
             // Drop empty clusters of this turn so the screen does not show a

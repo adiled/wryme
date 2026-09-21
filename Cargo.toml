@@ -38,6 +38,7 @@ arrow-schema = "53"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sentry = { version = "0.42", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest"] }
+ccft = { version = "1.10.7", default-features = false, features = ["core"] }
 
 [profile.release]
 opt-level = 3

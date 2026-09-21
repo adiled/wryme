@@ -132,6 +132,7 @@ pub fn handle_key(
                 tracing::info!("window start");
             }
             app.push_user(text, images);
+            let _ = app.reservoir.lock().map(|mut r| r.turn_started());
             app.begin_assistant();
             app.stop_voice();
             app.unmute_voice();

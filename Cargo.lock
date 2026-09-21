@@ -431,6 +431,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccft"
+version = "1.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ba23fa8d42ba81db668b2545c6e08892711dd3b5d80b4ace58cd0546e0a7cf4"
+dependencies = [
+ "serde_json",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4252,6 +4263,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "base64 0.22.1",
+ "ccft",
  "chrono",
  "clap",
  "crossterm",

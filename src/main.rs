@@ -26,6 +26,7 @@ mod keys;
 mod md;
 mod popup;
 mod popup_ui;
+mod reservoir;
 mod shop;
 mod shell_env;
 mod station;
@@ -372,6 +373,12 @@ async fn run(
                         // tokens accumulate across the window.
                         app.usage_ctx = input;
                         app.usage_out += output;
+                        let station = app.active_station.name.clone();
+                        let model = app.active_station.model.clone();
+                        let full = app.active_shop.window == crate::shop::WindowMode::Full;
+                        if let Ok(mut res) = app.reservoir.lock() {
+                            res.note_round(&station, &model, input, output, full);
+                        }
                     }
                     StreamEvent::Done => {
                         app.finish_streaming();
@@ -393,7 +400,16 @@ async fn run(
                     }
                     StreamEvent::Error { message } => {
                         tracing::error!(err = %message, "turn error");
-                        app.note(format!("upstream: {message}"));
+                        let station = app.active_station.name.clone();
+                        let friendly = app
+                            .reservoir
+                            .lock()
+                            .ok()
+                            .and_then(|mut r| r.note_error(&station, &message));
+                        match friendly {
+                            Some(f) => app.note(f),
+                            None => app.note(format!("upstream: {message}")),
+                        }
                     }
                 }
             }
@@ -402,6 +418,7 @@ async fn run(
                 // turn in flight, so fire a calm background turn that
                 // plants the result and lets the model tell the user.
                 if jobs::has_due() && !app.in_flight {
+                    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();
                     app.in_flight = true;
                     let msgs = app.api_messages();
