@@ -95,7 +95,10 @@ pub async fn execute(
 
 /// The async-job check tool: `<shell>_check`, e.g. `zsh_check`.
 pub fn check_name() -> String {
-    format!("{}_check", explore::shell_basename(crate::shell_env::shell()))
+    format!(
+        "{}_check",
+        explore::shell_basename(crate::shell_env::shell())
+    )
 }
 
 pub const CHECK_DESCRIPTION: &str = "\

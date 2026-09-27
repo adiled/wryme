@@ -199,11 +199,13 @@ impl Reservoir {
             }
         }
         let m = self.stations.get(station);
-        if m.and_then(|m| m.ceiling).map(|c| self.turn_in >= c * DRY_AT as u64).unwrap_or(false) {
+        if m.and_then(|m| m.ceiling)
+            .map(|c| self.turn_in >= c * DRY_AT as u64)
+            .unwrap_or(false)
+        {
             self.fill = 1.0;
             return Some(
-                "the window ran dry — the book holds everything; start a fresh window"
-                    .to_string(),
+                "the window ran dry — the book holds everything; start a fresh window".to_string(),
             );
         }
         None
@@ -236,10 +238,7 @@ fn learn_ceiling(msg: &str) -> Option<u64> {
         let mut from = 0;
         while let Some(rel) = lower[from..].find(w) {
             let i = from + rel;
-            anchors.push((
-                i.saturating_sub(40),
-                (i + w.len() + 40).min(lower.len()),
-            ));
+            anchors.push((i.saturating_sub(40), (i + w.len() + 40).min(lower.len())));
             from = i + w.len();
         }
     }
