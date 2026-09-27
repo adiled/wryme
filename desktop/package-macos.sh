@@ -20,27 +20,14 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Bundle layout: the wryme binary is NEVER bundled — the launcher always
+# installs `wme` from cargo. The bundle carries only wezterm.lua, the
+# launcher, the icon, and a bundled WezTerm.app.
 STAGE="dist/wryme-desktop/wme.app"
-
-# Locate binary: prefer $BIN from CI (target/<triple>/release/wme), then target/release/wme
-BIN="${BIN:-}"
-if [[ -z "$BIN" ]]; then
-    for cand in "target/${TARGET:-}/release/wme" "target/release/wme" target/*/release/wme; do
-        if [[ -x "$cand" ]]; then BIN="$cand"; break; fi
-    done
-fi
-# Also try matrix target env from CI
-if [[ ! -x "${BIN:-}" ]]; then
-    for cand in target/aarch64-apple-darwin/release/wme target/x86_64-apple-darwin/release/wme target/release/wme; do
-        if [[ -x "$cand" ]]; then BIN="$cand"; break; fi
-    done
-fi
-[[ -x "${BIN:-}" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
 
 rm -rf dist/wryme-desktop
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 
-cp "$BIN" "$STAGE/Contents/Resources/wme"
 cp desktop/config/wezterm.lua "$STAGE/Contents/Resources/wezterm.lua"
 cp desktop/macos/wryme-launcher.sh "$STAGE/Contents/MacOS/wryme-launcher"
 chmod +x "$STAGE/Contents/MacOS/wryme-launcher"
@@ -116,5 +103,5 @@ sed "s/1\.1\.4/$VERSION/g" desktop/macos/Info.plist > "$STAGE/Contents/Info.plis
 # possible (Gatekeeper may still warn on first open of an unsigned download).
 codesign --force --deep --sign - "$STAGE" >/dev/null 2>&1 || echo "codesign skipped"
 
-(cd dist/wryme-desktop && zip -qry "../wryme-darwin-$ARCH.zip" wme.app)
+(cd dist/wryme-desktop && rm -f "../wryme-darwin-$ARCH.zip" && zip -qry "../wryme-darwin-$ARCH.zip" wme.app)
 echo "built dist/wryme-darwin-$ARCH.zip"

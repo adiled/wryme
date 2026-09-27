@@ -28,20 +28,14 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Locate binary: prefer $BIN from CI, then fallbacks
-BIN="${BIN:-}"
-if [[ -z "$BIN" ]]; then
-    for cand in "target/${TARGET:-}/release/wme" "target/release/wme" target/*/release/wme target/x86_64-unknown-linux-gnu/release/wme; do
-        if [[ -x "$cand" ]]; then BIN="$cand"; break; fi
-    done
-fi
-[[ -x "${BIN:-}" ]] || { echo "missing built binary: $BIN (run cargo build --release first)" >&2; exit 1; }
+# The wryme binary is NEVER bundled — the launcher always installs `wme`
+# from cargo. The bundle carries only wezterm.lua, the launcher, the desktop
+# entry, and the icon.
 
 # Also keep tar.gz stage for fallback (and for local testing)
 STAGE="dist/wryme-linux"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-cp "$BIN" "$STAGE/wme"
 cp desktop/config/wezterm.lua "$STAGE/wezterm.lua"
 cp desktop/linux/wryme-launcher.sh "$STAGE/wryme-launcher.sh"
 cp desktop/linux/install-linux.sh "$STAGE/install.sh"
@@ -54,10 +48,8 @@ tar czf "dist/wryme-linux-$TARGZ_ARCH.tar.gz" -C dist wryme-linux 2>/dev/null ||
 DEB_STAGE="dist/wryme-deb"
 DEB_NAME="wryme_${VERSION}_${DEB_ARCH}.deb"
 rm -rf "$DEB_STAGE"
-mkdir -p "$DEB_STAGE/DEBIAN" "$DEB_STAGE/usr/local/bin" "$DEB_STAGE/usr/share/wryme" "$DEB_STAGE/usr/share/applications" "$DEB_STAGE/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "$DEB_STAGE/DEBIAN" "$DEB_STAGE/usr/share/wryme" "$DEB_STAGE/usr/share/applications" "$DEB_STAGE/usr/share/icons/hicolor/256x256/apps"
 
-cp "$BIN" "$DEB_STAGE/usr/local/bin/wme"
-chmod 755 "$DEB_STAGE/usr/local/bin/wme"
 cp desktop/config/wezterm.lua "$DEB_STAGE/usr/share/wryme/wezterm.lua"
 cp desktop/linux/wryme-launcher.sh "$DEB_STAGE/usr/share/wryme/wryme-launcher.sh"
 cp desktop/linux/wryme.png "$DEB_STAGE/usr/share/wryme/wryme.png"

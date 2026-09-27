@@ -3,18 +3,24 @@
 # wryme desktop launcher - Linux
 #
 # Opens wryme in a clean, app-like WezTerm window. No terminal chrome.
+#
+# The wryme binary is NEVER bundled. It always comes from cargo: this
+# launcher resolves the cargo-installed `wme`, installs it from crates.io
+# if missing, and keeps it current. No fallbacks.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Prefer wme from PATH (installed via cargo install), fall back to bundled.
-if command -v wme >/dev/null 2>&1; then
-    WME="$(command -v wme)"
-else
-    WME="$HERE/wme"
-fi
 CFG="$HERE/wezterm.lua"
-LAUNCHER="$HERE/wryme-launcher.sh"
+
+# --- Resolve cargo's bin dir regardless of PATH ----------------------------
+if [[ -n "${CARGO_HOME:-}" ]]; then
+    CARGO_BIN="$CARGO_HOME/bin"
+else
+    CARGO_BIN="$HOME/.cargo/bin"
+fi
+WME="$CARGO_BIN/wme"
+CARGO_INSTALL="cargo install wryme --locked"
 
 # --- Locate wezterm ---------------------------------------------------------
 find_wezterm() {
@@ -62,7 +68,29 @@ if [[ ! -x "${WEZTERM}" && "$WEZTERM" != "wezterm" ]]; then
     WEZTERM="wezterm"
 fi
 
+# --- Cargo-first wryme ----------------------------------------------------
+# The desktop bundle never carries `wme`. If cargo hasn't installed it yet,
+# install the latest from crates.io now. No bundled fallback.
+ensure_wme() {
+    if [[ -x "$WME" ]]; then return 0; fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --error --title="wryme" --text="wryme needs the cargo tools to install itself. Install Rust from https://rustup.rs then open wryme again."
+        fi
+        exit 1
+    fi
+    if ! $CARGO_INSTALL; then
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --error --title="wryme" --text="Installing wryme from cargo failed. Run 'cargo install wryme' manually, then open wryme again."
+        fi
+        exit 1
+    fi
+}
+ensure_wme
+
 # --- Silent auto-update (Linux) -------------------------------------------
+# Keeps the cargo-installed wme current: plain `cargo install` upgrades when
+# a newer version exists and is a no-op when already current.
 maybe_auto_update() {
     local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wryme"
     local stamp="$cache_dir/last_update_check"
@@ -75,51 +103,8 @@ maybe_auto_update() {
     fi
     if ! mkdir "$lock" 2>/dev/null; then return 0; fi
     trap 'rmdir "$lock" 2>/dev/null || true' RETURN
-    local cur="0.0.0"
-    if [[ -x "$WME" ]]; then cur="$("$WME" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "0.0.0")"; fi
-    local json
-    json="$(curl -fsSL --max-time 8 -H 'Accept: application/vnd.github+json' https://api.github.com/repos/adiled/wryme/releases/latest 2>/dev/null || true)"
-    [[ -z "$json" ]] && { rmdir "$lock" 2>/dev/null || true; return 0; }
-    local tag
-    tag="$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('tag_name','').lstrip('v'))" <<< "$json" 2>/dev/null || echo "")"
-    [[ -z "$tag" ]] && { rmdir "$lock" 2>/dev/null || true; return 0; }
-    local need
-    need="$(python3 -c "
-import sys
-def parse(v):
-    try: return tuple(int(x) for x in v.split('.'))
-    except: return (0,0,0)
-print('1' if parse('$tag')>parse('$cur') else '0')
-" 2>/dev/null || echo 0)"
-    [[ "$need" != "1" ]] && { date +%s > "$stamp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 0; }
-    local arch url tmp new_wme
-    arch="$(uname -m)"
-    local asset="wryme-linux-${arch}.tar.gz"
-    # we only publish x86_64 for linux presently; fall back
-    if [[ "$arch" != "x86_64" ]]; then asset="wryme-linux-x86_64.tar.gz"; fi
-    url="$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); [print(a['browser_download_url']) for a in d.get('assets',[]) if a.get('name')=='$asset']" <<< "$json" 2>/dev/null | head -1 || true)"
-    [[ -z "$url" ]] && url="$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); [print(a['browser_download_url']) for a in d.get('assets',[]) if 'linux' in a.get('name','')]" <<< "$json" 2>/dev/null | head -1 || true)"
-    [[ -z "$url" ]] && { date +%s > "$stamp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 0; }
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"; rmdir "'$lock'" 2>/dev/null || true' RETURN
-    if ! curl -fsSL --max-time 90 "$url" -o "$tmp/bundle.tar.gz" 2>/dev/null; then date +%s > "$stamp" 2>/dev/null || true; return 0; fi
-    if ! tar -xzf "$tmp/bundle.tar.gz" -C "$tmp" 2>/dev/null; then date +%s > "$stamp" 2>/dev/null || true; return 0; fi
-    new_wme="$(find "$tmp" -type f -name "wme" | head -1 || true)"
-    [[ -z "$new_wme" ]] && { date +%s > "$stamp" 2>/dev/null || true; return 0; }
-    chmod +x "$new_wme" 2>/dev/null || true
-    cp "$new_wme" "$WME.new" 2>/dev/null && chmod +x "$WME.new" 2>/dev/null && mv "$WME.new" "$WME" 2>/dev/null || true
-    # Ship the new config + launcher too: "New Window" spawns from
-    # default_prog, which the launcher command line does not cover.
-    local new_cfg new_launcher
-    new_cfg="$(find "$tmp" -type f -name "wezterm.lua" | head -1 || true)"
-    new_launcher="$(find "$tmp" -type f -name "wryme-launcher.sh" | head -1 || true)"
-    [[ -z "$new_cfg" || ! -f "$new_cfg" ]] || cp "$new_cfg" "$CFG.new" 2>/dev/null && mv "$CFG.new" "$CFG" 2>/dev/null || true
-    [[ -z "$new_launcher" || ! -f "$new_launcher" ]] || cp "$new_launcher" "$LAUNCHER.new" 2>/dev/null && chmod +x "$LAUNCHER.new" 2>/dev/null && mv "$LAUNCHER.new" "$LAUNCHER" 2>/dev/null || true
-    # also update installed copy if this is the dist copy (install.sh will copy on next install)
-    if [[ "$HERE" != "$HOME/.local/share/wryme" && -x "$HOME/.local/share/wryme/wme" ]]; then
-        cp "$WME" "$HOME/.local/share/wryme/wme" 2>/dev/null || true
-        cp "$CFG" "$HOME/.local/share/wryme/wezterm.lua" 2>/dev/null || true
-        cp "$LAUNCHER" "$HOME/.local/share/wryme/wryme-launcher.sh" 2>/dev/null || true
+    if command -v cargo >/dev/null 2>&1; then
+        $CARGO_INSTALL >/dev/null 2>&1 || true
     fi
     date +%s > "$stamp" 2>/dev/null || true
 }
