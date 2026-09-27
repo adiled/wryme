@@ -1,17 +1,15 @@
-// Offline demo mode. When the user has no API key set and we're pointed at
-// the default OpenAI URL, we obviously can't reach a real model. Instead of
-// erroring on the first message, we stream pre-written nonsense so the TUI
-// does something visible. Switches off the moment OPENAI_API_KEY is set or
-// the user points at a local server (Ollama, LM Studio, etc.).
-//
-// Each entry is a (brain, reply) pair. The brain is the imaginary
-// chain-of-thought, streamed first as Brain events. It can be empty if
-// this particular canned reply doesn't pretend to think before answering.
-// Then the reply itself streams as Delta events.
-
 use crate::api::StreamEvent;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{Duration, sleep};
+
+const THINK_BASE_MS: u64 = 180;
+const THINK_JITTER_MS: u64 = 220;
+const BRAIN_TOKEN_MS: u64 = 10;
+const BRAIN_JITTER_MS: u64 = 32;
+const BRAIN_TO_REPLY_PAUSE_MS: u64 = 350;
+const BRAIN_TO_REPLY_PAUSE_JITTER_MS: u64 = 300;
+const REPLY_TOKEN_MS: u64 = 18;
+const REPLY_JITTER_MS: u64 = 55;
 
 const REPLIES: &[(&str, &str)] = &[
     (
@@ -119,12 +117,12 @@ pub async fn stream(prompt: &str, tx: UnboundedSender<StreamEvent>) {
 
     let (brain, reply) = REPLIES[idx];
 
-    // Brief "thinking" pause so it feels like the network round-trip you'd
-    // expect with a real model.
-    sleep(Duration::from_millis(180 + (rng % 220))).await;
+    sleep(Duration::from_millis(
+        THINK_BASE_MS + (rng % THINK_JITTER_MS),
+    ))
+    .await;
     rng = step(rng);
 
-    // Brain phase. Faster than the reply, to feel like quick muttering.
     if !brain.is_empty() {
         for token in brain.split_inclusive(|c: char| c.is_whitespace()) {
             if tx
@@ -135,16 +133,17 @@ pub async fn stream(prompt: &str, tx: UnboundedSender<StreamEvent>) {
             {
                 return;
             }
-            let delay_ms = 10 + (rng % 32);
+            let delay_ms = BRAIN_TOKEN_MS + (rng % BRAIN_JITTER_MS);
             rng = step(rng);
             sleep(Duration::from_millis(delay_ms)).await;
         }
-        // A beat between thinking and writing, like a human pausing.
-        sleep(Duration::from_millis(350 + (rng % 300))).await;
+        sleep(Duration::from_millis(
+            BRAIN_TO_REPLY_PAUSE_MS + (rng % BRAIN_TO_REPLY_PAUSE_JITTER_MS),
+        ))
+        .await;
         rng = step(rng);
     }
 
-    // Reply phase. Slower, more deliberate, like the model is composing.
     for token in reply.split_inclusive(|c: char| c.is_whitespace()) {
         if tx
             .send(StreamEvent::Delta {
@@ -154,13 +153,12 @@ pub async fn stream(prompt: &str, tx: UnboundedSender<StreamEvent>) {
         {
             return;
         }
-        let delay_ms = 18 + (rng % 55);
+        let delay_ms = REPLY_TOKEN_MS + (rng % REPLY_JITTER_MS);
         rng = step(rng);
         sleep(Duration::from_millis(delay_ms)).await;
     }
 }
 
-// Tiny LCG so we don't need a `rand` dep just for jitter.
 fn step(state: u64) -> u64 {
     state
         .wrapping_mul(6364136223846793005)
