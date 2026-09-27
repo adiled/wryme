@@ -1,23 +1,8 @@
-// Keyboard and mouse handlers. main.rs owns the terminal and the event
-// loop, but the actual dispatch (which key triggers which intent) lives
-// here so it stays small and small-LLM-readable.
-//
-// Three entry points:
-//   handle_key   the main input is focused (default state)
-//   popup_key    the station popup is open and capturing keys
-//   handle_mouse mouse events, currently only the scroll wheel
-//
-// handle_key checks app.popup.mode first; if the popup is open it
-// forwards to popup_key.
-
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
-/// A dropped file lands in the input as its path. If the whole submitted
-/// line is exactly one existing image file path, return it as an image
-/// attachment so the model can see the picture. Anything else (typed text,
-/// a non-image file, several paths) is just plain text and gets no
-/// attachment.
+const POPUP_ROWS_PER_TICK: i32 = 2;
+
 fn attached_images(text: &str) -> Vec<String> {
     let t = text.trim();
     if t.is_empty() || t.chars().any(|c| c.is_whitespace()) {
@@ -50,13 +35,11 @@ pub fn handle_key(
     tx: &mpsc::UnboundedSender<StreamEvent>,
     in_flight: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
-    // Ignore key-release events; we only act on press.
     if k.kind == KeyEventKind::Release {
         return;
     }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
 
-    // Global: Ctrl-C exits immediately, no questions asked.
     if ctrl && matches!(k.code, KeyCode::Char('c')) {
         if let Some(t) = in_flight.take() {
             t.abort();
@@ -66,13 +49,11 @@ pub fn handle_key(
         return;
     }
 
-    // F1 opens the popup directly on the Help tab (even when closed).
     if k.code == KeyCode::F(1) {
         popup::open_help(app);
         return;
     }
 
-    // Ctrl-V toggles read-aloud replies for this window.
     if ctrl && matches!(k.code, KeyCode::Char('v')) {
         if app.voice_on {
             app.voice_on = false;
@@ -88,7 +69,6 @@ pub fn handle_key(
         return;
     }
 
-    // When the station popup is open, it captures input.
     if app.popup.mode != popup::Mode::Closed {
         popup_key(k, app);
         return;
@@ -96,9 +76,6 @@ pub fn handle_key(
 
     match k.code {
         KeyCode::Esc => {
-            // First Esc while a voiced turn streams quiets the voice for
-            // the rest of the turn (mute sticks, not momentary activity);
-            // the next Esc interrupts the turn itself.
             if app.voice_on && !app.voice_muted && app.in_flight {
                 app.mute_voice();
                 app.note("quiet");
@@ -199,13 +176,7 @@ pub fn handle_key(
     }
 }
 
-/// Mouse events. Only the scroll wheel does anything; everything else is
-/// ignored. View-mode-aware: in Page mode the wheel steps pages with a
-/// three-tick accumulator (trackpad friendly); in Scroll mode it steps
-/// two rows per tick.
 pub fn handle_mouse(m: MouseEvent, app: &mut App) {
-    // When the station popup is open, the wheel scrolls the popup body
-    // (two rows per tick), not the chat view behind it.
     if app.popup.mode != popup::Mode::Closed {
         if matches!(
             m.kind,
@@ -216,7 +187,7 @@ pub fn handle_mouse(m: MouseEvent, app: &mut App) {
             } else {
                 -1
             };
-            popup::scroll(app, delta * 2);
+            popup::scroll(app, delta * POPUP_ROWS_PER_TICK);
         }
         return;
     }
@@ -252,8 +223,6 @@ pub fn handle_mouse(m: MouseEvent, app: &mut App) {
     }
 }
 
-/// Flip between Page and Scroll view modes. Resets scroll offsets and
-/// wheel accumulator so the new mode starts fresh.
 fn toggle_view_mode(app: &mut App) {
     app.view_mode = match app.view_mode {
         ViewMode::Page => ViewMode::Scroll,
@@ -268,13 +237,9 @@ fn toggle_view_mode(app: &mut App) {
     });
 }
 
-/// Keys when the station popup is open. Two sub-modes:
-///   Browse: arrow nav, ←/→ adjust, Enter act, Esc close, Ctrl-S close.
-///   SaveAs: text editing of the name field, Enter commit, Esc cancel.
 fn popup_key(k: KeyEvent, app: &mut App) {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
 
-    // Ctrl-S always closes from any sub-mode.
     if ctrl && matches!(k.code, KeyCode::Char('s')) {
         popup::close(app);
         return;
@@ -361,7 +326,6 @@ mod tests {
 
     #[test]
     fn image_path_attaches_single_file() {
-        // Create a temp png (any bytes; extension decides).
         let dir = std::env::temp_dir();
         let path = dir.join("wryme_test_img.png");
         std::fs::write(&path, b"fakeimage").unwrap();
