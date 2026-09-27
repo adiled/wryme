@@ -1,5 +1,3 @@
-// Application state. The UI is a pure function of this.
-
 use std::sync::{Arc, Mutex};
 
 use crate::api::{ApiMessage, ApiToolCall};
@@ -15,9 +13,6 @@ pub enum Role {
     Assistant,
 }
 
-/// What kind of chunk the model most recently sent us during a stream.
-/// Drives the dim header indicator next to the role label: "thinking…"
-/// vs "writing…" vs "tinkering…". Only meaningful while `streaming`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Streaming,
@@ -26,21 +21,12 @@ pub enum Phase {
     Writing,
 }
 
-/// How the message area handles overflow.
-///
-/// Page is the default. Content is shown in discrete viewport-sized chunks
-/// and navigation snaps between them. Scroll is the alternative: a smooth
-/// row-by-row offset, more like a traditional terminal pager.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewMode {
     Page,
     Scroll,
 }
 
-/// One tool call the model made within an assistant turn, together with
-/// the result we fed back to it. Persisted on the Message so the wire
-/// transcript between user turns carries the full tool-call/result pair —
-/// without it, small models "forget" they have tools and stop using them.
 #[derive(Debug, Clone)]
 pub struct ToolEvent {
     pub call_id: String,
@@ -53,35 +39,13 @@ pub struct ToolEvent {
 pub struct Message {
     pub role: Role,
     pub content: String,
-    /// Image file paths attached to this user message. Sent upstream as
-    /// image inputs; rendered as a small attachment note.
     pub images: Vec<String>,
-    /// Reasoning / chain-of-thought from the model, if it sent any.
-    /// Streamed before `content`, rendered below the reply (older in time)
-    /// as a dimmer "brain" block.
     pub brain: String,
-    /// True while the model is still streaming into this message.
     pub streaming: bool,
-    /// Local time the message was created, formatted "HH:mm". Set once
-    /// when the message is pushed and never updated. We don't persist
-    /// across sessions, so the date is always today and not stored.
     pub timestamp: String,
-    /// What the model is currently doing (writing, thinking, calling a
-    /// tool). Drives the dim header label. Stops being displayed once
-    /// streaming ends.
     pub phase: Phase,
-    /// Name of the tool the model is currently calling, if any. Surfaced
-    /// to the right of the phase indicator on the header line, just left
-    /// of the timestamp. Only displayed while streaming.
     pub current_tool: Option<String>,
-    /// Logical turn this message belongs to. A single assistant reply can
-    /// span several messages (one per contiguous non-thinking cluster) —
-    /// they all share the same `turn_id` so the wire transcript and the
-    /// book record still treat them as one turn. User messages set 0.
     pub turn_id: u64,
-    /// Tool calls made during this assistant turn and their results, in
-    /// order. Replayed into the wire history on the next request so the
-    /// model sees its own tool use and keeps using tools.
     pub tool_events: Vec<ToolEvent>,
 }
 
@@ -90,86 +54,65 @@ fn now_hhmm() -> String {
 }
 
 pub struct App {
-    /// Messages in chronological order (index 0 = oldest).
-    /// The UI renders them in reverse so the newest sits at the top.
     pub messages: Vec<Message>,
     pub system: Option<String>,
-    /// True while a request is in flight.
     pub in_flight: bool,
     pub status: String,
     pub should_quit: bool,
-    /// Which page of the message stack the user is currently viewing.
-    /// 0 = the live page (newest content at top). Higher = further back
-    /// in the conversation. The renderer clamps this to the number of
-    /// pages actually available given the current viewport. Only meaningful
-    /// in `ViewMode::Page`.
     pub current_page: usize,
-    /// Row-level scroll offset, used only in `ViewMode::Scroll`. 0 = newest
-    /// content visible at the top, higher = scrolled into older content.
     pub scroll_row: usize,
-    /// Mouse wheel accumulator. Ticks add up here; once the magnitude
-    /// crosses a threshold we move a page and subtract the threshold.
-    /// Keeps trackpad scrolling from blowing through pages instantly.
     pub wheel_accum: i32,
-    /// Current view mode. Page is the default; Scroll is the alternative.
     pub view_mode: ViewMode,
-    /// Last rendered viewport height (rows). Recorded by the renderer so
-    /// the key handlers can step by viewport when the user hits PgUp/PgDn
-    /// in scroll mode.
     pub last_viewport_h: usize,
-    /// Most recent response.id seen from a Responses-protocol station.
-    /// Captured for the UI; never replayed — requests are stateless
-    /// (`store: false`, full transcript every turn). Reset to None on
-    /// launch; we don't persist across runs.
     pub last_response_id: Option<String>,
-    /// Running token usage for this window. `usage_ctx` is the latest
-    /// reported prompt size (replaced each turn — every request re-reports
-    /// the whole transcript, so summing it would explode past the real
-    /// context). `usage_out` accumulates generated tokens across turns.
-    /// Rendered as a gray K-count, bottom-right.
     pub usage_ctx: u64,
     pub usage_out: u64,
     pub voice_on: bool,
     pub voice_muted: bool,
     pub voice_speaker: Option<crate::voice::Speaker>,
     pub voice_buffer: String,
-    /// All shops loaded at startup. Read-only after that. Used by the
-    /// popup to list every model any shop can run.
     pub shops: Vec<Shop>,
-    /// Every saved station loaded at startup, plus any the user saves
-    /// during this session via the popup. Mutable.
     pub stations: Vec<Station>,
-    /// The station currently in effect. The popup mutates this when the
-    /// user adjusts dials, picks a different model, or loads a saved
-    /// station. Cloned into each in-flight request.
     pub active_station: Station,
-    /// The shop currently in effect. Re-resolved every time
-    /// active_station.model changes.
     pub active_shop: Shop,
-    /// Name of the saved station this session traces back to, if any.
-    /// None when the session was synthesized (untitled, demo). Used
-    /// alongside `active_station` to compute whether the active config
-    /// is "dirty" (modified vs. its saved form).
     pub active_origin: Option<String>,
-    /// The popup overlay state (closed, browsing, or entering a name).
     pub popup: Popup,
-    /// The book engine: wryme's memory, a columnar Parquet store of
-    /// open-ended compartments. Shared across turns as an Arc<Mutex<..>>
-    /// so the streaming protocol and the background delivery can both
-    /// reach it (the invisible `book` tool locks it in the flow).
     pub engine: Arc<Mutex<book::Engine>>,
     pub reservoir: Arc<Mutex<Reservoir>>,
-    /// Monotonic counter for logical turns; bumped by begin_assistant and
-    /// stamped onto every cluster of that turn.
     turn_counter: u64,
-    /// True if the last thing streamed into the assistant was thinking
-    /// (a Brain delta). A content delta arriving right after this starts
-    /// a fresh cluster so each contiguous non-thinking run is its own entry.
     last_stream_was_brain: bool,
 }
 
-/// The book lives at `~/.config/wryme/book`, like the shops and
-/// stations files — one folder for everything wryme keeps.
+fn api_tool_call(ev: &ToolEvent) -> ApiToolCall {
+    ApiToolCall {
+        id: ev.call_id.clone(),
+        name: ev.name.clone(),
+        arguments: ev.arguments.clone(),
+    }
+}
+
+fn api_tool_result(ev: &ToolEvent) -> ApiMessage {
+    ApiMessage {
+        role: "tool".into(),
+        content: ev.result.clone(),
+        images: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: ev.call_id.clone(),
+        tool_result: ev.result.clone(),
+    }
+}
+
+fn system_message(content: String) -> ApiMessage {
+    ApiMessage {
+        role: "system".into(),
+        content,
+        images: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: String::new(),
+        tool_result: String::new(),
+    }
+}
+
 fn book_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(home)
@@ -220,24 +163,15 @@ impl App {
         }
     }
 
-    /// True when the active station differs from the saved entry it was
-    /// loaded from. False when there is no origin (untitled / demo) or
-    /// when active matches its saved entry exactly.
     pub fn is_dirty(&self) -> bool {
         let Some(origin) = &self.active_origin else {
             return false;
         };
         let Some(saved) = self.stations.iter().find(|s| s.name == *origin) else {
-            // Origin set but saved entry missing. Should not happen in
-            // normal use; treat as dirty so the user notices.
             return true;
         };
         saved.model != self.active_station.model
-            || saved.dials.boldness != self.active_station.dials.boldness
-            || saved.dials.patience != self.active_station.dials.patience
-            || saved.dials.verbosity != self.active_station.dials.verbosity
-            || saved.dials.tinker_keep != self.active_station.dials.tinker_keep
-            || saved.dials.tinker_clip != self.active_station.dials.tinker_clip
+            || saved.dials != self.active_station.dials
             || saved.voice != self.active_station.voice
     }
 
@@ -252,8 +186,6 @@ impl App {
         self.voice_buffer.clear();
     }
 
-    /// Quiet for the rest of this turn: kills current speech and drops
-    /// anything queued, and new deltas stay silent until the next turn.
     pub fn mute_voice(&mut self) {
         self.stop_voice();
         self.voice_muted = true;
@@ -302,9 +234,6 @@ impl App {
             turn_id: 0,
             tool_events: Vec::new(),
         });
-        // The engine records every turn into the continuous stream, and
-        // re-checks whether an unattributed thread is weightful enough to
-        // prod the agent into deeming it.
         if let Some(last) = self.messages.last()
             && last.role == Role::User
             && let Ok(mut e) = self.engine.lock()
@@ -313,10 +242,15 @@ impl App {
         }
     }
 
-    pub fn begin_assistant(&mut self) {
-        self.turn_counter += 1;
-        let tid = self.turn_counter;
-        self.messages.push(Message {
+    fn streaming_assistant(&mut self) -> Option<&mut Message> {
+        self.messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::Assistant && m.streaming)
+    }
+
+    fn open_assistant_cluster(turn_id: u64) -> Message {
+        Message {
             role: Role::Assistant,
             content: String::new(),
             images: Vec::new(),
@@ -325,9 +259,15 @@ impl App {
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
             current_tool: None,
-            turn_id: tid,
+            turn_id,
             tool_events: Vec::new(),
-        });
+        }
+    }
+
+    pub fn begin_assistant(&mut self) {
+        self.turn_counter += 1;
+        let tid = self.turn_counter;
+        self.messages.push(Self::open_assistant_cluster(tid));
     }
 
     pub fn append_to_last_assistant(&mut self, delta: &str) {
@@ -340,29 +280,10 @@ impl App {
             .rposition(|m| m.role == Role::Assistant && m.streaming);
         let Some(idx) = idx else { return };
 
-        // A writing delta right after thinking starts a fresh cluster, so
-        // each contiguous non-thinking run shows as its own assistant entry.
-        // (An empty placeholder that already holds the leading brain just
-        // absorbs the first content — that is still the first cluster.)
         if self.last_stream_was_brain && !self.messages[idx].content.is_empty() {
             let tid = self.messages[idx].turn_id;
-            // Close the previous cluster: only the LATEST cluster of a turn
-            // stays `streaming`, so the phase label, tool name and cursor
-            // show on the newest entry only. Older clusters render as
-            // finished text without live indicators.
             self.messages[idx].streaming = false;
-            self.messages.push(Message {
-                role: Role::Assistant,
-                content: String::new(),
-                images: Vec::new(),
-                brain: String::new(),
-                streaming: true,
-                timestamp: now_hhmm(),
-                phase: Phase::Streaming,
-                current_tool: None,
-                turn_id: tid,
-                tool_events: Vec::new(),
-            });
+            self.messages.push(Self::open_assistant_cluster(tid));
         }
         self.last_stream_was_brain = false;
 
@@ -370,21 +291,11 @@ impl App {
             Some(m) => m,
             None => return,
         };
-        // Verbatim concatenation (issue #16): stream deltas are appended
-        // exactly as they arrive. An earlier heuristic inserted a space
-        // whenever both sides were non-whitespace (to fix "sentence.Next"
-        // splits), but that corrupts well-formed streams — "Hello" + ","
-        // became "Hello ,", subword splits became "un der". Both the Chat
-        // and Responses specs define deltas as exact slices; any spacing
-        // the model intends already rides inside them.
         m.content.push_str(delta);
         m.phase = Phase::Writing;
     }
 
     pub fn append_to_last_brain(&mut self, delta: &str) {
-        // All reasoning of a turn lands on ONE message — the turn's first
-        // cluster — so the brain shows as a single UI entry per turn rather
-        // than a footnote on every cluster.
         let tid = self.turn_counter;
         if let Some(m) = self
             .messages
@@ -393,25 +304,14 @@ impl App {
         {
             m.brain.push_str(delta);
         }
-        // The "thinking…" indicator belongs on the latest visual entry only.
-        if let Some(m) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.streaming)
-        {
+        if let Some(m) = self.streaming_assistant() {
             m.phase = Phase::Thinking;
         }
         self.last_stream_was_brain = true;
     }
 
     pub fn record_tool_call(&mut self, name: Option<String>) {
-        if let Some(m) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.streaming)
-        {
+        if let Some(m) = self.streaming_assistant() {
             m.phase = Phase::Tinkering;
             if let Some(n) = name {
                 m.current_tool = Some(n);
@@ -419,8 +319,6 @@ impl App {
         }
     }
 
-    /// Persist a tool call/result pair onto the streaming assistant message,
-    /// so the next user turn's wire history carries the full tool transcript.
     pub fn record_tool_result(
         &mut self,
         call_id: String,
@@ -428,12 +326,7 @@ impl App {
         arguments: String,
         result: String,
     ) {
-        if let Some(m) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.streaming)
-        {
+        if let Some(m) = self.streaming_assistant() {
             m.tool_events.push(ToolEvent {
                 call_id,
                 name,
@@ -446,26 +339,17 @@ impl App {
     pub fn finish_streaming(&mut self) {
         self.in_flight = false;
 
-        // Find the streaming assistant message (most recent) and its turn_id.
-        let mut just_finished: Option<usize> = None;
-        for i in (0..self.messages.len()).rev() {
-            if self.messages[i].streaming {
-                just_finished = Some(i);
-                break;
-            }
-        }
+        let just_finished = self.messages.iter().rposition(|m| m.streaming);
 
         if let Some(i) = just_finished {
             let tid = self.messages[i].turn_id;
 
-            // Mark every cluster of this turn done.
             for m in self.messages.iter_mut() {
                 if m.streaming && m.turn_id == tid {
                     m.streaming = false;
                 }
             }
 
-            // Record the whole logical turn (all clusters) into the book once.
             let joined: String = self
                 .messages
                 .iter()
@@ -508,10 +392,6 @@ impl App {
                 res.end_turn(user_text, &brain_text, tool_chars);
             }
 
-            // Drop empty clusters of this turn so the screen does not show a
-            // confusing empty bubble. Server hiccups and pre-delta errors are
-            // common causes. If upstream sent an error, the status bar already
-            // explains what happened. If not, leave a short note.
             let any_nonempty = self.messages.iter().any(|m| {
                 m.role == Role::Assistant
                     && m.turn_id == tid
@@ -527,120 +407,37 @@ impl App {
         }
     }
 
-    /// Build the wire-format message list to send upstream. The base
-    /// system prompt, then the established compartments' rendered
-    /// bookmarks as one system message each — the preamble — then the
-    /// live turns.
     pub fn api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if let Some(sys) = &self.system {
-            out.push(ApiMessage {
-                role: "system".into(),
-                content: sys.clone(),
-                images: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: String::new(),
-                tool_result: String::new(),
-            });
+            out.push(system_message(sys.clone()));
         }
         if let Ok(mut engine) = self.engine.lock() {
             for preamble in engine.preamble() {
-                out.push(ApiMessage {
-                    role: "system".into(),
-                    content: preamble,
-                    images: Vec::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: String::new(),
-                    tool_result: String::new(),
-                });
+                out.push(system_message(preamble));
             }
-            // The book-writing prod: a quiet system reminder the engine
-            // slips the agent once when an unattributed thread is weightful.
             if let Some(prod) = engine.take_prod() {
-                out.push(ApiMessage {
-                    role: "system".into(),
-                    content: prod,
-                    images: Vec::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: String::new(),
-                    tool_result: String::new(),
-                });
+                out.push(system_message(prod));
             }
         }
         let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
-            // Skip an empty streaming placeholder. We send the history
-            // BEFORE the assistant turn we're about to fill.
-            if m.streaming && m.content.is_empty() {
+            if m.streaming {
                 continue;
             }
-            // A cluster of an assistant turn still in flight: skip it too —
-            // we only send history up to the turn we're about to fill.
-            if m.role == Role::Assistant && m.streaming {
-                continue;
-            }
-            // Consecutive assistant clusters of the SAME logical turn merge
-            // into one ApiMessage, so the wire sees one assistant turn.
             if m.role == Role::Assistant
                 && last_asst_turn == Some(m.turn_id)
                 && out.last().map(|a| a.role.as_str()) == Some("assistant")
+                && let Some(last) = out.last_mut()
             {
-                let mut merged = false;
-                if let Some(last) = out.last_mut() {
-                    if !last.content.is_empty() && !m.content.is_empty() {
-                        last.content.push('\n');
-                    }
-                    last.content.push_str(&m.content);
-                    for ev in &m.tool_events {
-                        last.tool_calls.push(ApiToolCall {
-                            id: ev.call_id.clone(),
-                            name: ev.name.clone(),
-                            arguments: ev.arguments.clone(),
-                        });
-                    }
-                    merged = true;
+                if !last.content.is_empty() && !m.content.is_empty() {
+                    last.content.push('\n');
                 }
-                // Emit the tool-role results after releasing the borrow.
+                last.content.push_str(&m.content);
                 for ev in &m.tool_events {
-                    out.push(ApiMessage {
-                        role: "tool".into(),
-                        content: ev.result.clone(),
-                        images: Vec::new(),
-                        tool_calls: Vec::new(),
-                        tool_call_id: ev.call_id.clone(),
-                        tool_result: ev.result.clone(),
-                    });
+                    last.tool_calls.push(api_tool_call(ev));
                 }
-                if !merged {
-                    // Should not happen (we checked out.last() is assistant),
-                    // but keep a fresh assistant message so history is sane.
-                    out.push(ApiMessage {
-                        role: "assistant".into(),
-                        content: m.content.clone(),
-                        images: Vec::new(),
-                        tool_calls: m
-                            .tool_events
-                            .iter()
-                            .map(|ev| ApiToolCall {
-                                id: ev.call_id.clone(),
-                                name: ev.name.clone(),
-                                arguments: ev.arguments.clone(),
-                            })
-                            .collect(),
-                        tool_call_id: String::new(),
-                        tool_result: String::new(),
-                    });
-                    for ev in &m.tool_events {
-                        out.push(ApiMessage {
-                            role: "tool".into(),
-                            content: ev.result.clone(),
-                            images: Vec::new(),
-                            tool_calls: Vec::new(),
-                            tool_call_id: ev.call_id.clone(),
-                            tool_result: ev.result.clone(),
-                        });
-                    }
-                }
+                out.extend(m.tool_events.iter().map(api_tool_result));
                 last_asst_turn = Some(m.turn_id);
                 continue;
             }
@@ -648,24 +445,10 @@ impl App {
                 last_asst_turn = Some(m.turn_id);
             }
             let (tool_calls, mut results) = if m.role == Role::Assistant {
-                let mut tcs = Vec::new();
-                let mut res = Vec::new();
-                for ev in &m.tool_events {
-                    tcs.push(ApiToolCall {
-                        id: ev.call_id.clone(),
-                        name: ev.name.clone(),
-                        arguments: ev.arguments.clone(),
-                    });
-                    res.push(ApiMessage {
-                        role: "tool".into(),
-                        content: ev.result.clone(),
-                        images: Vec::new(),
-                        tool_calls: Vec::new(),
-                        tool_call_id: ev.call_id.clone(),
-                        tool_result: ev.result.clone(),
-                    });
-                }
-                (tcs, res)
+                (
+                    m.tool_events.iter().map(api_tool_call).collect(),
+                    m.tool_events.iter().map(api_tool_result).collect(),
+                )
             } else {
                 (Vec::new(), Vec::new())
             };
@@ -685,48 +468,32 @@ impl App {
                 tool_call_id: String::new(),
                 tool_result: String::new(),
             });
-            // Emit the tool-role result messages right after their assistant
-            // turn, so the wire sees the call/result pair together.
             out.append(&mut results);
         }
-        // Tinker keep/clip: prune replay, keep pair atomic. Defaults keep=all/full.
         let clip = self.active_station.dials.tinker_clip;
         let total_pairs = out.iter().filter(|m| m.role == "tool").count();
         let keep_n = self.active_station.dials.tinker_keep.keep_n(total_pairs);
         if keep_n.is_some() || clip != crate::station::TinkerVal::All {
-            // Collect pair indices: each assistant with tool_calls + following tool msgs.
-            // We prune oldest pairs to keep last N.
-            if let Some(n) = keep_n {
-                if total_pairs > n {
-                    let drop = total_pairs - n;
-                    let mut to_drop = drop;
-                    let mut pruned: Vec<ApiMessage> = Vec::with_capacity(out.len());
-                    for msg in out {
-                        if msg.role == "tool" && to_drop > 0 {
-                            to_drop -= 1;
-                            // also drop its paired call from preceding assistant
-                            if let Some(last) = pruned.last_mut()
-                                && last.role == "assistant"
-                                && !last.tool_calls.is_empty()
-                            {
-                                // find matching call_id
-                                let id = &msg.tool_call_id;
-                                last.tool_calls.retain(|c| c.id != *id);
-                            }
-                            continue;
-                        }
-                        if msg.role == "assistant" && to_drop > 0 && msg.tool_calls.len() <= to_drop
+            if let Some(n) = keep_n
+                && total_pairs > n
+            {
+                let mut to_drop = total_pairs - n;
+                let mut pruned: Vec<ApiMessage> = Vec::with_capacity(out.len());
+                for msg in out {
+                    if msg.role == "tool" && to_drop > 0 {
+                        to_drop -= 1;
+                        if let Some(last) = pruned.last_mut()
+                            && last.role == "assistant"
+                            && !last.tool_calls.is_empty()
                         {
-                            // This assistant's calls are among dropped oldest - handled via tool drop above,
-                            // but if assistant has no remaining calls keep content anyway
-                            // (don't drop whole assistant turn)
+                            let id = &msg.tool_call_id;
+                            last.tool_calls.retain(|c| c.id != *id);
                         }
-                        pruned.push(msg);
+                        continue;
                     }
-                    out = pruned;
-                } else {
-                    // no keep-pruning needed, keep out as is
+                    pruned.push(msg);
                 }
+                out = pruned;
             }
             if clip != crate::station::TinkerVal::All {
                 for m in &mut out {
@@ -755,7 +522,6 @@ mod tests {
             Shop::demo(),
             None,
         );
-        // Keep the test off the real book: swap in a temp engine.
         let dir = std::env::temp_dir().join(format!("wryme_app_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
@@ -764,8 +530,6 @@ mod tests {
 
     #[test]
     fn stream_deltas_concatenate_verbatim() {
-        // Issue #16: no space insertion. Punctuation and subword splits
-        // must land exactly as streamed.
         let mut app = test_app();
         app.begin_assistant();
         for d in ["Hello", ",", " world", "!", " un", "der"] {

@@ -15,7 +15,7 @@ pub struct Station {
     pub voice: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Dials {
     pub boldness: Option<f32>,
     pub patience: Option<Patience>,
