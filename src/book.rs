@@ -229,7 +229,8 @@ impl Engine {
         book.next_row += 1;
         book.unattr_tokens += content.len() as i64;
         book.unattr_turns += 1;
-        book.unattr_tail.push((role.to_string(), content.to_string()));
+        book.unattr_tail
+            .push((role.to_string(), content.to_string()));
         if book.unattr_tail.len() > TAIL_ROWS {
             book.unattr_tail.remove(0);
         }
@@ -1220,7 +1221,8 @@ mod tests {
         let now = now_ms();
 
         // Fresher page, topic phrase + matching tail content.
-        book.unattr_tail.push(("user".into(), "the press loves olive oil".into()));
+        book.unattr_tail
+            .push(("user".into(), "the press loves olive oil".into()));
         book.index.push(CompartmentMeta {
             opened_at: now - 1000,
             last_inked: now - 3_600_000,
