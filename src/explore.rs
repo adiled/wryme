@@ -1,28 +1,21 @@
-// myshell_explore: a discovery tool for the model.
-//
-// When wme hands a model a shell (the `<myshell>` idea), the model
-// doesn't know what's on this machine, and it's too stupid to go look —
-// it just says "i can't find that tool". This tool fixes that.
-//
-// The model is told to hit it FIRST with a CSV of words/phrases it
-// thinks could be tools. We deterministically find each one on the
-// system — PATH binaries, aliases, functions in the user's shell rc
-// files — and return its --help output, so the model knows exactly what
-// exists and how to use it. No LLM guessing; pure filesystem + `--help`.
-//
-// Both the Responses and Chat Completions protocols advertise and run
-// this same tool; the per-protocol code lives in api_responses.rs and
-// api_chat.rs. This file is just the tool itself: what it is called,
-// how it is advertised, and what it does.
-
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
 use crate::api::truncate;
 
-/// The tool name the model calls. It's named after the user's real login
-/// shell: `zsh_explore` on a zsh machine, `bash_explore` on bash, etc.
+const REPORT_MAX_CHARS: usize = 24_000;
+const HELP_MAX_CHARS: usize = 4_000;
+const MAN_MAX_LINES: usize = 30;
+const FUZZY_MAX_RESULTS: usize = 5;
+const HELP_TIMEOUT: Duration = Duration::from_secs(3);
+const RC_FILES: &[&str] = &[
+    "~/.zshrc",
+    "~/.bashrc",
+    "~/.profile",
+    "~/.config/fish/config.fish",
+];
+
 pub fn tool_name() -> String {
     let shell = crate::shell_env::shell();
     format!("{}_explore", shell_basename(shell))
@@ -35,8 +28,6 @@ pub(crate) fn shell_basename(shell: &str) -> String {
         .unwrap_or_else(|| "sh".to_string())
 }
 
-/// What we tell the model about the tool. The point is to make it hit
-/// this FIRST with a CSV of words it thinks could be tools.
 pub const TOOL_DESCRIPTION: &str = "\
 Call this FIRST whenever you need to do something on this machine but \
 aren't sure a command exists or how to use it. Pass a CSV of the words \
@@ -46,8 +37,6 @@ rc files) and return its --help output, so you know exactly what is \
 available and how to use it. Once you know what to run, execute it with \
 your shell tool (the one named after your shell, e.g. zsh or bash).";
 
-/// The JSON parameters schema advertised with the tool.
-/// Strict-mode clean: single required property, no additional properties.
 pub fn tool_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -62,9 +51,6 @@ pub fn tool_parameters() -> serde_json::Value {
     })
 }
 
-/// Execute a tool call. Returns the output text to feed back to the
-/// model, or None if the tool isn't one we run locally. Async because
-/// gathering `--help` shells out and we want it cancellable/timeoutable.
 pub async fn execute(name: &str, arguments: &str) -> Option<String> {
     if name != tool_name() {
         return None;
@@ -73,8 +59,6 @@ pub async fn execute(name: &str, arguments: &str) -> Option<String> {
     Some(explore(&csv).await)
 }
 
-/// Pull the CSV out of whatever the model passed. Usually it's JSON
-/// (`{"csv":"ls, git"}`), but we tolerate a bare string or an array.
 fn extract_csv(arguments: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) {
         if let Some(c) = v.get("csv").and_then(|c| c.as_str()) {
@@ -91,7 +75,6 @@ fn extract_csv(arguments: &str) -> String {
     arguments.trim().to_string()
 }
 
-/// Find each term on the machine and assemble a plain-text report.
 pub async fn explore(csv: &str) -> String {
     let terms = split_csv(csv);
     if terms.is_empty() {
@@ -136,10 +119,8 @@ pub async fn explore(csv: &str) -> String {
             }
         }
     }
-    truncate(&out, 24_000)
+    truncate(&out, REPORT_MAX_CHARS)
 }
-
-// ---- csv ----
 
 fn split_csv(csv: &str) -> Vec<String> {
     csv.split(',')
@@ -148,9 +129,6 @@ fn split_csv(csv: &str) -> Vec<String> {
         .collect()
 }
 
-// ---- discovery ----
-
-/// Every executable-looking filename on PATH, deduped and sorted.
 fn path_bins() -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
@@ -173,7 +151,6 @@ fn path_bins() -> Vec<String> {
     out
 }
 
-/// Resolve an exact term to a real binary path on PATH.
 fn which(term: &str) -> Option<String> {
     let path = std::env::var("PATH").unwrap_or_default();
     for dir in path.split(':') {
@@ -185,7 +162,6 @@ fn which(term: &str) -> Option<String> {
     None
 }
 
-/// One alias or function pulled out of a shell rc file.
 #[derive(Clone, Debug)]
 struct RcEntry {
     name: String,
@@ -205,12 +181,11 @@ fn fuzzy_rc(term: &str, rc: &[RcEntry]) -> Vec<RcEntry> {
             let nl = e.name.to_lowercase();
             nl.starts_with(&tl) || nl.contains(&tl)
         })
-        .take(5)
+        .take(FUZZY_MAX_RESULTS)
         .cloned()
         .collect()
 }
 
-/// Case-insensitive prefix/contains match against a list of names.
 fn fuzzy(term: &str, names: &[String]) -> Vec<String> {
     let tl = term.to_lowercase();
     names
@@ -219,21 +194,15 @@ fn fuzzy(term: &str, names: &[String]) -> Vec<String> {
             let nl = n.to_lowercase();
             nl.starts_with(&tl) || nl.contains(&tl)
         })
-        .take(5)
+        .take(FUZZY_MAX_RESULTS)
         .cloned()
         .collect()
 }
 
-/// Pull aliases and functions out of the user's shell rc files.
 fn rc_entries() -> Vec<RcEntry> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut out = Vec::new();
-    for f in [
-        "~/.zshrc",
-        "~/.bashrc",
-        "~/.profile",
-        "~/.config/fish/config.fish",
-    ] {
+    for f in RC_FILES {
         let rel = f.trim_start_matches('~').trim_start_matches('/');
         let path = Path::new(&home).join(rel);
         if !path.is_file() {
@@ -267,8 +236,6 @@ fn rc_entries() -> Vec<RcEntry> {
     out
 }
 
-/// Name of a shell function declared on this one line, if any.
-/// Handles `foo() {`, `foo () {`, and `function foo {`.
 fn function_name(line: &str) -> Option<String> {
     let t = line.trim();
     if let Some(rest) = t.strip_prefix("function ") {
@@ -287,10 +254,6 @@ fn function_name(line: &str) -> Option<String> {
     None
 }
 
-// ---- help ----
-
-/// Run the binary's own help: `--help`, then `-h`, then `man` as a
-/// fallback. Returns the text, or None if nothing useful came back.
 async fn binary_help(path: &str) -> Option<String> {
     let name = Path::new(path).file_name()?.to_string_lossy().into_owned();
 
@@ -298,24 +261,22 @@ async fn binary_help(path: &str) -> Option<String> {
         if let Some(o) = run(path, &args).await {
             let o = o.trim();
             if !o.is_empty() {
-                return Some(truncate(o, 4000));
+                return Some(truncate(o, HELP_MAX_CHARS));
             }
         }
     }
     if let Some(o) = run("man", &[&name]).await {
         let o = o.trim();
         if !o.is_empty() {
-            return Some(truncate(&first_lines(o, 30), 4000));
+            return Some(truncate(&first_lines(o, MAN_MAX_LINES), HELP_MAX_CHARS));
         }
     }
     None
 }
 
-/// Run a command with a timeout. Captures stdout, or stderr if stdout
-/// is empty. None on timeout or launch failure.
 async fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let fut = Command::new(cmd).args(args).output();
-    match tokio::time::timeout(Duration::from_secs(3), fut).await {
+    match tokio::time::timeout(HELP_TIMEOUT, fut).await {
         Ok(Ok(out)) => {
             let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
             if s.trim().is_empty() {

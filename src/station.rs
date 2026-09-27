@@ -1,56 +1,26 @@
-// Stations: the recipe / preset side of the equation. A station says
-// "I am using THIS model with THESE dials." It does not know or care
-// which shop will actually run it; resolution happens at startup by
-// matching the station's model name against shops' advertised models.
-//
-// Three dials, all optional. Unset means the model uses whatever default
-// its maker chose. Set means the user has opinions.
-//
-//   - boldness   (temperature)       how loose / creative / unpredictable
-//   - patience   (reasoning effort)  how hard the model deliberates
-//   - verbosity  (max output tokens) the most the model is allowed to say
-//
-// Stations explicitly do NOT carry system prompts, tools, permissions,
-// or anything else that constitutes "an agent." Those will live in a
-// future preset/persona concept that wraps a station and adds extras.
-// Station stays a pure dials-and-model thing.
-//
-// Sources, in order:
-//   1. Built-in demo station. Always present.
-//   2. WME_DEFAULT_STATION_MODEL env var. Optional model pin for env-only users.
-//   3. ~/.config/wryme/stations.toml. Named, saved stations.
-
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::shop::Shop;
 
+const DEMO: &str = "demo";
+const UNTITLED: &str = "untitled";
+
 #[derive(Debug, Clone)]
 pub struct Station {
     pub name: String,
     pub model: String,
     pub dials: Dials,
-    /// Speech voice for read-aloud replies (Ctrl-V). Heard, never sent:
-    /// e.g. "Zarvox" via `say`, any espeak voice via `spd-say`.
     pub voice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Dials {
-    /// Temperature. 0.0 to 2.0, conventionally. Unset = let the model
-    /// pick its own default.
     pub boldness: Option<f32>,
-    /// Reasoning effort. Defaults to steady (medium). Only meaningful
-    /// on models that support extended thinking. Translated on the wire
-    /// to Responses `reasoning.effort` and Chat `reasoning_effort`.
     pub patience: Option<Patience>,
-    /// Max output tokens. Hard ceiling on reply length. Unset = let the
-    /// model stop when it thinks it is done.
     pub verbosity: Option<u32>,
-    /// Tinker keep: how many tool pairs survive in replay. All = keep everything.
     pub tinker_keep: TinkerKeep,
-    /// Tinker clip: how much of each tool result body survives. Full = verbatim.
     pub tinker_clip: TinkerClip,
 }
 
@@ -148,7 +118,7 @@ impl Patience {
 impl Station {
     pub fn demo() -> Self {
         Self {
-            name: "demo".into(),
+            name: DEMO.into(),
             model: "canned replies".into(),
             dials: Dials::default(),
             voice: None,
@@ -180,9 +150,6 @@ struct StationDef {
     voice: Option<String>,
 }
 
-/// Accept either an enum string ("quick"/"steady"/"slow") or, for the
-/// people who liked the wire format, "low"/"medium"/"high". Anything else
-/// is treated as unset.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum PatienceField {
@@ -328,10 +295,6 @@ pub(crate) fn config_path() -> Option<PathBuf> {
     })
 }
 
-/// Pick the active station given the loaded list, the loaded shops, and
-/// an optional explicit name. Returns the station plus its "origin": the
-/// name of the saved entry this session traces back to, or None if the
-/// station was synthesized from scratch (untitled or demo).
 pub fn pick(
     stations: &[Station],
     shops: &[Shop],
@@ -341,7 +304,7 @@ pub fn pick(
         let found = stations.iter().find(|s| s.name == name).cloned();
         return found
             .map(|s| {
-                let origin = if s.name == "demo" {
+                let origin = if s.name == DEMO {
                     None
                 } else {
                     Some(s.name.clone())
@@ -353,18 +316,15 @@ pub fn pick(
                 format!("no station named '{}'. known: {}", name, known.join(", "))
             });
     }
-    // Prefer the first non-demo station the user has saved.
-    if let Some(st) = stations.iter().find(|s| s.name != "demo") {
+    if let Some(st) = stations.iter().find(|s| s.name != DEMO) {
         return Ok((st.clone(), Some(st.name.clone())));
     }
-    // No saved stations. Synthesize one from the first non-demo shop's
-    // first advertised model. Convention says that is the newest.
-    if let Some(shop) = shops.iter().find(|s| s.name != "demo")
+    if let Some(shop) = shops.iter().find(|s| s.name != DEMO)
         && let Some(model) = shop.models.first()
     {
         return Ok((
             Station {
-                name: "untitled".into(),
+                name: UNTITLED.into(),
                 model: model.clone(),
                 dials: Dials::default(),
                 voice: None,
@@ -372,7 +332,6 @@ pub fn pick(
             None,
         ));
     }
-    // Nothing configured at all. Demo.
     Ok((Station::demo(), None))
 }
 
@@ -432,7 +391,6 @@ mod tests {
         let (got, origin) = pick(&stations, &shops, None).unwrap();
         assert_eq!(got.name, "untitled");
         assert_eq!(got.model, "sonnet");
-        // Synthesized: no origin.
         assert_eq!(origin, None);
     }
 
