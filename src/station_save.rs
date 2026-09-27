@@ -1,19 +1,8 @@
-// Station write path. Append a new [[station]] block or update an
-// existing one in-place. Read path lives in station.rs.
-//
-// File mutations preserve everything outside the affected block: other
-// stations, comments, blank lines. Append is a simple text concat to the
-// end of the file. Update finds the [[station]] block whose `name` field
-// matches the target's name and replaces just those lines.
-
 use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 
 use crate::station::Station;
 
-/// Append one [[station]] block to the stations file. Creates the file
-/// (and parent directory) if missing. Preserves the rest of the file
-/// exactly; we never rewrite anything that was already there.
 pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
     use std::io::Write;
     let block = serialize_block(station);
@@ -31,12 +20,6 @@ pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
     Ok(())
 }
 
-/// Find the [[station]] block whose `name` matches `station.name` in the
-/// file and replace it with a fresh serialization. Preserves everything
-/// outside that block (other stations, comments, blank lines).
-///
-/// Errors if no block with that name is found, so the caller can decide
-/// whether to fall back to appending or surface a message.
 pub fn update_in_file(path: &PathBuf, station: &Station) -> Result<()> {
     let original =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -46,8 +29,6 @@ pub fn update_in_file(path: &PathBuf, station: &Station) -> Result<()> {
     Ok(())
 }
 
-/// Returns Ok(new_content) if a [[station]] block with `station.name`
-/// was found and replaced. Returns Err if no such block exists.
 fn replace_station_block(content: &str, station: &Station) -> Result<String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut out: Vec<String> = Vec::new();
@@ -56,23 +37,15 @@ fn replace_station_block(content: &str, station: &Station) -> Result<String> {
     while i < lines.len() {
         let line = lines[i];
         if line.trim_start().starts_with("[[station]]") {
-            // Scan forward to find the end of this block: next [[...]]
-            // header or end of file.
             let block_start = i;
             i += 1;
             while i < lines.len() && !lines[i].trim_start().starts_with("[[") {
                 i += 1;
             }
-            let block_end = i; // exclusive
+            let block_end = i;
             let block_lines = &lines[block_start..block_end];
             if block_has_name(block_lines, &station.name) {
-                // The serialized block starts with a leading newline;
-                // strip it here since we are inlining, and also trim
-                // trailing newlines so the surrounding spacing is owned
-                // by the file, not by our serializer.
-                let serialized = serialize_block(station);
-                let trimmed = serialized.trim_start_matches('\n').trim_end_matches('\n');
-                out.push(trimmed.to_string());
+                out.push(serialize_block_inline(station));
                 replaced = true;
             } else {
                 for l in block_lines {
@@ -132,9 +105,13 @@ fn serialize_block(station: &Station) -> String {
     block
 }
 
-/// TOML-quote a single-line string. Only handles backslash and
-/// double-quote escapes; we only ever serialize station names and model
-/// ids which are simple ascii in practice.
+fn serialize_block_inline(station: &Station) -> String {
+    serialize_block(station)
+        .trim_start_matches('\n')
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 fn toml_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
