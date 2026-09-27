@@ -21,7 +21,7 @@ later, when the door opens of its own accord, she will pretend this was always h
     ),
     (
         "",
-        "haiku for the terminal:\n  black box, blinking line\n  someone asks a question, waits\n  cursor breathes alone",
+        "short poem for the terminal:\n  black box, blinking line\n  someone asks a question, waits\n  cursor breathes alone",
     ),
     (
         "this one wants to go meta. be transparent about being canned. the \

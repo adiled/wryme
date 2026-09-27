@@ -387,10 +387,10 @@ mod tests {
     #[test]
     fn pick_synthesizes_from_first_shop_when_no_saved_stations() {
         let stations = vec![Station::demo()];
-        let shops = vec![Shop::demo(), shop("kara", &["sonnet", "haiku"])];
+        let shops = vec![Shop::demo(), shop("grrrr", &["bhow", "quack"])];
         let (got, origin) = pick(&stations, &shops, None).unwrap();
         assert_eq!(got.name, "untitled");
-        assert_eq!(got.model, "sonnet");
+        assert_eq!(got.model, "bhow");
         assert_eq!(origin, None);
     }
 
