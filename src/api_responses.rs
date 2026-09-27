@@ -595,28 +595,30 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
     if m.images.is_empty() {
         return vec![serde_json::json!({ "role": m.role, "content": m.content })];
     }
-    // User message with images: the Responses protocol takes `input` items,
-    // so each image becomes its own `input_image` item (per OpenAI's
-    // /responses input_image schema) with a base64 data-URL `image_url`, and
-    // the text rides as a normal `message` item.
-    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut parts: Vec<serde_json::Value> = Vec::new();
     if !m.content.is_empty() {
-        items.push(serde_json::json!({
-            "type": "message",
-            "role": m.role,
-            "content": [{ "type": "input_text", "text": m.content }],
+        parts.push(serde_json::json!({
+            "type": "input_text",
+            "text": m.content,
         }));
     }
     for path in &m.images {
         if let Some((mime, b64)) = crate::api::image_data_url(path) {
-            items.push(serde_json::json!({
+            parts.push(serde_json::json!({
                 "type": "input_image",
                 "image_url": format!("data:{mime};base64,{b64}"),
                 "detail": "auto",
             }));
         }
     }
-    items
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    vec![serde_json::json!({
+        "type": "message",
+        "role": m.role,
+        "content": parts,
+    })]
 }
 /// Parse one SSE event body and emit matching StreamEvents. Function calls
 /// are accumulated into `calls`, completed reasoning items (with
@@ -923,6 +925,76 @@ mod tests {
         tool.tool_call_id = "".into();
         tool.tool_result = "out".into();
         assert!(json_msg(&tool).is_empty());
+    }
+
+    fn tmp_file(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("wryme-test-{}-{}", std::process::id(), name));
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn image_parts_nest_inside_the_message_content() {
+        let img = tmp_file("nest.png");
+        let mut m = api_msg("user");
+        m.content = "what is this?".into();
+        m.images = vec![img.to_string_lossy().into_owned()];
+
+        let items = json_msg(&m);
+        let _ = std::fs::remove_file(&img);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["role"], "user");
+
+        let parts = items[0]["content"].as_array().expect("content is an array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "what is this?");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert!(
+            parts[1]["image_url"]
+                .as_str()
+                .expect("image_url is a bare string")
+                .starts_with("data:image/png;base64,")
+        );
+
+        assert!(
+            items
+                .iter()
+                .all(|i| i.get("type").and_then(|t| t.as_str()) != Some("input_image"))
+        );
+    }
+
+    #[test]
+    fn image_only_message_emits_the_image_part_alone() {
+        let img = tmp_file("only.png");
+        let mut m = api_msg("user");
+        m.content = String::new();
+        m.images = vec![img.to_string_lossy().into_owned()];
+
+        let items = json_msg(&m);
+        let _ = std::fs::remove_file(&img);
+
+        assert_eq!(items.len(), 1);
+        let parts = items[0]["content"].as_array().expect("content is an array");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "input_image");
+    }
+
+    #[test]
+    fn unreadable_image_never_yields_an_empty_content_array() {
+        let mut m = api_msg("user");
+        m.content = "hi".into();
+        m.images = vec!["/nonexistent/definitely-not-here.png".into()];
+
+        let items = json_msg(&m);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "message");
+        let parts = items[0]["content"].as_array().expect("content is an array");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "hi");
     }
 
     #[test]
