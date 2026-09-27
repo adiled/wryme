@@ -221,12 +221,11 @@ impl TinkerField {
                 if s == "all" {
                     return Some(TinkerVal::All);
                 }
-                if let Some(pct) = s.strip_suffix('%') {
-                    if let Ok(p) = pct.trim().parse::<u8>() {
-                        if p <= 100 {
-                            return Some(TinkerVal::Percent(p));
-                        }
-                    }
+                if let Some(pct) = s.strip_suffix('%')
+                    && let Ok(p) = pct.trim().parse::<u8>()
+                    && p <= 100
+                {
+                    return Some(TinkerVal::Percent(p));
                 }
                 if let Ok(n) = s.parse::<usize>() {
                     return Some(TinkerVal::Count(n));
@@ -360,18 +359,18 @@ pub fn pick(
     }
     // No saved stations. Synthesize one from the first non-demo shop's
     // first advertised model. Convention says that is the newest.
-    if let Some(shop) = shops.iter().find(|s| s.name != "demo") {
-        if let Some(model) = shop.models.first() {
-            return Ok((
-                Station {
-                    name: "untitled".into(),
-                    model: model.clone(),
-                    dials: Dials::default(),
-                    voice: None,
-                },
-                None,
-            ));
-        }
+    if let Some(shop) = shops.iter().find(|s| s.name != "demo")
+        && let Some(model) = shop.models.first()
+    {
+        return Ok((
+            Station {
+                name: "untitled".into(),
+                model: model.clone(),
+                dials: Dials::default(),
+                voice: None,
+            },
+            None,
+        ));
     }
     // Nothing configured at all. Demo.
     Ok((Station::demo(), None))

@@ -716,10 +716,10 @@ fn read_stream_max_seg(dir: &Path) -> Result<u64> {
     for entry in std::fs::read_dir(&stream_dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = name.strip_suffix(".parquet") {
-            if let Ok(n) = stem.parse::<u64>() {
-                max = max.max(n);
-            }
+        if let Some(stem) = name.strip_suffix(".parquet")
+            && let Ok(n) = stem.parse::<u64>()
+        {
+            max = max.max(n);
         }
     }
     Ok(max)
@@ -733,11 +733,11 @@ fn merge_spans(spans: &mut Vec<(u64, u64)>) {
     spans.sort_by_key(|s| s.0);
     let mut merged: Vec<(u64, u64)> = Vec::new();
     for (s, e) in spans.drain(..) {
-        if let Some(last) = merged.last_mut() {
-            if s <= last.1 {
-                last.1 = last.1.max(e);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && s <= last.1
+        {
+            last.1 = last.1.max(e);
+            continue;
         }
         merged.push((s, e));
     }

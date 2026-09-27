@@ -1,20 +1,3 @@
-// Responses wire protocol.
-//
-// POSTs to `<shop.url>/responses` with `stream: true`. Body uses `input`
-// instead of `messages`, lifts the system prompt to a top-level
-// `instructions` field, carries the model (from station) and translatable
-// dials. Two window modes (shop `window`): `Full` replays the whole
-// transcript statelessly (`store: false`); `Warm` pins follow-ups to
-// `previous_response_id` (`store: true`) for shops that retain windows.
-//
-// Tools: we advertise the shell tool (named after the user's real shell,
-// e.g. `zsh`), its discovery companion (`zsh_explore`), and the async-job
-// checker (`zsh_check`). When the model calls one we run it locally and
-// feed the result back as a function_call_output item on a follow-up
-// request, looping until the model stops calling tools. Finished async
-// jobs are planted back here as a function_call + function_call_output
-// pair so the model sees the outcome and continues.
-
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -28,18 +11,13 @@ use crate::shop::{Shop, WindowMode};
 use crate::station::{Patience, Station};
 use crate::tools;
 
-/// A function call the model made during one response stream.
 struct FuncCall {
-    /// The call id the server pairs a function_call_output with.
     call_id: String,
-    /// The output item id; matches function_call_arguments.delta events.
     item_id: String,
     name: String,
     arguments: String,
 }
 
-/// Server-side per-turn cap on stacked tool calls: bounds spend when a
-/// model keeps calling instead of answering.
 const MAX_TOOL_CALLS: u32 = 10;
 
 pub(crate) async fn stream(
@@ -76,13 +54,6 @@ pub(crate) async fn stream(
                 return stream_warm(client, shop, station, messages, None, engine, tx).await;
             }
             Err(e) => {
-                // A warm attempt can fail two ways: the shop names the
-                // problem ("previous_response_id is not supported") or it
-                // just 400s the whole body ("Invalid JSON request", as ds4
-                // does). Either way the pinned id is unusable: tell the UI
-                // to pin this shop to full windows (runtime-only, once),
-                // then serve this turn with a full replay instead of
-                // erroring. Anything else (5xx, network) propagates.
                 let msg = format!("{e:#}");
                 if msg.contains("previous_response_id")
                     || msg.contains("upstream 400")
@@ -116,10 +87,6 @@ pub(crate) async fn stream(
     }
 }
 
-/// Warm window: the server retains the conversation (`store: true`).
-/// First request carries the full transcript; follow-ups send only the
-/// new tool outputs against `previous_response_id`. Fast on long
-/// windows; only for shops that actually keep windows.
 async fn stream_warm(
     client: &Client,
     shop: &Shop,
@@ -207,8 +174,6 @@ async fn stream_warm(
             if bad_rounds > 2 {
                 return Ok(());
             }
-            // preamble is top-of-conversation only — follow-up tool rounds reuse the warm
-            // server context (store:true) so no preamble re-injection.
             prev_id = Some(new_id);
             input = next_input;
             continue;
@@ -237,9 +202,6 @@ async fn stream_warm(
     }
 }
 
-/// Full window: stateless (`store: false`). The whole transcript,
-/// including tool history, rides every request, so any shop works.
-/// Costs a full prefill per tool round on long windows.
 async fn stream_full(
     client: &Client,
     shop: &Shop,
@@ -258,8 +220,6 @@ async fn stream_full(
     let mut input: Vec<serde_json::Value> = conv_msgs.iter().flat_map(|m| json_msg(m)).collect();
     let _preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
-    // Plant any finished async jobs into the input as a check-call +
-    // result pair, so the model sees the outcome and continues.
     let due = crate::jobs::claim_due();
     if !due.is_empty() {
         let check = crate::tools::check_name();
@@ -307,8 +267,6 @@ async fn stream_full(
             if broken.is_empty() {
                 return Ok(());
             }
-            // Nothing to execute: re-ask with the error notes so the model
-            // can correct itself, but stop feeding a model that won't.
             bad_rounds += 1;
             if bad_rounds > 2 {
                 return Ok(());
@@ -342,20 +300,9 @@ async fn stream_full(
             }));
         }
         input.extend(follow);
-        // preamble is top-of-conversation only — not re-pinned on every tool
-        // follow-up (would be insane on long stateless replays).
     }
 }
 
-/// Prepend the established compartments' rendered bookmarks and any
-/// book-writing prod as `system` input items, so the model always sees
-/// its memory at the top. (The Responses protocol drops system messages
-/// other than the first instructions, so the engine's preamble must be
-/// injected as real input items each round.)
-///
-/// Counted variant: swaps out the `old_len` previously prepended items so
-/// a growing stateless input never accumulates duplicate preambles.
-/// Returns the new prepended count.
 fn prepend_preamble_counted(
     input: &mut Vec<serde_json::Value>,
     engine: &Arc<Mutex<book::Engine>>,
@@ -392,11 +339,7 @@ fn prepend_preamble_counted(
     n
 }
 
-/// One request/response round. Streams content/brain/tool events to `tx`,
-/// collects any function calls the model made plus completed reasoning
-/// items (for stateless resume), and returns them with the new response
-/// id (captured for the UI; never replayed — `store: false` keeps no
-/// server state).
+#[allow(clippy::too_many_arguments)]
 async fn stream_once(
     client: &Client,
     shop: &Shop,
@@ -412,8 +355,6 @@ async fn stream_once(
         model: &'a str,
         input: &'a [serde_json::Value],
         stream: bool,
-        // Warm windows retain server-side; full windows carry everything
-        // and retain nothing. Never sends a previous id it wasn't given.
         store: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<&'a str>,
@@ -425,36 +366,20 @@ async fn stream_once(
         max_output_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<Reasoning>,
-        // Only when reasoning runs: lets the server return
-        // encrypted_content so follow-ups keep reasoning context with
-        // store:false.
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<&'a str>>,
-        // Runaway guard: most tool calls the model may stack up in one
-        // turn before the server cuts it off.
         max_tool_calls: u32,
-        // Oversize input trims from the conversation head instead of
-        // 400ing. Matters on long stateless replays.
         truncation: &'a str,
         tools: &'a [serde_json::Value],
     }
 
     #[derive(Serialize)]
     struct Reasoning {
-        // Depth knob, only when the station sets patience. Omitted
-        // otherwise so trivial turns stay fast and the model's native
-        // thinking depth is untouched.
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<&'static str>,
-        // Asked whenever we ask for thinking at all: without a summary
-        // most servers emit no reasoning stream, and the Brain display
-        // goes dark.
         summary: &'static str,
     }
 
-    // Thinking is opt-in via the patience dial, never forced: requesting
-    // reasoning makes even trivial turns think out loud (slow). The Brain
-    // display shows whatever the server volunteers regardless.
     let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
         effort: Some(p.as_wire()),
         summary: "auto",
@@ -468,8 +393,6 @@ async fn stream_once(
     } else {
         tools::tool_defs()
     };
-    // For toolless models strip any prior tool history from input so the server
-    // doesn't reject poisoned function_call items.
     let filtered_input: Vec<serde_json::Value>;
     let input: &[serde_json::Value] = if toolless {
         filtered_input = input
@@ -539,10 +462,7 @@ async fn stream_once(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading sse chunk")?;
         buf.extend_from_slice(&chunk);
-        loop {
-            let Some(end) = find_event_boundary(&buf) else {
-                break;
-            };
+        while let Some(end) = find_event_boundary(&buf) {
             let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
             let event = &event_bytes[..end.body_len];
             handle_event(event, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
@@ -557,8 +477,6 @@ async fn stream_once(
 }
 
 fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
-    // A tool result: the Responses item is `function_call_output`, keyed
-    // by the call id it answers. Unpaired results never go on the wire.
     if m.role == "tool" {
         if m.tool_call_id.is_empty() {
             return vec![];
@@ -569,10 +487,6 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
             "output": m.tool_result,
         })];
     }
-    // An assistant turn that called tools: replay each call as a
-    // `function_call` item (plus the text as a message item when any),
-    // so a stateless shop sees the full transcript. Unpaired calls are
-    // dropped: replaying them poisons every future turn.
     if !m.tool_calls.is_empty() {
         let mut items: Vec<serde_json::Value> = Vec::new();
         if !m.content.is_empty() {
@@ -620,10 +534,6 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
         "content": parts,
     })]
 }
-/// Parse one SSE event body and emit matching StreamEvents. Function calls
-/// are accumulated into `calls`, completed reasoning items (with
-/// encrypted_content) into `reasoning` for stateless resume; the newest
-/// response id lands in `new_id`.
 fn handle_event(
     bytes: &[u8],
     tx: &UnboundedSender<StreamEvent>,
@@ -647,9 +557,6 @@ fn handle_event(
         };
         let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
-            // Terminal states. Usage feeds the status-bar meter; failures
-            // and cutoffs surface as errors instead of a stream that just
-            // stops.
             "response.completed" => {
                 let usage = v.get("response").and_then(|r| r.get("usage"));
                 let input = usage
@@ -706,21 +613,21 @@ fn handle_event(
                 }
             }
             "response.output_text.delta" => {
-                if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
-                    if !d.is_empty() {
-                        let _ = tx.send(StreamEvent::Delta {
-                            text: d.to_string(),
-                        });
-                    }
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str())
+                    && !d.is_empty()
+                {
+                    let _ = tx.send(StreamEvent::Delta {
+                        text: d.to_string(),
+                    });
                 }
             }
             "response.reasoning_summary_text.delta" => {
-                if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
-                    if !d.is_empty() {
-                        let _ = tx.send(StreamEvent::Brain {
-                            text: d.to_string(),
-                        });
-                    }
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str())
+                    && !d.is_empty()
+                {
+                    let _ = tx.send(StreamEvent::Brain {
+                        text: d.to_string(),
+                    });
                 }
             }
             "response.output_item.added" => {
@@ -762,8 +669,6 @@ fn handle_event(
                         arguments,
                     });
                 } else {
-                    // Built-in tool calls (file/web/code search etc.) we
-                    // don't run locally: still surface a name label.
                     let name: Option<String> = match item_type {
                         "file_search_call" => Some("file_search".into()),
                         "web_search_call" => Some("web_search".into()),
@@ -782,27 +687,23 @@ fn handle_event(
                     .get("output_item_id")
                     .and_then(|i| i.as_str())
                     .unwrap_or("");
-                if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
-                    if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
-                        c.arguments.push_str(d);
-                    }
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str())
+                    && let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id)
+                {
+                    c.arguments.push_str(d);
                 }
             }
-            // Authoritative full arguments. Some servers send few or no
-            // deltas and put everything here — without this arm those
-            // calls execute with empty arguments.
             "response.function_call_arguments.done" => {
                 let item_id = v
                     .get("item_id")
                     .and_then(|i| i.as_str())
                     .or_else(|| v.get("output_item_id").and_then(|i| i.as_str()))
                     .unwrap_or("");
-                if let Some(args) = v.get("arguments").and_then(arg_string) {
-                    if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
-                        if c.arguments.is_empty() || !args.is_empty() {
-                            c.arguments = args;
-                        }
-                    }
+                if let Some(args) = v.get("arguments").and_then(arg_string)
+                    && let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id)
+                    && (c.arguments.is_empty() || !args.is_empty())
+                {
+                    c.arguments = args;
                 }
             }
             "response.output_item.done" => {
@@ -812,9 +713,6 @@ fn handle_event(
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
                 if item_type == "reasoning" {
-                    // Completed reasoning item (summary + encrypted_content):
-                    // replayed into the next stateless input so reasoning
-                    // context survives with store:false.
                     if let Some(item) = item {
                         reasoning.push(item.clone());
                     }
@@ -826,12 +724,10 @@ fn handle_event(
                         .to_string();
                     if let Some(arguments) =
                         item.and_then(|i| i.get("arguments")).and_then(arg_string)
+                        && let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id)
+                        && (c.arguments.is_empty() || !arguments.is_empty())
                     {
-                        if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
-                            if c.arguments.is_empty() || !arguments.is_empty() {
-                                c.arguments = arguments;
-                            }
-                        }
+                        c.arguments = arguments;
                     }
                 }
             }
@@ -846,9 +742,6 @@ fn handle_event(
     Ok(())
 }
 
-/// Function-call arguments as a string. Spec says string, but compat
-/// servers sometimes emit a JSON object — serialize it rather than
-/// dropping the call's arguments on the floor.
 fn arg_string(v: &serde_json::Value) -> Option<String> {
     if let Some(s) = v.as_str() {
         return Some(s.to_string());
@@ -1054,8 +947,6 @@ mod tests {
 
     #[test]
     fn arguments_done_event_fills_empty_args() {
-        // Servers that send no deltas put everything in
-        // function_call_arguments.done — must not execute empty.
         let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut reasoning = Vec::new();

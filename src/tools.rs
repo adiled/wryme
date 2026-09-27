@@ -124,10 +124,10 @@ pub fn check_parameters() -> serde_json::Value {
 
 /// Pull the job id out of whatever the model passed (JSON or bare).
 fn extract_id(arguments: &str) -> u64 {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) {
-        if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
-            return id;
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(id) = v.get("id").and_then(|i| i.as_u64())
+    {
+        return id;
     }
     arguments.trim().parse().unwrap_or(0)
 }
@@ -154,10 +154,10 @@ async fn check(id: u64) -> String {
 /// Pull the command out of whatever the model passed. Usually JSON
 /// (`{"command":"ls"}`, but we tolerate a bare string.
 fn extract_command(arguments: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) {
-        if let Some(c) = v.get("command").and_then(|c| c.as_str()) {
-            return c.to_string();
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(c) = v.get("command").and_then(|c| c.as_str())
+    {
+        return c.to_string();
     }
     arguments.trim().to_string()
 }

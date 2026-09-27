@@ -74,12 +74,14 @@ fn reservoir_path() -> PathBuf {
 impl Reservoir {
     pub fn load() -> Self {
         let path = reservoir_path();
-        let mut r = Self::default();
-        r.path = path;
-        if let Ok(text) = std::fs::read_to_string(&r.path) {
-            if let Ok(stations) = serde_json::from_str::<HashMap<String, StationInk>>(&text) {
-                r.stations = stations;
-            }
+        let mut r = Self {
+            path,
+            ..Self::default()
+        };
+        if let Ok(text) = std::fs::read_to_string(&r.path)
+            && let Ok(stations) = serde_json::from_str::<HashMap<String, StationInk>>(&text)
+        {
+            r.stations = stations;
         }
         r
     }
@@ -250,12 +252,11 @@ fn learn_ceiling(msg: &str) -> Option<u64> {
             while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
             }
-            if anchors.iter().any(|&(lo, hi)| start >= lo && start < hi) {
-                if let Ok(n) = lower[start..i].parse::<u64>() {
-                    if (MIN_CEILING..=MAX_CEILING).contains(&n) {
-                        candidates.push(n);
-                    }
-                }
+            if anchors.iter().any(|&(lo, hi)| start >= lo && start < hi)
+                && let Ok(n) = lower[start..i].parse::<u64>()
+                && (MIN_CEILING..=MAX_CEILING).contains(&n)
+            {
+                candidates.push(n);
             }
         } else {
             i += 1;

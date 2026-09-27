@@ -282,12 +282,11 @@ fn parse_tinker_val(s: &str) -> Option<crate::station::TinkerVal> {
     if s == "0" {
         return Some(crate::station::TinkerVal::Count(0));
     }
-    if let Some(pct) = s.strip_suffix('%') {
-        if let Ok(p) = pct.trim().parse::<u8>() {
-            if p <= 100 {
-                return Some(crate::station::TinkerVal::Percent(p));
-            }
-        }
+    if let Some(pct) = s.strip_suffix('%')
+        && let Ok(p) = pct.trim().parse::<u8>()
+        && p <= 100
+    {
+        return Some(crate::station::TinkerVal::Percent(p));
     }
     if let Ok(n) = s.parse::<usize>() {
         return Some(crate::station::TinkerVal::Count(n));

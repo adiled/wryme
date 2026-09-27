@@ -272,7 +272,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut out = s.chars().take(max).collect::<String>();
-        out.push_str("…");
+        out.push('…');
         out
     }
 }

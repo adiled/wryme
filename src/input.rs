@@ -1,14 +1,9 @@
-// A single-line, grapheme-aware input field. Lives at the top of the screen.
-// Multiline submission can come later. For now, Enter submits, Shift-Enter
-// (if your terminal sends it) inserts a literal newline character.
-
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Default)]
 pub struct Input {
     pub text: String,
-    /// Caret position in grapheme clusters, not bytes.
     pub col: usize,
 }
 
@@ -22,14 +17,10 @@ impl Input {
     }
 
     fn grapheme_byte(&self, idx: usize) -> usize {
-        let mut count = 0;
-        for (b, _) in self.text.grapheme_indices(true) {
-            if count == idx {
-                return b;
-            }
-            count += 1;
-        }
-        self.text.len()
+        self.text
+            .grapheme_indices(true)
+            .nth(idx)
+            .map_or(self.text.len(), |(b, _)| b)
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -83,21 +74,17 @@ impl Input {
         self.col = self.grapheme_count();
     }
 
-    /// Kill from caret to end of line (Ctrl-K).
     pub fn kill_to_end(&mut self) {
         let here = self.grapheme_byte(self.col);
         self.text.truncate(here);
     }
 
-    /// Kill from start of line to caret (Ctrl-U).
     pub fn kill_to_start(&mut self) {
         let here = self.grapheme_byte(self.col);
         self.text.replace_range(..here, "");
         self.col = 0;
     }
 
-    /// Delete the previous word (Ctrl-W). Eats trailing whitespace first,
-    /// then eats one run of non-whitespace.
     pub fn kill_prev_word(&mut self) {
         let graphemes: Vec<&str> = self.text.graphemes(true).collect();
         let mut target = self.col;
@@ -112,8 +99,6 @@ impl Input {
         }
     }
 
-    /// Display-column position of the caret. Used by the renderer to place
-    /// the terminal cursor.
     pub fn display_col(&self) -> u16 {
         let width: usize = self
             .text
@@ -130,11 +115,6 @@ impl Input {
         out
     }
 
-    /// Horizontal scroll offset (in display columns) so that the caret stays
-    /// pinned at the right edge of a visible area of `visible_width` columns.
-    /// When the text is short, nothing scrolls and the caret sits naturally.
-    /// When it overruns, the offset pushes old text off the left side, keeping
-    /// the caret — and the letters the user is typing — at the right edge.
     pub fn scroll_offset(&self, visible_width: usize) -> usize {
         let caret = self.display_col() as usize;
         caret.saturating_sub(visible_width.saturating_sub(1))
@@ -194,12 +174,12 @@ mod tests {
     #[test]
     fn scroll_keeps_caret_at_right_edge() {
         let mut i = Input::new();
-        i.insert_str("a"); // 1 col, caret at 1
+        i.insert_str("a");
         assert_eq!(i.scroll_offset(10), 0);
-        i.insert_str("bcdefghijklmnop"); // caret now at 16
-        assert_eq!(i.scroll_offset(10), 7); // caret pinned at the right edge
+        i.insert_str("bcdefghijklmnop");
+        assert_eq!(i.scroll_offset(10), 7);
         i.home();
-        assert_eq!(i.scroll_offset(10), 0); // at home nothing is hidden
+        assert_eq!(i.scroll_offset(10), 0);
         i.end();
         assert_eq!(i.scroll_offset(10), 7);
     }

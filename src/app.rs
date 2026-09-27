@@ -305,12 +305,11 @@ impl App {
         // The engine records every turn into the continuous stream, and
         // re-checks whether an unattributed thread is weightful enough to
         // prod the agent into deeming it.
-        if let Some(last) = self.messages.last() {
-            if last.role == Role::User {
-                if let Ok(mut e) = self.engine.lock() {
-                    e.record_turn("user", &last.content);
-                }
-            }
+        if let Some(last) = self.messages.last()
+            && last.role == Role::User
+            && let Ok(mut e) = self.engine.lock()
+        {
+            e.record_turn("user", &last.content);
         }
     }
 
@@ -474,10 +473,10 @@ impl App {
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            if !joined.is_empty() {
-                if let Ok(mut e) = self.engine.lock() {
-                    e.record_turn("assistant", &joined);
-                }
+            if !joined.is_empty()
+                && let Ok(mut e) = self.engine.lock()
+            {
+                e.record_turn("assistant", &joined);
             }
 
             let user_text = self
@@ -706,12 +705,13 @@ impl App {
                         if msg.role == "tool" && to_drop > 0 {
                             to_drop -= 1;
                             // also drop its paired call from preceding assistant
-                            if let Some(last) = pruned.last_mut() {
-                                if last.role == "assistant" && !last.tool_calls.is_empty() {
-                                    // find matching call_id
-                                    let id = &msg.tool_call_id;
-                                    last.tool_calls.retain(|c| c.id != *id);
-                                }
+                            if let Some(last) = pruned.last_mut()
+                                && last.role == "assistant"
+                                && !last.tool_calls.is_empty()
+                            {
+                                // find matching call_id
+                                let id = &msg.tool_call_id;
+                                last.tool_calls.retain(|c| c.id != *id);
                             }
                             continue;
                         }

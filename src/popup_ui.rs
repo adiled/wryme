@@ -117,16 +117,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         if app.popup.mode == popup::Mode::DialEdit {
             lines.push(Line::from(""));
-            if let Some(idx) = app.popup.dial_idx {
-                if let Some(meta) = popup::dial_metas().get(idx) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {}: ", meta.name),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::raw(app.popup.dial_input.text.clone()),
-                    ]));
-                }
+            if let Some(idx) = app.popup.dial_idx
+                && let Some(meta) = popup::dial_metas().get(idx)
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {}: ", meta.name),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(app.popup.dial_input.text.clone()),
+                ]));
             }
         }
 

@@ -4,7 +4,7 @@ pub const DEFAULT_MAC_VOICE: &str = "Tara";
 pub const DEFAULT_MAC_RATE_WPM: &str = "260";
 
 fn has_bin(name: &str) -> bool {
-    std::env::var_os("PATH").map_or(false, |paths| {
+    std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
             .map(|d| d.join(name))
             .any(|p| p.is_file())
@@ -179,10 +179,10 @@ impl Speaker {
                     if let Ok(mut guard) = cur.lock() {
                         *guard = Some(child);
                     }
-                    if let Ok(mut guard) = cur.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.wait();
-                        }
+                    if let Ok(mut guard) = cur.lock()
+                        && let Some(mut child) = guard.take()
+                    {
+                        let _ = child.wait();
                     }
                 }
             };
@@ -191,11 +191,11 @@ impl Speaker {
                     SpeakCmd::Stop => {
                         pending.clear();
                         cnt.store(0, std::sync::atomic::Ordering::Relaxed);
-                        if let Ok(mut guard) = cur.lock() {
-                            if let Some(mut child) = guard.take() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
+                        if let Ok(mut guard) = cur.lock()
+                            && let Some(mut child) = guard.take()
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
                         }
                         while rx.try_recv().is_ok() {}
                         // Anything sent before this Stop is now stale;
@@ -263,11 +263,11 @@ impl Speaker {
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Stop);
         }
-        if let Ok(mut guard) = self.current.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        if let Ok(mut guard) = self.current.lock()
+            && let Some(mut child) = guard.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
