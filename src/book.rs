@@ -1,27 +1,3 @@
-// The book: wryme's memory, kept as a columnar Parquet store so the
-// engine can navigate and load threads at scale — the "EPUB for engine
-// readership". Grandma never sees it; she just has an AI that remembers.
-//
-// The stream is the whole truth. Every turn, ever, is written here
-// continuously by the engine — user and assistant alike — as append-only
-// segments. Nothing is partitioned into compartments; the conversation
-// is one continuous thread.
-//
-// A compartment is NOT a container of turns. It is a distilled bookmark
-// that POINTS INTO the stream via spans (start_row..end_row). The same
-// stretch of conversation can be deemed into several compartments —
-// attribution overlaps and interleaves freely. A thread through its
-// lifetime can be deemed into multiple compartments.
-//
-// Layout:
-//   book/stream/<NNNN>.parquet   the content. Append-only message rows,
-//                                one continuous record of every turn.
-//   book/index.parquet           the navigation. One row per compartment:
-//                                its current distilled state (topic, tags,
-//                                people, facts, plans, open) plus its
-//                                spans into the stream + life_tokens.
-//                                A columnar scan never touches content.
-//   book/life_summary.txt        prose memory of everything quiet.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -32,9 +8,6 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
 
-/// The current distilled state of a compartment — what gets promoted to
-/// the conversation's preamble when the thread is re-established. Lists
-/// are comma-joined on disk (plain Utf8 columns).
 #[derive(Debug, Clone, Default)]
 pub struct Bookmark {
     pub topic: String,
@@ -42,20 +15,12 @@ pub struct Bookmark {
     pub people: Vec<String>,
     pub facts: Vec<String>,
     pub plans: Vec<String>,
-    /// Open threads — what is still in motion. This is the "where we left
-    /// off" so the AI can say "we were comparing flight prices".
     pub open: Vec<String>,
 }
 
-/// One compartment's current index row. A compartment has NO identity —
-/// it is not a container you create and track. It IS a page: a distilled
-/// bookmark plus its spans into the stream. It is addressed by what it is
-/// (its `topic`), never a number.
 #[derive(Debug, Clone)]
 pub struct CompartmentMeta {
     pub opened_at: i64,
-    /// last deem millis — the "where we left off" signal, first-class in
-    /// find results and rendered bookmarks.
     pub last_inked: i64,
     pub topic: String,
     pub tags: Vec<String>,
@@ -63,17 +28,11 @@ pub struct CompartmentMeta {
     pub facts: Vec<String>,
     pub plans: Vec<String>,
     pub open: Vec<String>,
-    /// Attributed stretches of the stream, as (start_row..end_row) spans.
-    /// The compartment points INTO the stream; it owns no rows itself.
     pub spans: Vec<(u64, u64)>,
-    /// Weight of the compartment: sum of content bytes of its spans.
     pub life_tokens: i64,
-    /// last few rows as text, in-memory only; feeds find scoring + excerpt.
     pub tail: String,
 }
 
-/// One turn in the continuous stream. `content` is the rendered text the
-/// model reads.
 #[derive(Debug, Clone)]
 pub struct StreamRow {
     pub row_id: u64,
@@ -82,7 +41,6 @@ pub struct StreamRow {
     pub ts: i64,
 }
 
-/// One message, as read out of a compartment's spans (for rendering).
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: String,
@@ -90,87 +48,47 @@ pub struct Message {
     pub ts: i64,
 }
 
-/// The book. Index rows live in memory (small); the stream stays on disk
-/// and is loaded per read. `watermark` is the first row NOT yet attributed
-/// to any compartment — the unattributed frontier the engine watches.
 pub struct Book {
     dir: PathBuf,
     next_row: u64,
-    /// The next stream segment number — a monotonic counter kept in
-    /// memory so flushing a turn is O(1), not a directory scan.
     next_seg: u64,
     watermark: u64,
-    /// Content bytes of the unattributed rows [watermark, next_row) —
-    /// the engine's weight signal for the prod.
     unattr_tokens: i64,
     unattr_turns: i64,
-    /// last few unattributed rows; gifted to a page on deem.
     unattr_tail: Vec<(String, String)>,
     index: Vec<CompartmentMeta>,
-    /// Rows not yet flushed to a stream segment.
     pending: Vec<StreamRow>,
     life_summary: String,
 }
 
-/// The engine: the live, in-memory face of the book that the conversation
-/// talks to. Holds the book plus which compartments are currently
-/// promoted to the conversation's preamble, and the book-writing prod
-/// state. Shared across turns as an `Arc<Mutex<Engine>>` so the streaming
-/// protocol and the background delivery can both reach it.
-///
-/// The engine is NOT an agent. It writes the stream continuously and
-/// prods the agent to deem compartments; establishing and reminiscing
-/// remain the agent's own deliberation.
 pub struct Engine {
     pub book: Book,
-    /// Pages currently promoted to the preamble. Their rendered
-    /// bookmarks are prepended as system messages to every request.
     pub established: Vec<String>,
-    /// Set when an unattributed thread is weightful; delivered once into
-    /// the next request as a quiet system reminder.
     pending_prod: bool,
-    /// The stream row when a prod was last delivered — a cooldown so it
-    /// nudges, waits a few turns, and nudges again only if still unfiled
-    /// (it never nags every turn).
     prod_delivered_row: u64,
-    /// The stream row when the last lookup (find/open) happened — used
-    /// for the guard: no prod within a few turns of a lookup.
     last_lookup_row: u64,
 }
 
-/// Weight thresholds for the book-writing prod. A thread must accumulate
-/// enough turns AND tokens, with no recent lookup, before the engine
-/// nudges the agent to deem it.
 const WEIGHT_TURNS: i64 = 5;
 const WEIGHT_BYTES: i64 = 1600;
-/// Turns of distance from an establishing-related lookup that shield the
-/// thread from a prod (the agent is actively reminiscing over it).
 const LOOKUP_GAP: u64 = 5;
 
-/// page tail rows, in-memory only (rebuilt at open, refreshed at deem)
 const TAIL_ROWS: usize = 2;
-/// tail text cap — one page never eats the index
 const TAIL_MAX_CHARS: usize = 400;
-/// excerpt cap for find results
 const EXCERPT_MAX_CHARS: usize = 240;
-/// recency bonus on the find score; surfaces the just-left page when term
-/// scores tie, always below the term weights so a real match wins
 const RECENT_4H_MS: i64 = 4 * 3_600_000;
 const RECENT_1D_MS: i64 = 24 * 3_600_000;
 const RECENT_7D_MS: i64 = 7 * 24 * 3_600_000;
 const BONUS_RECENT_4H: i64 = 12;
 const BONUS_RECENT_1D: i64 = 6;
 const BONUS_RECENT_7D: i64 = 2;
-/// find term weights: topic > distilled content > labels
 const WEIGHT_TOPIC_EXACT: i64 = 200;
 const WEIGHT_TOPIC_WORD: i64 = 10;
 const WEIGHT_META_WORD: i64 = 3;
 const WEIGHT_LIGHT_WORD: i64 = 1;
 const WEIGHT_TAIL_WORD: i64 = 4;
-/// cap on listed find results — the model picks, never audits
 pub const FIND_SHOW: usize = 6;
 
-/// Open the engine (book + empty preamble) in `dir`.
 pub fn open_engine(dir: &Path) -> Result<Engine> {
     Ok(Engine {
         book: open_book(dir)?,
@@ -182,8 +100,6 @@ pub fn open_engine(dir: &Path) -> Result<Engine> {
 }
 
 impl Engine {
-    /// The preamble: rendered bookmark prose for every established page,
-    /// in order. Prepended as system messages by the caller.
     pub fn preamble(&self) -> Vec<String> {
         self.established
             .iter()
@@ -192,11 +108,6 @@ impl Engine {
             .collect()
     }
 
-    /// The book-writing prod: deliver it once into the next request, then
-    /// cool down. The engine slips the agent a quiet system reminder when
-    /// an unattributed thread is weightful and unshielded; it nudges, waits
-    /// a few turns, and nudges again only if the thread is still unfiled.
-    /// Never shown to grandma.
     pub fn take_prod(&mut self) -> Option<String> {
         if !self.pending_prod {
             return None;
@@ -214,7 +125,6 @@ impl Engine {
         )
     }
 
-    /// Write one turn into the continuous stream, then re-check the prod.
     pub fn record_turn(&mut self, role: &str, content: &str) {
         if content.is_empty() {
             return;
@@ -234,9 +144,6 @@ impl Engine {
         if book.unattr_tail.len() > TAIL_ROWS {
             book.unattr_tail.remove(0);
         }
-        // Flush to disk now, so every turn is durable even if the agent
-        // never deems and the app exits. The stream truly writes
-        // continuously; deeming later only points rows at pages.
         let _ = flush_stream(book);
         if !self.pending_prod
             && book.unattr_turns >= WEIGHT_TURNS
@@ -248,16 +155,10 @@ impl Engine {
         }
     }
 
-    /// Mark that a lookup (find/open) happened at the current stream
-    /// position — the shield that suppresses a prod while the agent is
-    /// actively reminiscing over a thread.
     pub fn note_lookup(&mut self) {
         self.last_lookup_row = self.book.next_row;
     }
 
-    /// Promote a page to the preamble and return its rendered bookmark
-    /// plus full thread text (so the model can just know). This is the
-    /// ceremony of "remember when" — the agent's own deliberation.
     pub fn open(&mut self, topic: &str) -> Result<Option<String>> {
         let Some(meta) = compartment(&self.book, topic).cloned() else {
             return Ok(None);
@@ -272,10 +173,6 @@ impl Engine {
         Ok(Some(out))
     }
 
-    /// Attribute the unattributed span [watermark, next_row) to the page
-    /// named by the bookmark's topic (birthing it if absent) and refresh
-    /// its distilled bookmark. This is quiet book-keeping — it does NOT
-    /// establish (no ceremony, no preamble). Clears the prod.
     pub fn deem(&mut self, bookmark: &Bookmark) -> Result<String> {
         let out = deem_span(&mut self.book, bookmark)?;
         self.pending_prod = false;
@@ -288,14 +185,11 @@ impl Engine {
         }
     }
 
-    /// Drop a page from the preamble (it is never closed — it just stops
-    /// riding along in the conversation).
     pub fn dismiss(&mut self, topic: &str) {
         self.established.retain(|t| t != topic);
     }
 }
 
-/// Open (or create) the book in `dir`.
 pub fn open_book(dir: &Path) -> Result<Book> {
     std::fs::create_dir_all(dir)?;
     let index_path = dir.join("index.parquet");
@@ -304,11 +198,7 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     } else {
         vec![]
     };
-    // Drop ghost pages — rows with no topic are leftovers from the old
-    // "new without deem" registry; a page is only a page if it is about
-    // something.
     index.retain(|m| !m.topic.trim().is_empty());
-    // the one open-time stream parse feeds max row + tails; find stays in-memory.
     let rows = read_stream_on_disk(dir)?;
     let next_row = rows.last().map(|r| r.row_id + 1).unwrap_or(0);
     let next_seg = read_stream_max_seg(dir)? + 1;
@@ -316,10 +206,6 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     let summary_path = dir.join("life_summary.txt");
     let life_summary = std::fs::read_to_string(&summary_path).unwrap_or_default();
 
-    // Watermark is the frontier of attributed rows. On a fresh book it is 0
-    // (whole stream unattributed); on a continued book it resumes at the
-    // farthest span end so a restart never orphans the tail after the last
-    // deem. Old ghost spans are already dropped above.
     let watermark = index
         .iter()
         .flat_map(|m| m.spans.iter().map(|(_, e)| *e))
@@ -327,7 +213,6 @@ pub fn open_book(dir: &Path) -> Result<Book> {
         .unwrap_or(0)
         .min(next_row);
 
-    // tail = last rows of last span; frontier tail feeds a deem after restart
     for meta in index.iter_mut() {
         meta.tail = meta
             .spans
@@ -351,13 +236,6 @@ pub fn open_book(dir: &Path) -> Result<Book> {
     })
 }
 
-/// Attribute the unattributed span to a page, addressed by its topic.
-/// If no page with that topic exists it is BORN here — book-writing is
-/// the product, not the precondition. If several pages share the topic
-/// they merge into one (a page's identity is its name + spans). Records
-/// the span, refreshes the distilled bookmark, adds its weight, flushes
-/// the rows to the stream, and advances the watermark. The page owns no
-/// rows — it only points into the stream.
 pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
     let topic = bookmark.topic.trim();
     if topic.is_empty() {
@@ -373,8 +251,6 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
                 i += 1;
                 continue;
             }
-            // A duplicate same-name page: fold its spans into the first
-            // and drop it, so the invariant "one page per topic" holds.
             let dup = book.index.remove(i);
             if let Some(p) = page {
                 book.index[p].spans.extend(dup.spans);
@@ -420,7 +296,6 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
     meta.plans = bookmark.plans.clone();
     meta.open = bookmark.open.clone();
     meta.last_inked = now;
-    // frontier tail = the page's freshest rows
     meta.tail = format_tail(&book.unattr_tail);
     flush_stream(book)?;
     book.watermark = end;
@@ -433,9 +308,6 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
     ))
 }
 
-/// Refresh a page's distilled state (and last_inked) without deeming new
-/// rows. Called when a thread is re-established and the AI re-distills
-/// what matters. Addressed by topic.
 pub fn update_bookmark(book: &mut Book, topic: &str, bookmark: &Bookmark) -> Result<()> {
     let Some(meta) = book.index.iter_mut().find(|m| eq_topic(&m.topic, topic)) else {
         return Ok(());
@@ -451,18 +323,14 @@ pub fn update_bookmark(book: &mut Book, topic: &str, bookmark: &Bookmark) -> Res
     Ok(())
 }
 
-/// All index rows — the navigation layer, small and always in context.
 pub fn index_entries(book: &Book) -> &[CompartmentMeta] {
     &book.index
 }
 
-/// Look up one page's current index row, by its topic.
 pub fn compartment<'a>(book: &'a Book, topic: &'a str) -> Option<&'a CompartmentMeta> {
     book.index.iter().find(|m| eq_topic(&m.topic, topic))
 }
 
-/// Read a page's full thread — every row its spans point into the
-/// stream, concatenated in order.
 pub fn read_compartment(book: &Book, topic: &str) -> Result<Option<Vec<Message>>> {
     let Some(meta) = compartment(book, topic) else {
         return Ok(None);
@@ -487,12 +355,9 @@ pub fn read_compartment(book: &Book, topic: &str) -> Result<Option<Vec<Message>>
     Ok(Some(out))
 }
 
-/// The preamble: render a page's distilled state to the prose the model
-/// reads at the top of the conversation. One page, one system message.
 pub fn render_bookmark(meta: &CompartmentMeta) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n", meta.topic));
-    // ground truth for "where did we leave off" — `open` distilling can go stale
     if meta.last_inked > 0 {
         out.push_str(&format!("Last inked: {}\n", relative_ago(meta.last_inked)));
     }
@@ -514,7 +379,6 @@ pub fn render_bookmark(meta: &CompartmentMeta) -> String {
     out
 }
 
-/// Render a compartment's full thread text (for reading on demand).
 pub fn render_compartment(messages: &[Message]) -> String {
     let mut out = String::new();
     for m in messages {
@@ -533,7 +397,6 @@ pub fn set_life_summary(book: &mut Book, summary: &str) -> Result<()> {
     Ok(())
 }
 
-/// "3h ago"-style millis label — recency a model can act on
 pub fn relative_ago(ms: i64) -> String {
     let diff = (now_ms() - ms).max(0) / 1000;
     if diff < 60 {
@@ -554,7 +417,6 @@ pub fn relative_ago(ms: i64) -> String {
     format!("{}y ago", days / 365)
 }
 
-/// tail clipped for find results
 pub fn tail_excerpt(meta: &CompartmentMeta) -> String {
     if meta.tail.is_empty() {
         return String::new();
@@ -566,7 +428,6 @@ pub fn tail_excerpt(meta: &CompartmentMeta) -> String {
     out
 }
 
-/// The last `TAIL_ROWS` rows inside [start, end), oldest first.
 fn tail_entries(rows: &[StreamRow], start: u64, end: u64) -> Vec<(String, String)> {
     rows.iter()
         .filter(|r| r.row_id >= start && r.row_id < end)
@@ -579,7 +440,6 @@ fn tail_entries(rows: &[StreamRow], start: u64, end: u64) -> Vec<(String, String
         .collect()
 }
 
-/// "role: content"-lines, capped
 pub fn format_tail(entries: &[(String, String)]) -> String {
     let mut out = String::new();
     for (role, content) in entries {
@@ -595,8 +455,6 @@ pub fn format_tail(entries: &[(String, String)]) -> String {
     out
 }
 
-/// weighted keyword match: topic > distilled content > labels; freshness
-/// tiebreak; in-memory tails, so find never reads the stream
 pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a CompartmentMeta> {
     let q = query.trim().to_lowercase();
     let words: Vec<String> = q
@@ -647,7 +505,6 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
                 }
             }
             if score > 0 {
-                // freshness, always below term weights above
                 let age = now - m.last_inked;
                 score += if age <= RECENT_4H_MS {
                     BONUS_RECENT_4H
@@ -681,7 +538,6 @@ fn flush_stream(book: &mut Book) -> Result<()> {
     Ok(())
 }
 
-/// disk rows sorted by row_id; the one parse at open feeds tails too
 fn read_stream_on_disk(dir: &Path) -> Result<Vec<StreamRow>> {
     let mut all = Vec::new();
     let stream_dir = dir.join("stream");
@@ -705,8 +561,6 @@ fn read_stream(book: &Book) -> Result<Vec<StreamRow>> {
     Ok(all)
 }
 
-/// The highest stream segment number on disk — so the flush counter
-/// resumes correctly across restarts.
 fn read_stream_max_seg(dir: &Path) -> Result<u64> {
     let stream_dir = dir.join("stream");
     if !stream_dir.exists() {
@@ -744,14 +598,9 @@ fn merge_spans(spans: &mut Vec<(u64, u64)>) {
     *spans = merged;
 }
 
-// ---- parquet read/write ----------------------------------------------
-
-/// The navigation schema — distilled state + spans, no content, no
-/// compartment id. A page is addressed by its topic.
 fn index_schema() -> SchemaRef {
     let fields = vec![
         Field::new("opened_at", DataType::Int64, false),
-        // newer books write last_inked; reads fall back to the old name
         Field::new("last_inked", DataType::Int64, false),
         Field::new("topic", DataType::Utf8, false),
         Field::new("tags", DataType::Utf8, true),
@@ -765,7 +614,6 @@ fn index_schema() -> SchemaRef {
     Schema::new(fields).into()
 }
 
-/// The stream schema — one row per turn, ever.
 fn stream_schema() -> SchemaRef {
     let fields = vec![
         Field::new("row_id", DataType::Int64, false),
@@ -854,7 +702,6 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     for batch in reader {
         let batch = batch?;
         let opened = batch.column_by_name("opened_at").unwrap();
-        // old books carry the pre-rename column
         let last_inked = batch
             .column_by_name("last_inked")
             .or_else(|| batch.column_by_name("updated_at"))
@@ -879,7 +726,6 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
                 open: split(&as_str(open, i)),
                 spans: split_spans(&as_str(spans, i)),
                 life_tokens: as_i64(tokens, i),
-                // tails rebuilt at open; index stays distilled
                 tail: String::new(),
             });
         }
@@ -1010,15 +856,13 @@ mod tests {
         book.pending.push(msg("assistant", "hi there", 1));
         book.next_row += 1;
         flush_stream(&mut book).unwrap();
-        flush_stream(&mut book).unwrap(); // empty — no-op
+        flush_stream(&mut book).unwrap();
 
-        // One continuous record, in order, regardless of compartment.
         let rows = read_stream(&book).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].content, "hello");
         assert_eq!(rows[1].content, "hi there");
 
-        // Restart: the frontier resumes at the end of what is on disk.
         let book2 = open_book(&dir).unwrap();
         assert_eq!(book2.next_row, 2);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1030,7 +874,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
 
-        // Turns 0..3 about the garden, 3..6 about the neighbours.
         for c in ["soil", "roses", "shade"] {
             book.pending.push(msg("user", c, book.next_row));
             book.next_row += 1;
@@ -1061,7 +904,6 @@ mod tests {
         )
         .unwrap();
 
-        // Back to the garden later: a second, non-contiguous span.
         for c in ["compost", "mulch"] {
             book.pending.push(msg("user", c, book.next_row));
             book.next_row += 1;
@@ -1079,11 +921,11 @@ mod tests {
 
         let g = compartment(&book, "garden").unwrap();
         let n = compartment(&book, "neighbours").unwrap();
-        assert_eq!(g.spans, vec![(0, 3), (6, 8)]); // interleaved, not merged
+        assert_eq!(g.spans, vec![(0, 3), (6, 8)]);
         assert_eq!(n.spans, vec![(3, 6)]);
 
         let g_thread = read_compartment(&book, "garden").unwrap().unwrap();
-        assert_eq!(g_thread.len(), 5); // rows 0..3 + 6..8
+        assert_eq!(g_thread.len(), 5);
         assert_eq!(g_thread[0].content, "soil");
         assert_eq!(g_thread[4].content, "mulch");
 
@@ -1125,7 +967,6 @@ mod tests {
         assert_eq!(book.unattr_tokens, 0);
         assert_eq!(compartment(&book, "t").unwrap().spans, vec![(0, 1)]);
 
-        // Nothing new to deem now.
         assert!(
             deem_span(
                 &mut book,
@@ -1147,28 +988,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = open_engine(&dir).unwrap();
 
-        // A few short turns: not weightful yet.
         for _ in 0..4 {
             e.record_turn("user", "a");
         }
         assert_eq!(e.take_prod(), None);
 
-        // Enough turns + tokens, no lookup shield → prod.
         for _ in 0..40 {
             e.record_turn("user", "this is a long enough sentence to count as weight");
         }
         assert!(e.take_prod().is_some());
 
-        // A lookup shields it.
         let mut e2 = open_engine(&dir).unwrap();
         e2.record_turn("user", "this is a long enough sentence to count as weight");
         e2.note_lookup();
         e2.record_turn("user", "this is a long enough sentence to count as weight");
         e2.record_turn("user", "this is a long enough sentence to count as weight");
-        // still within the lookup gap
         assert_eq!(e2.take_prod(), None);
 
-        // Deeming clears the prod.
         let mut e3 = open_engine(&dir).unwrap();
         for _ in 0..40 {
             e3.record_turn("user", "this is a long enough sentence to count as weight");
@@ -1189,11 +1025,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = open_engine(&dir).unwrap();
 
-        // Two turns, never deemed — the old gap lost them on exit.
         e.record_turn("user", "remember our lisbon plans");
         e.record_turn("assistant", "may is lovely");
 
-        // Simulate an exit: reopen from disk, no deem ever happened.
         let book2 = open_book(&dir).unwrap();
         assert_eq!(book2.next_row, 2);
         let rows = read_stream(&book2).unwrap();
@@ -1201,8 +1035,6 @@ mod tests {
         assert_eq!(rows[0].content, "remember our lisbon plans");
         assert_eq!(rows[1].content, "may is lovely");
 
-        // The segment counter resumes, so a later flush appends, never
-        // overwrites the existing segments.
         let mut e2 = open_engine(&dir).unwrap();
         e2.record_turn("user", "third turn");
         let book3 = open_book(&dir).unwrap();
@@ -1220,7 +1052,6 @@ mod tests {
         let mut book = open_book(&dir).unwrap();
         let now = now_ms();
 
-        // Fresher page, topic phrase + matching tail content.
         book.unattr_tail
             .push(("user".into(), "the press loves olive oil".into()));
         book.index.push(CompartmentMeta {
@@ -1236,7 +1067,6 @@ mod tests {
             life_tokens: 0,
             tail: format_tail(&book.unattr_tail),
         });
-        // Older page, topic only, no tail.
         book.index.push(CompartmentMeta {
             opened_at: now - 2000,
             last_inked: now - 10 * 24 * 3_600_000,
@@ -1251,13 +1081,10 @@ mod tests {
             tail: String::new(),
         });
 
-        // Tail content + freshness beat the equally-topic'd older page.
         let hits = match_compartments(&book, "olive oil press");
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].topic, "olive oil");
         assert!(tail_excerpt(hits[0]).contains("press loves olive oil"));
-        // Stale, wordless page loses to a pure topic hit on the query's
-        // strongest term.
         let hits = match_compartments(&book, "bottles");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].topic, "olive oil bottles");
@@ -1270,7 +1097,6 @@ mod tests {
         let dir = tmpdir("legacy_col");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("stream")).unwrap();
-        // an index written before the rename — column says updated_at
         let schema = Schema::new(vec![
             Field::new("opened_at", DataType::Int64, false),
             Field::new("updated_at", DataType::Int64, false),
@@ -1304,7 +1130,6 @@ mod tests {
         writer.write(&batch).unwrap();
         let _ = writer.close().unwrap();
 
-        // the fallback read maps the old column into last_inked
         let book = open_book(&dir).unwrap();
         let page = compartment(&book, "garden").unwrap();
         assert_eq!(page.last_inked, 2);
