@@ -1,6 +1,3 @@
-// Entry point. Owns the terminal, the tokio runtime, the API client, and
-// the event loop that selects between keyboard events and streaming deltas.
-
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
@@ -46,19 +43,12 @@ use input::Input;
     about = "wryme • that small, calm window where agents come to meet you"
 )]
 struct Args {
-    /// Name of a saved station to use. Defaults to the first saved station,
-    /// or a synthesized "untitled" station built from the newest model the
-    /// first shop advertises, or the built-in demo if nothing is configured.
     #[arg(long)]
     station: Option<String>,
 
-    /// One-shot mode: send this prompt and print the reply to stdout,
-    /// then exit. No TUI is entered. Combine with --model to pin the
-    /// model and --system to prepend a system prompt.
     #[arg(short, long)]
     prompt: Option<String>,
 
-    /// Optional system prompt prepended to every request.
     #[arg(long)]
     system: Option<String>,
 }
@@ -66,10 +56,6 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
-    // Adopt the user's real login shell + PATH before anything else, so a
-    // GUI-launched wme (Dock/Finder, minimal launchd PATH, no $SHELL) sees
-    // the same machine a terminal-launched one does. Makes the shell tool
-    // and its discovery deterministic across every launcher.
     shell_env::bootstrap();
     let _sentry = sentry::init(sentry::ClientOptions {
         dsn: std::env::var("SENTRY_DSN")
@@ -92,7 +78,6 @@ async fn main() -> Result<()> {
     let stations = station::load_all().context("loading stations")?;
     let (active, active_origin) = station::pick(&stations, &shops, args.station.as_deref())?;
 
-    // Resolve the shop that advertises this station's model.
     let active_shop = shop::find_for_model(&shops, &active.model)
         .cloned()
         .with_context(|| {
@@ -105,7 +90,6 @@ async fn main() -> Result<()> {
 
     let client = Client::new().context("building api client")?;
 
-    // One-shot mode: no TUI, just print the reply.
     if let Some(prompt) = args.prompt.as_deref() {
         return one_shot(
             &client,
@@ -144,10 +128,6 @@ async fn main() -> Result<()> {
     result
 }
 
-/// One-shot mode: send a single prompt and print the reply to stdout.
-/// No TUI is entered. StreamEvents are drained and only the assistant
-/// text (Delta) is printed; reasoning (Brain), tool calls, and usage are
-/// skipped. Errors go to stderr with a non-zero exit.
 async fn one_shot(
     client: &Client,
     station: &station::Station,
@@ -175,8 +155,6 @@ async fn one_shot(
         tool_result: String::new(),
     });
 
-    // One-shot mode keeps no memory: open the book engine in a throwaway
-    // temp dir so the `book` tool and preamble stay empty and isolated.
     let engine = std::sync::Arc::new(std::sync::Mutex::new(
         crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot")).expect("open book"),
     ));
@@ -274,6 +252,7 @@ fn init_logging() {
         .try_init();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: Client,
@@ -322,7 +301,6 @@ async fn run(
                     Event::Mouse(m) => {
                         keys::handle_mouse(m, &mut app);
                     }
-                    Event::Resize(_, _) => { /* redraw on next loop */ }
                     _ => {}
                 }
             }
@@ -354,9 +332,6 @@ async fn run(
                         app.last_response_id = Some(id);
                     }
                     StreamEvent::WindowUnsupported { shop } => {
-                        // Runtime only, config file untouched: this shop
-                        // doesn't retain windows, so pin it to full for
-                        // the rest of this window. Trips once per launch.
                         for s in app.shops.iter_mut() {
                             if s.name == shop {
                                 s.window = crate::shop::WindowMode::Full;
@@ -368,9 +343,6 @@ async fn run(
                         app.note(format!("{shop}: warm window unsupported, using full"));
                     }
                     StreamEvent::Usage { input, output } => {
-                        // Latest prompt size replaces (each request
-                        // re-reports the full transcript); generated
-                        // tokens accumulate across the window.
                         app.usage_ctx = input;
                         app.usage_out += output;
                         let station = app.active_station.name.clone();
@@ -414,9 +386,6 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                // Background auto-delivery: a finished async job, and no
-                // turn in flight, so fire a calm background turn that
-                // plants the result and lets the model tell the user.
                 if jobs::has_due() && !app.in_flight {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();

@@ -4,7 +4,7 @@ pub const DEFAULT_MAC_VOICE: &str = "Tara";
 pub const DEFAULT_MAC_RATE_WPM: &str = "260";
 
 fn has_bin(name: &str) -> bool {
-    std::env::var_os("PATH").map_or(false, |paths| {
+    std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
             .map(|d| d.join(name))
             .any(|p| p.is_file())
@@ -30,7 +30,6 @@ fn spawn_say(body: &str, voice: Option<&str>) -> Option<Child> {
     if let Some(v) = voice {
         c.arg("-v").arg(v);
     }
-    // body may start with '-' — '--' ends option parsing so `say: invalid option` never hits.
     c.arg("--").arg(body).spawn().ok()
 }
 
@@ -68,9 +67,6 @@ fn synth_file(body: &str, voice: Option<&str>, cur: &Cur) -> Option<std::path::P
     }
 }
 
-/// Wait for the current child without holding the lock: polls so Stop
-/// can take + kill mid-speech. False when the child was taken (=killed)
-/// or failed.
 fn wait_releasable(cur: &Cur) -> bool {
     loop {
         let done = match cur.lock() {
@@ -101,8 +97,6 @@ fn play_wait(path: &std::path::Path, cur: &Cur) {
     let _ = std::fs::remove_file(path);
 }
 
-/// Split streamed text into speakable sentences. Returns complete
-/// sentences, keeping the unfinished tail buffered by the caller.
 pub fn split_sentences(buffer: &mut String) -> Vec<String> {
     let mut out = Vec::new();
     let mut end = 0usize;
@@ -139,10 +133,6 @@ enum SpeakCmd {
     Stop,
 }
 
-/// Sequential background speaker. Sentences queue up and play in order;
-/// Stop kills the current voice and drops the queue. macOS renders each
-/// speech to a temp file and plays it with afplay: `say` straight to the
-/// device clips the tail, the file round-trip does not.
 pub struct Speaker {
     tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
     current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
@@ -163,8 +153,6 @@ impl Speaker {
         let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
         std::thread::spawn(move || {
             let mut pending: Vec<String> = Vec::new();
-            // One speech, fully played. Batches two sentences where told
-            // to; afplay is the killable handle, temp file is scrubbed.
             let speak_now = |text: String, cur: &Cur| {
                 if text.trim().is_empty() {
                     return;
@@ -179,10 +167,10 @@ impl Speaker {
                     if let Ok(mut guard) = cur.lock() {
                         *guard = Some(child);
                     }
-                    if let Ok(mut guard) = cur.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.wait();
-                        }
+                    if let Ok(mut guard) = cur.lock()
+                        && let Some(mut child) = guard.take()
+                    {
+                        let _ = child.wait();
                     }
                 }
             };
@@ -191,15 +179,13 @@ impl Speaker {
                     SpeakCmd::Stop => {
                         pending.clear();
                         cnt.store(0, std::sync::atomic::Ordering::Relaxed);
-                        if let Ok(mut guard) = cur.lock() {
-                            if let Some(mut child) = guard.take() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
+                        if let Ok(mut guard) = cur.lock()
+                            && let Some(mut child) = guard.take()
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
                         }
                         while rx.try_recv().is_ok() {}
-                        // Anything sent before this Stop is now stale;
-                        // drop it on read via the generation check below.
                     }
                     SpeakCmd::Say(g, text) => {
                         cnt.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -263,11 +249,11 @@ impl Speaker {
         if let Some(tx) = &self.tx {
             let _ = tx.send(SpeakCmd::Stop);
         }
-        if let Ok(mut guard) = self.current.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        if let Ok(mut guard) = self.current.lock()
+            && let Some(mut child) = guard.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 

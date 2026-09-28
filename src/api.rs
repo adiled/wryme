@@ -1,21 +1,3 @@
-// Shared types and the protocol dispatcher.
-//
-// Client wraps just the reqwest http handle. Active shop and station live
-// on App and are passed in per request so the popup can mutate them
-// without going through Client.
-//
-// Per-protocol work lives in two sibling files:
-//   api_chat.rs       /chat/completions
-//   api_responses.rs  /responses
-//
-// StreamEvents both protocols can emit:
-//   Delta { text }      content delta
-//   Brain { text }      reasoning / thinking delta
-//   ToolCall { name }   model is calling a tool; drives "tinkering"
-//   ResponseId { id }   captured from response.created, replayed as
-//                       previous_response_id next turn for session pinning
-//   Done                clean end of stream
-//   Error { message }   anything we couldn't classify as success
 use crate::shop::{Protocol, Shop};
 use crate::station::Station;
 use anyhow::{Context, Result};
@@ -52,7 +34,6 @@ pub(crate) fn is_tool_unsupported_msg(msg: &str) -> bool {
             || s.contains("unsupported")
             || s.contains("does not support"))
 }
-/// A wire function-call to attach to an assistant ApiMessage.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiToolCall {
     pub id: String,
@@ -64,16 +45,9 @@ pub struct ApiToolCall {
 pub struct ApiMessage {
     pub role: String,
     pub content: String,
-    /// Image file paths attached to this message. Read and base64-encoded
-    /// by the protocol builders when serializing to the wire.
     pub images: Vec<String>,
-    /// For an assistant message that used tools: the function-call array
-    /// to attach on the wire (Chat protocol `tool_calls`). Empty when none.
     pub tool_calls: Vec<ApiToolCall>,
-    /// For a tool-role message: the call_id this result answers (Chat
-    /// protocol `tool_call_id`). Empty for ordinary messages.
     pub tool_call_id: String,
-    /// The tool result payload for a tool-role message.
     pub tool_result: String,
 }
 #[derive(Debug)]
@@ -87,8 +61,6 @@ pub enum StreamEvent {
     ToolCall {
         name: Option<String>,
     },
-    /// A tool call/result pair completed: persist it onto the current
-    /// assistant message so the next turn's history carries the transcript.
     ToolResult {
         call_id: String,
         name: String,
@@ -98,14 +70,9 @@ pub enum StreamEvent {
     ResponseId {
         id: String,
     },
-    /// The shop rejected a warm window (`previous_response_id`
-    /// unsupported): the UI should pin this shop to full windows and
-    /// persist that, so the fallback trips once ever, not every turn.
     WindowUnsupported {
         shop: String,
     },
-    /// Token usage for the finished turn (prompt + completion), when the
-    /// server reports it: chat usage chunk, or responses completed event.
     Usage {
         input: u64,
         output: u64,
@@ -130,10 +97,6 @@ impl Client {
         Ok(Self { http })
     }
 
-    /// Read proxy settings from HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars.
-    /// None when no proxy env var is set. If NO_PROXY is not set, no hosts
-    /// are excluded (so localhost goes through the proxy). If NO_PROXY *is*
-    /// set, it is parsed and applied.
     fn read_proxy_settings() -> Option<reqwest::Proxy> {
         let proxy_url = std::env::var("HTTP_PROXY")
             .or_else(|_| std::env::var("http_proxy"))
@@ -144,22 +107,18 @@ impl Client {
         let proxy = match reqwest::Proxy::all(&proxy_url) {
             Ok(proxy) => proxy,
             Err(e) => {
-                // Invalid proxy URL in env: skip proxy rather than crash.
                 eprintln!("wryme: ignoring invalid proxy URL {proxy_url:?}: {e}");
                 return None;
             }
         };
         let mut proxy = proxy;
-        // If NO_PROXY is set, apply it so common exclusions
-        // (localhost, 127.0.0.1, [::1]) work as the user expects.
         if let Ok(no_proxy_str) = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")) {
             let no_proxy = reqwest::NoProxy::from_string(&no_proxy_str);
             proxy = proxy.no_proxy(no_proxy);
         }
         Some(proxy)
     }
-    /// Panic-proof wrapper: guarantees Error + Done so a turn can never
-    /// wedge `in_flight` forever.
+
     pub async fn stream_completion(
         &self,
         shop: Shop,
@@ -240,7 +199,6 @@ impl Client {
         let _ = tx.send(StreamEvent::Done);
     }
 }
-// ---- SSE framing helpers used by both protocol files ----
 pub(crate) struct Boundary {
     pub body_len: usize,
     pub end: usize,
@@ -272,13 +230,10 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut out = s.chars().take(max).collect::<String>();
-        out.push_str("…");
+        out.push('…');
         out
     }
 }
-/// Read an image file and return its media type + base64 data-URL payload.
-/// Only common image extensions are accepted; anything else yields None so
-/// the caller can fall back to plain text.
 pub fn image_data_url(path: &str) -> Option<(String, String)> {
     let mime = match std::path::Path::new(path)
         .extension()
