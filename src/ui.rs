@@ -1,17 +1,3 @@
-// Rendering. Three regions:
-//
-//   ┌──────────────────────────────────────┐
-//   │ > input here                         │   top: input bar
-//   ├──────────────────────────────────────┤
-//   │ assistant • streaming                │   middle: messages,
-//   │ newest message text                  │           newest at top,
-//   │                                      │           older below it
-//   │ you                                  │
-//   │ older question                       │
-//   ├──────────────────────────────────────┤
-//   │ model • N msgs • status              │   bottom: status
-//   └──────────────────────────────────────┘
-
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
@@ -26,18 +12,20 @@ use crate::input::Input;
 use crate::popup;
 use crate::shop::Protocol;
 
+const ERROR_BOX_MAX_ROWS: usize = 8;
+
 pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // input box
-            Constraint::Min(1),    // messages
-            Constraint::Length(1), // status
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
         ])
         .split(area);
+    let (input_chunk, messages_chunk, status_chunk) = (chunks[0], chunks[1], chunks[2]);
 
-    // ---- input bar (top) ----
     let prompt = "› ";
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -58,21 +46,19 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             " write. Enter to send, Ctrl-C to quit "
         });
 
-    // The prompt stays fixed on the left; only the text scrolls, so the
-    // caret (and the letters being typed) stay pinned at the right edge
-    // instead of running past it, while old text slides out the left side.
     let inner = ratatui::layout::Rect {
-        x: chunks[0].x + 1,
-        y: chunks[0].y + 1,
-        width: chunks[0].width.saturating_sub(2),
-        height: chunks[0].height.saturating_sub(2),
+        x: input_chunk.x + 1,
+        y: input_chunk.y + 1,
+        width: input_chunk.width.saturating_sub(2),
+        height: input_chunk.height.saturating_sub(2),
     };
     let visible_width = (inner.width as usize).saturating_sub(prompt.len());
     let h_scroll = input.scroll_offset(visible_width);
 
-    // Draw the border + title.
-    f.render_widget(Paragraph::new(Line::from("")).block(input_block), chunks[0]);
-    // Draw the fixed prompt at the inner-left.
+    f.render_widget(
+        Paragraph::new(Line::from("")).block(input_block),
+        input_chunk,
+    );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             prompt,
@@ -85,7 +71,6 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             height: inner.height,
         },
     );
-    // Draw the text, scrolled so the caret hugs the right edge.
     let text_area = ratatui::layout::Rect {
         x: inner.x + prompt.len() as u16,
         y: inner.y,
@@ -97,7 +82,6 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         text_area,
     );
 
-    // Place the terminal cursor inside the input box.
     let cursor_x = text_area.x + input.display_col() - h_scroll as u16;
     let cursor_y = text_area.y;
     if cursor_x < text_area.x + text_area.width {
@@ -107,9 +91,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         });
     }
 
-    // ---- messages (middle, newest first, paged) ----
     let mut lines: Vec<Line> = Vec::new();
-    let msg_width = chunks[1].width;
+    let msg_width = messages_chunk.width;
     for msg in app.messages.iter().rev() {
         push_message(&mut lines, msg, msg_width);
         lines.push(Line::from(""));
@@ -126,37 +109,29 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::NONE));
 
-    let viewport_h = chunks[1].height as usize;
+    let viewport_h = messages_chunk.height as usize;
     app.last_viewport_h = viewport_h;
-    let total_rows = wrapped_row_count(&lines, chunks[1].width);
+    let total_rows = wrapped_row_count(&lines, messages_chunk.width);
     let n_pages = if total_rows == 0 || viewport_h == 0 {
         1
     } else {
         total_rows.div_ceil(viewport_h)
     };
     let page = app.current_page.min(n_pages.saturating_sub(1));
-    // Write the clamped page back so navigation can never accumulate
-    // phantom pages past the end (issue #6: scrolling past the last page
-    // then reversing used to cost the same amount of extra scrolling).
     app.current_page = page;
 
-    // Clamp the scroll offset to the last legal row so the user can't page
-    // off into the empty void beyond the oldest line.
     let max_scroll = total_rows.saturating_sub(1);
     let scroll_offset = match app.view_mode {
         ViewMode::Page => page * viewport_h,
         ViewMode::Scroll => {
-            // Same clamp-back as above: keep scroll_row inside the legal
-            // range so reversing direction never has to eat phantom rows.
             app.scroll_row = app.scroll_row.min(max_scroll);
             app.scroll_row
         }
     };
     let scroll_y = scroll_offset.min(u16::MAX as usize) as u16;
 
-    f.render_widget(messages_para.scroll((scroll_y, 0)), chunks[1]);
+    f.render_widget(messages_para.scroll((scroll_y, 0)), messages_chunk);
 
-    // ---- status bar ----
     let dot = " • ";
     let is_demo = app.active_shop.protocol == Protocol::Demo;
     let dirty = app.is_dirty();
@@ -261,7 +236,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
-        let bar_w = chunks[2].width as usize;
+        let bar_w = status_chunk.width as usize;
         if bar_w > left_w + tr_w + 2 {
             pieces.push(Span::raw(" ".repeat(bar_w - left_w - tr_w)));
         } else {
@@ -270,25 +245,17 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         pieces.extend(trailer);
     }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
-    f.render_widget(status, chunks[2]);
+    f.render_widget(status, status_chunk);
 
-    // ---- error overlay (bottom-right half, wrapped) ----
-    // Long upstream errors used to bleed past the right edge on the
-    // single-line status bar. When the status is an error, also pop a
-    // wrapped red box over the bottom-right half so the whole message
-    // reads, even if it runs multiline.
     if is_error_status(&app.status) {
-        draw_error_overlay(f, area, chunks[2], &app.status);
+        draw_error_overlay(f, area, status_chunk, &app.status);
     }
 
-    // ---- station popup overlay ----
     if app.popup.mode != popup::Mode::Closed {
         crate::popup_ui::draw(f, app);
     }
 }
 
-/// K-terms formatting for the usage meter: 950 -> "950", 12400 ->
-/// "12.4K", 2_300_000 -> "2.3M".
 fn format_k(n: u64) -> String {
     if n < 1000 {
         return n.to_string();
@@ -301,8 +268,6 @@ fn format_k(n: u64) -> String {
     format!("{:.1}M", ((f / 1_000_000.0) * 10.0).round() / 10.0)
 }
 
-/// True when the status bar carries an error worth the red treatment
-/// (and the wrapped overlay below).
 fn is_error_status(s: &str) -> bool {
     s.starts_with("error")
         || s.starts_with("upstream")
@@ -311,15 +276,17 @@ fn is_error_status(s: &str) -> bool {
         || s.starts_with("update failed")
 }
 
-/// HSL(0.45/0.85, hue) -> Rgb. The heart's continuum: green at 120°,
-/// yellow at 60°, red at 0° — a single sweep over the figure, no blocks.
 fn hue_lit(hue: f64) -> Color {
-    let l = 0.45_f64;
-    let s = 0.85_f64;
+    const LIGHTNESS: f64 = 0.45;
+    const SATURATION: f64 = 0.85;
+    const HUE_SECTOR_DEGREES: f64 = 60.0;
+
+    let l = LIGHTNESS;
+    let s = SATURATION;
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let x = c * (1.0 - ((hue / HUE_SECTOR_DEGREES) % 2.0 - 1.0).abs());
     let m = l - c / 2.0;
-    let (r, g, b) = match (hue.rem_euclid(360.0) / 60.0).floor() as i32 {
+    let (r, g, b) = match (hue.rem_euclid(360.0) / HUE_SECTOR_DEGREES).floor() as i32 {
         0 => (c, x, 0.0),
         1 => (x, c, 0.0),
         2 => (0.0, c, x),
@@ -334,10 +301,6 @@ fn hue_lit(hue: f64) -> Color {
     )
 }
 
-/// Wrapped error box over the bottom-right half of the screen, stacked
-/// just above the status bar. Height fits the wrapped text (capped), so
-/// short errors stay a small flag and long ones read multiline instead
-/// of bleeding off the right edge.
 fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) {
     let box_w = (area.width / 2).clamp(24, area.width.max(24)) as usize;
     let inner_w = box_w.saturating_sub(4).max(10);
@@ -345,12 +308,9 @@ fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) 
     if rows.is_empty() {
         rows.push(String::new());
     }
-    // Cap the box so it never eats the whole window; extra lines clip.
-    let max_rows = 8usize;
-    rows.truncate(max_rows);
+    rows.truncate(ERROR_BOX_MAX_ROWS);
     let box_h = (rows.len() + 2) as u16;
     let x = area.width.saturating_sub(box_w as u16);
-    // Stack above the status bar; clamp into the window on short screens.
     let y = status_chunk.y.saturating_sub(box_h).max(area.y);
     let err_area = Rect {
         x,
@@ -374,8 +334,6 @@ fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) 
     f.render_widget(Paragraph::new(text).block(block), err_area);
 }
 
-/// Greedy word wrap for the error box. Long words hard-break so a wall
-/// of URL never overflows the box.
 fn wrap_words(s: &str, width: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -385,7 +343,6 @@ fn wrap_words(s: &str, width: usize) -> Vec<String> {
         }
     };
     for word in s.split_whitespace() {
-        // Hard-break words wider than the box first.
         let mut w = word;
         while unicode_width::UnicodeWidthStr::width(w) > width {
             let cut = cut_at_width(w, width.saturating_sub(1));
@@ -412,7 +369,6 @@ fn wrap_words(s: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Byte index where the next `width` display columns end.
 fn cut_at_width(s: &str, width: usize) -> &str {
     let mut w = 0usize;
     let mut end = 0usize;
@@ -438,10 +394,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     )];
     if msg.streaming {
-        // Hidden tools (the bookkeeper and the phantom async checker) are
-        // treated visually, not as tools: the bookkeeper shows a quiet
-        // "reminiscing…" and no tool name; the checker is fully invisible.
-        // The app phase is still `Tinkering` — this is purely presentation.
         let hidden = msg
             .current_tool
             .as_ref()
@@ -452,24 +404,13 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
             .as_ref()
             .map(|n| crate::tools::is_book_tool(n))
             .unwrap_or(false);
-        let label = match msg.phase {
-            Phase::Writing => Some("  writing…"),
-            Phase::Thinking => Some("  thinking…"),
-            Phase::Tinkering => {
-                if hidden {
-                    if bookish {
-                        Some("  reminiscing…")
-                    } else {
-                        None
-                    }
-                } else {
-                    Some("  tinkering…")
-                }
-            }
-            // Initial state. No chunk has arrived yet. Suppress the
-            // generic "streaming…" filler; the empty header reads as
-            // "waiting" cleanly enough.
-            Phase::Streaming => None,
+        let label = match (msg.phase, hidden, bookish) {
+            (Phase::Writing, ..) => Some("  writing…"),
+            (Phase::Thinking, ..) => Some("  thinking…"),
+            (Phase::Tinkering, false, _) => Some("  tinkering…"),
+            (Phase::Tinkering, true, true) => Some("  reminiscing…"),
+            (Phase::Tinkering, true, false) => None,
+            (Phase::Streaming, ..) => None,
         };
         if let Some(l) = label {
             header.push(Span::styled(
@@ -479,9 +420,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
         }
     }
 
-    // Build the right side of the header. Tool name (if any, while streaming)
-    // sits just to the left of the timestamp with two spaces between them.
-    // Hidden tools (bookkeeper / phantom checker) never show a name.
     let tool_span: Option<Span<'static>> = if msg.streaming {
         msg.current_tool
             .as_ref()
@@ -499,8 +437,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     };
     let ts_span = Span::styled(msg.timestamp.clone(), Style::default().fg(Color::DarkGray));
 
-    // Width math. Pad with spaces between the header's left content and the
-    // right cluster (tool name + timestamp).
     let left_width: usize = header
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
@@ -534,7 +470,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
         )));
     }
 
-    // Reply (newest in time, sits at the top of this message's block).
     if has_reply {
         match msg.role {
             Role::Assistant => {
@@ -562,7 +497,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
         }
     }
 
-    // Brain (older in time, sits beneath the reply as a footnote).
     if has_brain {
         if has_reply {
             out.push(Line::from(""));
@@ -588,9 +522,6 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     }
 }
 
-/// Approximate visual row count after wrapping. Sums each Line's display
-/// width and rounds up by area width. Not exact (ratatui's word-boundary
-/// wrap may add a row here or there) but close enough to count pages.
 fn wrapped_row_count(lines: &[Line<'_>], area_width: u16) -> usize {
     let aw = (area_width as usize).max(1);
     let mut total = 0usize;
@@ -616,7 +547,6 @@ mod tests {
         for r in &rows {
             assert!(UnicodeWidthStr::width(r.as_str()) <= 12, "overflow: {r}");
         }
-        // Joined words survive intact, space-separated.
         assert_eq!(rows.join(" "), "upstream 400: this is a long error message");
     }
 

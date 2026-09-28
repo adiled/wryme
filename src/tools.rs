@@ -1,19 +1,3 @@
-// The model's shell tool — named after the user's real login shell, so
-// it is `zsh` on a zsh machine, `bash` on bash, etc.
-//
-// This is the actual shell: the thing the model uses to DO things on
-// this machine, not just find them. The model calls it with a command
-// and we run it in the user's real login shell (bash, zsh, ...), so it
-// behaves exactly like the terminal the human sees. Output streams back
-// to the model as a `tool` / `function_call_output` result.
-//
-// The discovery companion is `<shell>_explore` (explore.rs): the model
-// is told to hit that FIRST with a CSV when it isn't sure a tool exists,
-// then run it here. Long commands go async after 10s and the model can
-// peek at them with `<shell>_check` (jobs.rs); a finished job's result
-// is auto-delivered back into the conversation. All three are advertised
-// and dispatched together.
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,15 +5,10 @@ use crate::book::{self, Bookmark};
 use crate::explore;
 use crate::jobs;
 
-/// The shell tool's function name: the user's real login shell, e.g.
-/// `zsh`, `bash`, `fish`. The model sees exactly the shell the human
-/// uses.
 pub fn shell_name() -> String {
     explore::shell_basename(crate::shell_env::shell())
 }
 
-/// What we tell the model. Emphasise: it IS the terminal, keep commands
-/// single and simple, and use myshell_explore first when unsure.
 pub const TOOL_DESCRIPTION: &str = "\
 Your shell on this machine. Run a shell command and you get back its \
 output (and exit code). It runs in the user's real login shell (bash, \
@@ -44,9 +23,6 @@ the check tool (the one named after your shell plus _check, e.g. \
 zsh_check) with that id to peek at its progress or get the final result; \
 otherwise a finished job's result will be delivered to you on its own.";
 
-/// The JSON parameters schema advertised with the shell tool.
-/// Strict-mode clean: every property listed in `required` and no
-/// additional properties, so servers can enforce `strict: true`.
 pub fn tool_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -63,9 +39,6 @@ pub fn tool_parameters() -> serde_json::Value {
 
 const SHELL_TIMEOUT_SECS: u64 = 10;
 
-/// Dispatch a tool call by name to whichever local tool it names. `engine`
-/// is the shared book engine (used by the invisible `book` tool) and
-/// `session` is this turn's assembled messages (used by `append`).
 pub async fn execute(
     engine: &Arc<Mutex<book::Engine>>,
     name: &str,
@@ -93,7 +66,6 @@ pub async fn execute(
     out
 }
 
-/// The async-job check tool: `<shell>_check`, e.g. `zsh_check`.
 pub fn check_name() -> String {
     format!(
         "{}_check",
@@ -122,7 +94,6 @@ pub fn check_parameters() -> serde_json::Value {
     })
 }
 
-/// Pull the job id out of whatever the model passed (JSON or bare).
 fn extract_id(arguments: &str) -> u64 {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
         && let Some(id) = v.get("id").and_then(|i| i.as_u64())
@@ -132,7 +103,6 @@ fn extract_id(arguments: &str) -> u64 {
     arguments.trim().parse().unwrap_or(0)
 }
 
-/// Peek at (or collect) an async job's result.
 async fn check(id: u64) -> String {
     match jobs::poll(id) {
         None => format!("unknown job id {id}"),
@@ -151,8 +121,6 @@ async fn check(id: u64) -> String {
     }
 }
 
-/// Pull the command out of whatever the model passed. Usually JSON
-/// (`{"command":"ls"}`, but we tolerate a bare string.
 fn extract_command(arguments: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
         && let Some(c) = v.get("command").and_then(|c| c.as_str())
@@ -162,13 +130,8 @@ fn extract_command(arguments: &str) -> String {
     arguments.trim().to_string()
 }
 
-/// Run a command through the real login shell. Fast commands (<10s)
-/// return their output straight away; slower ones become background jobs
-/// and we tell the model they went async.
 async fn run_shell(command: &str) -> String {
     if command.trim().is_empty() {
-        // Tells the model the exact retry shape so an empty call can
-        // self-correct instead of looping on "no command given".
         return format!(
             "{}: no command given — call again with {{\"command\": \"...\"}}",
             shell_name()
@@ -185,11 +148,6 @@ async fn run_shell(command: &str) -> String {
     }
 }
 
-/// The invisible bookkeeping tool: how the same agent that talks also
-/// remembers. Grandma never sees it — the UI treats it as a quiet
-/// "reminiscing…" instead of a tool. The model calls it in the flow to
-/// look up the book, promote a compartment to the preamble, or file the
-/// current thread away with its own distilled bookmark.
 pub const BOOK_NAME: &str = "book";
 
 pub fn book_name() -> &'static str {
@@ -219,9 +177,6 @@ deem it so it is never lost. Keep the distilled bookmark short — \
 people, facts, plans, and what is still open.";
 
 pub fn book_parameters() -> serde_json::Value {
-    // Strict-mode clean: every property required (the model sends empty
-    // strings/arrays for unused ones; parsing defaults them) and no
-    // additional properties.
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -261,22 +216,14 @@ pub fn book_parameters() -> serde_json::Value {
     })
 }
 
-/// True for the tools grandma never sees: the bookkeeper and the phantom
-/// async-job checker. The UI suppresses the "tinkering…" label and the
-/// tool name for these.
 pub fn is_hidden_tool(name: &str) -> bool {
     name == BOOK_NAME || name == check_name()
 }
 
-/// True for the bookkeeping tool specifically — the UI shows it as a
-/// quiet "reminiscing…" instead of a tool.
 pub fn is_book_tool(name: &str) -> bool {
     name == BOOK_NAME
 }
 
-/// Run the invisible book tool. Locks the shared engine. The engine
-/// records every turn itself, so `deem` just points the unattributed
-/// rows at a compartment.
 async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(v) => v,
@@ -397,13 +344,6 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The JSON tool definitions for the Chat Completions protocol
-/// (`POST /chat/completions`, incl. Ollama's OpenAI-compat endpoint).
-/// OpenAI's Chat spec requires the nested shape:
-/// `{"type":"function","function":{"name":..,"description":..,"parameters":..}}`.
-/// The flat `{"type":"function","name":..}` shape is Responses-only and is
-/// silently ignored by strict OpenAI-compat servers (Ollama) — the model
-/// then claims "no tools". See https://ollama.com/blog/tool-support.
 pub fn tool_defs_chat() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -445,11 +385,6 @@ pub fn tool_defs_chat() -> Vec<serde_json::Value> {
     ]
 }
 
-/// The JSON tool definitions advertised in both protocols: the shell
-/// tool, its discovery companion, the async-job checker, and the
-/// invisible bookkeeper.
-/// NOTE: this flat shape is Responses-only. Chat Completions callers must
-/// use `tool_defs_chat()` (nested `function` wrapper).
 pub fn tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -521,9 +456,6 @@ mod tests {
 
     #[test]
     fn tool_defs_chat_uses_nested_function_wrapper() {
-        // OpenAI Chat Completions (+ Ollama compat) requires
-        // {"type":"function","function":{name,description,parameters}}.
-        // Flat shape is silently ignored -> model says "no tools".
         let defs = tool_defs_chat();
         assert_eq!(defs.len(), 4);
         for d in &defs {
@@ -540,7 +472,6 @@ mod tests {
             .collect();
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&book_name()));
-        // Strict everywhere: servers can enforce schema adherence.
         for d in &defs {
             assert_eq!(d["function"]["strict"], true);
         }
@@ -548,8 +479,6 @@ mod tests {
 
     #[test]
     fn all_tool_schemas_are_strict_clean() {
-        // strict:true requires every property in `required` and no
-        // additional properties, on both protocols' defs.
         for params in [
             tool_parameters(),
             explore::tool_parameters(),
@@ -583,7 +512,6 @@ mod tests {
             e.record_turn("assistant", "may is nice");
         }
 
-        // No separate create step — deeming into an unborn topic births it.
         let out = execute(
             &engine,
             book_name(),
@@ -646,7 +574,6 @@ mod tests {
         .unwrap();
         assert!(out2.contains("deemed rows 1..2"));
 
-        // Nothing new to deem now.
         let out3 = execute(
             &engine,
             book_name(),

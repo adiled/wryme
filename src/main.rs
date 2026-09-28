@@ -301,7 +301,6 @@ async fn run(
                     Event::Mouse(m) => {
                         keys::handle_mouse(m, &mut app);
                     }
-                    Event::Resize(_, _) => { /* redraw on next loop */ }
                     _ => {}
                 }
             }

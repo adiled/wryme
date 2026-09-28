@@ -1,44 +1,16 @@
-// Shops: the kitchens. Where the model lives, how we reach it, and what
-// authentication it wants. Stations declare a model name; shops declare
-// which model names they serve. At startup we match them by string.
-//
-// Sources, in order:
-//   1. Built-in demo shop. Always present, never speaks over the wire,
-//      streams canned replies. The thing a brand-new user lands on when
-//      they have no config.
-//   2. WME_DEFAULT_SHOP_* env vars. Defines one shop inline. Convenient
-//      for the "just install and point it somewhere" case.
-//   3. ~/.config/wryme/shops.toml. Any number of named shops.
-
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// How a Responses shop carries the window between turns.
-///
-/// `Full` (default): stateless. Every request carries the whole
-/// transcript with `store: false`; works against any shop, but the
-/// server re-prefills everything each tool round, so long windows get
-/// slow. `Warm`: the server keeps the window warm; follow-ups send only
-/// the new items against `previous_response_id` with `store: true`.
-/// Fast, but only shops that actually retain windows (OpenAI, our ds4).
-/// Set `window = "warm"` per shop to opt in.
+const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowMode {
     Full,
     Warm,
 }
-///
-/// `Demo` is our local canned-replies generator. No network.
-/// `Responses` is the default: the newer typed-event protocol at
-/// `/v1/responses`. Cleaner for tool calls, reasoning, refusals, and
-/// built-in tools. Stateless (`store: false`, full transcript replayed),
-/// so it works against any shop that implements the endpoint — OpenAI,
-/// our local ds4/glm servers, and Ollama's OpenAI-compat endpoint.
-/// `ChatCompletions` is the opt-out baseline: `/v1/chat/completions`
-/// with flat `choices[].delta` chunks. Set
-/// `protocol = "chat-completions"` for servers with no `/responses`.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Demo,
@@ -53,11 +25,7 @@ pub struct Shop {
     pub key: String,
     pub protocol: Protocol,
     pub window: WindowMode,
-    /// Models this shop advertises. Convention: list newest-first. The
-    /// first model is what wryme picks when synthesizing a default
-    /// station for a fresh launch with no saved stations.
     pub models: Vec<String>,
-    /// Custom headers sent with every request to this shop.
     pub headers: HashMap<String, String>,
 }
 
@@ -85,16 +53,11 @@ struct ShopsFile {
 struct ShopDef {
     name: String,
     url: String,
-    /// Inline key. Use `key_env` instead if you don't want secrets in the
-    /// config file.
-    #[serde(default)]
     key: Option<String>,
     #[serde(default)]
     key_env: Option<String>,
-    /// "responses" (default) or "chat-completions".
     #[serde(default)]
     protocol: Option<String>,
-    /// "full" (default) or "warm". Warm keeps the window server-side.
     #[serde(default)]
     window: Option<String>,
     #[serde(default)]
@@ -139,7 +102,6 @@ pub fn load_all() -> Result<Vec<Shop>> {
 
     if let Some(path) = config_path() {
         if !path.exists() {
-            // First run — seed a file so canned shows as a persisted shop/radio and user sees the shape.
             let _ = ensure_default_file(&path);
         }
         if path.exists() {
@@ -210,7 +172,7 @@ fn from_env() -> Option<Shop> {
 
     Some(Shop {
         name: name.unwrap_or_else(|| "default".into()),
-        url: url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
+        url: url.unwrap_or_else(|| DEFAULT_OPENAI_URL.into()),
         key,
         protocol,
         window,
@@ -228,17 +190,10 @@ fn config_path() -> Option<PathBuf> {
     })
 }
 
-/// Find the first shop whose `models` list advertises this model name.
-/// Returns None if no shop serves it. Callers should treat that as an
-/// error at startup with a helpful message.
 pub fn find_for_model<'a>(shops: &'a [Shop], model: &str) -> Option<&'a Shop> {
     shops.iter().find(|s| s.models.iter().any(|m| m == model))
 }
 
-/// Hit each shop's `/v1/models` endpoint to populate its `models` list.
-/// Shops that already have a non-empty `models` (specified by the user
-/// in shops.toml) are left alone. Demo is skipped. Returns the list of
-/// (shop_name, error) pairs for shops where discovery failed.
 pub async fn discover_all(shops: &mut [Shop]) -> Vec<(String, String)> {
     let http = match reqwest::Client::builder().build() {
         Ok(c) => c,

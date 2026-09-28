@@ -1,12 +1,3 @@
-// Markdown rendering. Assistant replies often contain markdown that the
-// previous renderer left as raw text (asterisks, backticks, fence lines).
-// Here we feed the content through tui-markdown and convert the borrowed
-// Text it returns into owned Lines so the result fits our static-lifetime
-// line buffer in ui.rs.
-//
-// The streaming cursor span is appended to the very last line when the
-// caller asks for it, so the caret sits at the end of the live text.
-
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 

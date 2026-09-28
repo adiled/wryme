@@ -1,37 +1,15 @@
-// The "station" popup. The single place in the TUI where the user can:
-//   - tune the active station (model + dials) for the current session
-//   - jump to a different saved station
-//   - save the active configuration under a new name
-//
-// State machine:
-//   Closed   -> the popup is not visible
-//   Browse   -> popup is open, arrow-key navigation
-//   SaveAs   -> popup is open, a sub-input is collecting a name
-//
-// All popup actions mutate App. Dials and model changes apply to the
-// next turn (the next time the user hits Enter on the main input).
-
 use crate::app::App;
 use crate::input::Input;
 use crate::shop::Shop;
 use crate::station::{Dials, Patience, Station};
 
-/// Popup lifecycle state. Default is closed.
 #[derive(Debug, Default)]
 pub struct Popup {
     pub mode: Mode,
-    /// Which BIOS-style tab the popup is showing. Station is the tuning
-    /// list; Help lists the shortcuts.
     pub tab: Tab,
-    /// Index of the currently-focused row when in Browse mode. The list
-    /// of rows is rebuilt each frame from the current app state; the
-    /// renderer clamps this to a legal value.
     pub selected: usize,
-    /// Vertical scroll offset for the popup body, in rows.
     pub scroll: usize,
-    /// Used while in SaveAs mode.
     pub name_input: Input,
-    /// Used while editing a tinker dial freeform.
     pub dial_input: Input,
     pub dial_idx: Option<usize>,
 }
@@ -52,15 +30,13 @@ pub enum Mode {
     DialEdit,
 }
 
-/// One row of the popup. The renderer turns these into Lines; the
-/// keyboard handler dispatches based on which one is selected.
 #[derive(Debug, Clone)]
 pub enum Row {
     SectionHeader(&'static str),
     Model,
-    Dial(usize),         // index into DIALS — automatically renders from Station::Dials
-    SavedStation(usize), // index into App.stations
-    UpdateAction,        // only present when origin is set AND dirty
+    Dial(usize),
+    SavedStation(usize),
+    UpdateAction,
     SaveAsAction,
     Blank,
 }
@@ -101,10 +77,6 @@ pub fn dial_metas() -> Vec<DialMeta> {
     ]
 }
 
-/// Build the row list from current app state. Order is fixed: active
-/// section header, model, dials (auto from Dials), blank, saved header, each saved
-/// station (skipping the demo placeholder), blank, conditional update
-/// action, save-as action.
 pub fn rows(app: &App) -> Vec<Row> {
     let mut out = vec![Row::SectionHeader("active"), Row::Model];
     for i in 0..dial_metas().len() {
@@ -113,7 +85,7 @@ pub fn rows(app: &App) -> Vec<Row> {
     out.push(Row::Blank);
     out.push(Row::SectionHeader("saved"));
     for (i, st) in app.stations.iter().enumerate() {
-        if st.name == "demo" {
+        if st.name == crate::station::DEMO {
             continue;
         }
         out.push(Row::SavedStation(i));
@@ -126,8 +98,6 @@ pub fn rows(app: &App) -> Vec<Row> {
     out
 }
 
-/// Indexes within `rows()` that represent a selectable item (not a
-/// section header or blank). Arrow up/down moves between these.
 pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
@@ -136,13 +106,11 @@ pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
         .collect()
 }
 
-/// Open the popup if it is closed; close it if it is open. Bound to Ctrl-S.
 pub fn toggle(app: &mut App) {
     match app.popup.mode {
         Mode::Closed => {
             app.popup.mode = Mode::Browse;
             app.popup.tab = Tab::Station;
-            // Land on the model row by default.
             app.popup.selected = first_selectable(app);
             app.popup.scroll = 0;
         }
@@ -167,15 +135,12 @@ fn first_selectable(app: &App) -> usize {
     selectable_indices(&r).first().copied().unwrap_or(0)
 }
 
-/// Move the selection by `delta` (+1 / -1) through the selectable rows.
 pub fn move_selection(app: &mut App, delta: i32) {
     let r = rows(app);
     let sel = selectable_indices(&r);
     if sel.is_empty() {
         return;
     }
-    // Find the position of the current selection within the selectable
-    // list; if it isn't there, snap to the first.
     let pos = sel
         .iter()
         .position(|&i| i == app.popup.selected)
@@ -184,8 +149,6 @@ pub fn move_selection(app: &mut App, delta: i32) {
     app.popup.selected = sel[new_pos];
 }
 
-/// Left/right arrow on the focused row. Cycles model choices or dial
-/// preset values.
 pub fn adjust(app: &mut App, delta: i32) {
     let r = rows(app);
     let row = r.get(app.popup.selected).cloned();
@@ -200,8 +163,6 @@ pub fn adjust(app: &mut App, delta: i32) {
     }
 }
 
-/// Enter on the focused row. Dial rows enter freeform edit (type a number / all / 50%).
-/// Saved station, update, save-as as before. Model still cycles.
 pub fn activate(app: &mut App) {
     let r = rows(app);
     let row = r.get(app.popup.selected).cloned();
@@ -233,11 +194,7 @@ fn enter_dial_edit(app: &mut App, idx: usize) {
         let cur = (meta.label)(&app.active_station.dials);
         let mut input = Input::new();
         input.text = cur;
-        // place cursor at end
-        input.home();
-        for _ in 0..input.text.len() {
-            input.end();
-        }
+        input.end();
         app.popup.dial_input = input;
         app.popup.dial_idx = Some(idx);
         app.popup.mode = Mode::DialEdit;
@@ -260,8 +217,6 @@ pub fn commit_dial_edit(app: &mut App) {
         return;
     };
     if let Some(meta) = dial_metas().get(idx) {
-        // Both tinker_keep and tinker_clip share TinkerVal, so we set via dial cycle to the exact value
-        // by directly assigning.
         match meta.name {
             "tinker_keep" => app.active_station.dials.tinker_keep = val,
             "tinker_clip" => app.active_station.dials.tinker_clip = val,
@@ -294,9 +249,6 @@ fn parse_tinker_val(s: &str) -> Option<crate::station::TinkerVal> {
     None
 }
 
-/// Commit the SaveAs name input: append a new station to the stations
-/// file with the current model + dials. Then claim that name as the new
-/// origin so the session becomes "clean."
 pub fn commit_save_as(app: &mut App) {
     let name = app.popup.name_input.text.trim().to_string();
     if name.is_empty() {
@@ -329,9 +281,6 @@ pub fn commit_save_as(app: &mut App) {
     app.popup.name_input = Input::new();
 }
 
-/// Overwrite the saved entry for `active_origin` with the current
-/// active state. Surgical edit: other [[station]] blocks and comments
-/// in the file stay intact.
 pub fn commit_update(app: &mut App) {
     let Some(origin) = app.active_origin.clone() else {
         app.note("nothing to update; this is an untitled session");
@@ -351,15 +300,12 @@ pub fn commit_update(app: &mut App) {
         app.note(format!("update failed: {}", e));
         return;
     }
-    // Replace the in-memory entry too.
     if let Some(saved) = app.stations.iter_mut().find(|s| s.name == origin) {
         *saved = updated;
     }
     app.note(format!("updated station '{}'", origin));
 }
 
-/// Replace the active station and re-resolve the shop for its model.
-/// Sets `active_origin` so the session traces back to the loaded entry.
 fn load_station(app: &mut App, st: Station) {
     let shop = crate::shop::find_for_model(&app.shops, &st.model).cloned();
     if let Some(shop) = shop {
@@ -376,8 +322,6 @@ fn load_station(app: &mut App, st: Station) {
         ));
     }
 }
-
-// ---- model cycling ----
 
 fn cycle_model(app: &mut App, delta: i32) {
     let all_models = collect_models(&app.shops);
@@ -409,8 +353,6 @@ fn collect_models(shops: &[Shop]) -> Vec<String> {
     }
     out
 }
-
-// ---- dial cycling ----
 
 const BOLDNESS_PRESETS: &[(&str, f32)] = &[
     ("mild", 0.2),
@@ -549,8 +491,6 @@ pub fn cycle_tinker_clip_dials(dials: &mut Dials, delta: i32) {
     dials.tinker_clip = TINKER_CLIP_PRESETS[next];
 }
 
-/// Cycle the tab bar: Station <-> Help. Returns to Browse mode and
-/// snaps the selection to the top of the new tab.
 pub fn switch_tab(app: &mut App) {
     app.popup.tab = match app.popup.tab {
         Tab::Station => Tab::Help,
@@ -562,8 +502,6 @@ pub fn switch_tab(app: &mut App) {
     app.popup.scroll = 0;
 }
 
-/// Open the popup with the Help tab selected (bound to F1). If the
-/// popup is already open, just switch to Help.
 pub fn open_help(app: &mut App) {
     if app.popup.mode == Mode::Closed {
         app.popup.mode = Mode::Browse;
@@ -575,8 +513,6 @@ pub fn open_help(app: &mut App) {
     app.popup.scroll = 0;
 }
 
-/// Scroll the popup body by `delta` rows. Clamped by the renderer each
-/// frame, but we keep the offset sane here too.
 pub fn scroll(app: &mut App, delta: i32) {
     let r = if delta > 0 {
         app.popup.scroll.saturating_add(delta as usize)
@@ -586,9 +522,6 @@ pub fn scroll(app: &mut App, delta: i32) {
     app.popup.scroll = r;
 }
 
-/// Static shortcut list for the Help tab. One line per binding, kept in
-/// roughly the order they appear in keys.rs. The renderer shows this as
-/// a two-column table: key on the left, meaning on the right.
 pub fn help_rows() -> Vec<(String, String)> {
     vec![
         ("Enter".into(), "send input".into()),
