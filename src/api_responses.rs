@@ -736,7 +736,7 @@ fn handle_event(
             | "response.code_interpreter_call.in_progress" => {
                 let _ = tx.send(StreamEvent::ToolCall { name: None });
             }
-            _ => { /* ignore */ }
+            _ => {}
         }
     }
     Ok(())

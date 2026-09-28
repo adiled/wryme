@@ -23,8 +23,6 @@ pub fn path() -> String {
 pub fn bootstrap() {
     let shell = shell().to_string();
     let login_path = path();
-    // SAFETY: single-threaded at startup, before the tokio runtime spins
-    // up; nothing reads these variables concurrently here.
     unsafe {
         std::env::set_var("SHELL", &shell);
         std::env::set_var("PATH", &login_path);

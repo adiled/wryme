@@ -356,12 +356,10 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
 
         let old = std::env::var("PATH").ok();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("PATH", &dir) };
         assert_eq!(which("hello_tool").unwrap(), bin.display().to_string());
         assert!(path_bins().contains(&"hello_tool".to_string()));
         if let Some(p) = old {
-            // FIXME: Audit that the environment access only happens in single-threaded code.
             unsafe { std::env::set_var("PATH", p) };
         }
         let _ = fs::remove_dir_all(&dir);
