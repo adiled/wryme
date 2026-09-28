@@ -69,24 +69,48 @@ pub struct Engine {
     last_lookup_row: u64,
 }
 
-const WEIGHT_TURNS: i64 = 5;
-const WEIGHT_BYTES: i64 = 1600;
-const LOOKUP_GAP: u64 = 5;
+mod prod {
+    pub(super) const MIN_TURNS: i64 = 5;
+    pub(super) const MIN_BYTES: i64 = 1600;
+    pub(super) const COOLDOWN_TURNS: u64 = 5;
+}
 
-const TAIL_ROWS: usize = 2;
-const TAIL_MAX_CHARS: usize = 400;
-const EXCERPT_MAX_CHARS: usize = 240;
-const RECENT_4H_MS: i64 = 4 * 3_600_000;
-const RECENT_1D_MS: i64 = 24 * 3_600_000;
-const RECENT_7D_MS: i64 = 7 * 24 * 3_600_000;
-const BONUS_RECENT_4H: i64 = 12;
-const BONUS_RECENT_1D: i64 = 6;
-const BONUS_RECENT_7D: i64 = 2;
-const WEIGHT_TOPIC_EXACT: i64 = 200;
-const WEIGHT_TOPIC_WORD: i64 = 10;
-const WEIGHT_META_WORD: i64 = 3;
-const WEIGHT_LIGHT_WORD: i64 = 1;
-const WEIGHT_TAIL_WORD: i64 = 4;
+mod tail {
+    pub(super) const ROWS: usize = 2;
+    pub(super) const MAX_CHARS: usize = 400;
+    pub(super) const EXCERPT_MAX_CHARS: usize = 240;
+}
+
+mod recency {
+    const FOUR_HOURS_MS: i64 = 4 * 3_600_000;
+    const ONE_DAY_MS: i64 = 24 * 3_600_000;
+    const SEVEN_DAYS_MS: i64 = 7 * 24 * 3_600_000;
+
+    pub(super) const BONUS_FOUR_HOURS: i64 = 12;
+    pub(super) const BONUS_ONE_DAY: i64 = 6;
+    pub(super) const BONUS_SEVEN_DAYS: i64 = 2;
+
+    pub(super) fn bonus(age_ms: i64) -> i64 {
+        if age_ms <= FOUR_HOURS_MS {
+            BONUS_FOUR_HOURS
+        } else if age_ms <= ONE_DAY_MS {
+            BONUS_ONE_DAY
+        } else if age_ms <= SEVEN_DAYS_MS {
+            BONUS_SEVEN_DAYS
+        } else {
+            0
+        }
+    }
+}
+
+mod term {
+    pub(super) const TOPIC_EXACT: i64 = 200;
+    pub(super) const TOPIC_WORD: i64 = 10;
+    pub(super) const META_WORD: i64 = 3;
+    pub(super) const LIGHT_WORD: i64 = 1;
+    pub(super) const TAIL_WORD: i64 = 4;
+}
+
 pub const FIND_SHOW: usize = 6;
 
 pub fn open_engine(dir: &Path) -> Result<Engine> {
@@ -141,15 +165,15 @@ impl Engine {
         book.unattr_turns += 1;
         book.unattr_tail
             .push((role.to_string(), content.to_string()));
-        if book.unattr_tail.len() > TAIL_ROWS {
+        if book.unattr_tail.len() > tail::ROWS {
             book.unattr_tail.remove(0);
         }
         let _ = flush_stream(book);
         if !self.pending_prod
-            && book.unattr_turns >= WEIGHT_TURNS
-            && book.unattr_tokens >= WEIGHT_BYTES
-            && book.next_row.saturating_sub(self.last_lookup_row) >= LOOKUP_GAP
-            && book.next_row.saturating_sub(self.prod_delivered_row) >= LOOKUP_GAP
+            && book.unattr_turns >= prod::MIN_TURNS
+            && book.unattr_tokens >= prod::MIN_BYTES
+            && book.next_row.saturating_sub(self.last_lookup_row) >= prod::COOLDOWN_TURNS
+            && book.next_row.saturating_sub(self.prod_delivered_row) >= prod::COOLDOWN_TURNS
         {
             self.pending_prod = true;
         }
@@ -421,8 +445,8 @@ pub fn tail_excerpt(meta: &CompartmentMeta) -> String {
     if meta.tail.is_empty() {
         return String::new();
     }
-    let mut out: String = meta.tail.chars().take(EXCERPT_MAX_CHARS).collect();
-    if meta.tail.chars().count() > EXCERPT_MAX_CHARS {
+    let mut out: String = meta.tail.chars().take(tail::EXCERPT_MAX_CHARS).collect();
+    if meta.tail.chars().count() > tail::EXCERPT_MAX_CHARS {
         out.push('…');
     }
     out
@@ -432,7 +456,7 @@ fn tail_entries(rows: &[StreamRow], start: u64, end: u64) -> Vec<(String, String
     rows.iter()
         .filter(|r| r.row_id >= start && r.row_id < end)
         .rev()
-        .take(TAIL_ROWS)
+        .take(tail::ROWS)
         .map(|r| (r.role.clone(), r.content.clone()))
         .collect::<Vec<_>>()
         .into_iter()
@@ -448,8 +472,8 @@ pub fn format_tail(entries: &[(String, String)]) -> String {
         }
         out.push_str(&format!("{role}: {content}"));
     }
-    if out.chars().count() > TAIL_MAX_CHARS {
-        out = out.chars().take(TAIL_MAX_CHARS).collect();
+    if out.chars().count() > tail::MAX_CHARS {
+        out = out.chars().take(tail::MAX_CHARS).collect();
         out.push('…');
     }
     out
@@ -470,51 +494,36 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
         .index
         .iter()
         .filter_map(|m| {
+            let joined = |lists: &[Vec<String>]| {
+                lists
+                    .iter()
+                    .map(|l| l.join(" ").to_lowercase())
+                    .collect::<Vec<_>>()
+            };
             let topic = m.topic.to_lowercase();
-            let facts = m.facts.join(" ").to_lowercase();
-            let plans = m.plans.join(" ").to_lowercase();
-            let open = m.open.join(" ").to_lowercase();
-            let tags = m.tags.join(" ").to_lowercase();
-            let people = m.people.join(" ").to_lowercase();
+            let distilled = joined(&[m.facts.clone(), m.plans.clone(), m.open.clone()]);
+            let labels = joined(&[m.tags.clone(), m.people.clone()]);
             let tail = m.tail.to_lowercase();
             let mut score: i64 = 0;
             if topic == q {
-                score += WEIGHT_TOPIC_EXACT;
+                score += term::TOPIC_EXACT;
             }
             for w in &words {
                 if topic.contains(w.as_str()) {
-                    score += WEIGHT_TOPIC_WORD;
+                    score += term::TOPIC_WORD;
                 }
-                if facts.contains(w.as_str()) {
-                    score += WEIGHT_META_WORD;
-                }
-                if plans.contains(w.as_str()) {
-                    score += WEIGHT_META_WORD;
-                }
-                if open.contains(w.as_str()) {
-                    score += WEIGHT_META_WORD;
+                if distilled.iter().any(|d| d.contains(w.as_str())) {
+                    score += term::META_WORD;
                 }
                 if tail.contains(w.as_str()) {
-                    score += WEIGHT_TAIL_WORD;
+                    score += term::TAIL_WORD;
                 }
-                if tags.contains(w.as_str()) {
-                    score += WEIGHT_LIGHT_WORD;
-                }
-                if people.contains(w.as_str()) {
-                    score += WEIGHT_LIGHT_WORD;
+                if labels.iter().any(|l| l.contains(w.as_str())) {
+                    score += term::LIGHT_WORD;
                 }
             }
             if score > 0 {
-                let age = now - m.last_inked;
-                score += if age <= RECENT_4H_MS {
-                    BONUS_RECENT_4H
-                } else if age <= RECENT_1D_MS {
-                    BONUS_RECENT_1D
-                } else if age <= RECENT_7D_MS {
-                    BONUS_RECENT_7D
-                } else {
-                    0
-                };
+                score += recency::bonus(now - m.last_inked);
             }
             (score > 0).then_some((m, score))
         })

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::shop::Shop;
 
-const DEMO: &str = "demo";
+pub const DEMO: &str = "demo";
 const UNTITLED: &str = "untitled";
 
 #[derive(Debug, Clone)]

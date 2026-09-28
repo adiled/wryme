@@ -85,7 +85,7 @@ pub fn rows(app: &App) -> Vec<Row> {
     out.push(Row::Blank);
     out.push(Row::SectionHeader("saved"));
     for (i, st) in app.stations.iter().enumerate() {
-        if st.name == "demo" {
+        if st.name == crate::station::DEMO {
             continue;
         }
         out.push(Row::SavedStation(i));
