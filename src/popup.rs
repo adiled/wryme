@@ -65,11 +65,6 @@ pub fn dial_metas() -> Vec<DialMeta> {
             cycle: |d, delta| cycle_brainy_dials(d, delta),
         },
         DialMeta {
-            name: "verbosity",
-            label: |d| verbosity_label(d.verbosity),
-            cycle: |d, delta| cycle_verbosity_dials(d, delta),
-        },
-        DialMeta {
             name: "tinker_keep",
             label: |d| d.tinker_keep.label(),
             cycle: |d, delta| cycle_tinker_keep_dials(d, delta),
@@ -395,26 +390,6 @@ pub fn brainy_label(v: Option<Brainy>) -> &'static str {
     }
 }
 
-const VERBOSITY_PRESETS: &[(&str, u32)] = &[
-    ("small", 256),
-    ("medium", 1024),
-    ("large", 4096),
-    ("heaping", 8192),
-];
-
-pub fn verbosity_label(v: Option<u32>) -> String {
-    match v {
-        None => "—".into(),
-        Some(x) => {
-            let preset = VERBOSITY_PRESETS.iter().find(|(_, val)| *val == x);
-            match preset {
-                Some((name, _)) => format!("{} ({})", name, x),
-                None => format!("{}", x),
-            }
-        }
-    }
-}
-
 const TINKER_KEEP_PRESETS: &[crate::station::TinkerVal] = &[
     crate::station::TinkerVal::All,
     crate::station::TinkerVal::Count(0),
@@ -482,19 +457,6 @@ pub fn cycle_brainy_dials(dials: &mut Dials, delta: i32) {
     let n = states.len() as i32;
     let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
     dials.brainy = states[next];
-}
-
-pub fn cycle_verbosity_dials(dials: &mut Dials, delta: i32) {
-    let states: Vec<Option<u32>> = std::iter::once(None)
-        .chain(VERBOSITY_PRESETS.iter().map(|(_, v)| Some(*v)))
-        .collect();
-    let cur = states
-        .iter()
-        .position(|s| *s == dials.verbosity)
-        .unwrap_or(0);
-    let n = states.len() as i32;
-    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-    dials.verbosity = states[next];
 }
 
 pub fn cycle_tinker_keep_dials(dials: &mut Dials, delta: i32) {

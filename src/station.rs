@@ -20,7 +20,6 @@ pub struct Dials {
     pub boldness: Option<f32>,
     pub patience: Option<Patience>,
     pub brainy: Option<Brainy>,
-    pub verbosity: Option<u32>,
     pub tinker_keep: TinkerKeep,
     pub tinker_clip: TinkerClip,
 }
@@ -37,7 +36,6 @@ impl Default for Dials {
             boldness: None,
             patience: None,
             brainy: None,
-            verbosity: None,
             tinker_keep: TinkerVal::All,
             tinker_clip: TinkerVal::All,
         }
@@ -179,8 +177,6 @@ struct StationDef {
     #[serde(default)]
     brainy: Option<BrainyField>,
     #[serde(default)]
-    verbosity: Option<u32>,
-    #[serde(default)]
     tinker_keep: Option<TinkerField>,
     #[serde(default)]
     tinker_clip: Option<TinkerField>,
@@ -273,9 +269,6 @@ impl StationDef {
         if self.brainy.is_some() {
             dials.brainy = self.brainy.and_then(|b| b.into_brainy());
         }
-        if self.verbosity.is_some() {
-            dials.verbosity = self.verbosity;
-        }
         if let Some(k) = self.tinker_keep.and_then(|k| k.into_val()) {
             dials.tinker_keep = k;
         }
@@ -327,7 +320,6 @@ model = "canned replies"
 # boldness = 0.7
 patience = "steady"
 # brainy = "murmur"
-# verbosity = 8000
 tinker_keep = "all"
 tinker_clip = "all"
 # voice = "Tara"

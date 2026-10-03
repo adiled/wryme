@@ -363,8 +363,6 @@ async fn stream_once(
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_output_tokens: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<Reasoning>,
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<&'a str>>,
@@ -424,7 +422,6 @@ async fn stream_once(
         instructions,
         previous_response_id,
         temperature: station.dials.boldness,
-        max_output_tokens: station.dials.verbosity,
         reasoning,
         include,
         max_tool_calls: MAX_TOOL_CALLS,
