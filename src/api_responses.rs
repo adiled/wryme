@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::api::{ApiMessage, Client, StreamEvent, find_event_boundary, truncate};
 use crate::book;
 use crate::shop::{Shop, WindowMode};
-use crate::station::{Patience, Station};
+use crate::station::Station;
 use crate::tools;
 
 struct FuncCall {
@@ -363,8 +363,6 @@ async fn stream_once(
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_output_tokens: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<Reasoning>,
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<&'a str>>,
@@ -377,13 +375,15 @@ async fn stream_once(
     struct Reasoning {
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<&'static str>,
-        summary: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<&'static str>,
     }
 
-    let reasoning = station.dials.patience.map(|p: Patience| Reasoning {
-        effort: Some(p.as_wire()),
-        summary: "auto",
-    });
+    let reasoning =
+        (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
+            effort: station.dials.patience.map(|p| p.as_wire()),
+            summary: station.dials.brainy.map(|b| b.as_wire()),
+        });
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content"]);
@@ -422,7 +422,6 @@ async fn stream_once(
         instructions,
         previous_response_id,
         temperature: station.dials.boldness,
-        max_output_tokens: station.dials.verbosity,
         reasoning,
         include,
         max_tool_calls: MAX_TOOL_CALLS,
@@ -626,6 +625,15 @@ fn handle_event(
                     && !d.is_empty()
                 {
                     let _ = tx.send(StreamEvent::Brain {
+                        text: d.to_string(),
+                    });
+                }
+            }
+            "response.reasoning_text.delta" => {
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str())
+                    && !d.is_empty()
+                {
+                    let _ = tx.send(StreamEvent::Heart {
                         text: d.to_string(),
                     });
                 }
@@ -989,5 +997,34 @@ mod tests {
         .unwrap();
         assert_eq!(reasoning.len(), 1);
         assert_eq!(reasoning[0]["id"], "rs_1");
+    }
+
+    #[test]
+    fn summary_deltas_are_brain_and_raw_reasoning_is_heart() {
+        let (tx, mut rx) = channel();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut id = None;
+
+        handle_event(
+            b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"weighing it\"}\n\n",
+            &tx,
+            &mut calls,
+            &mut reasoning,
+            &mut id,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"so step one\"}\n\n",
+            &tx,
+            &mut calls,
+            &mut reasoning,
+            &mut id,
+        )
+        .unwrap();
+
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Brain { text }) if text == "weighing it"));
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Heart { text }) if text == "so step one"));
+        assert!(rx.try_recv().is_err());
     }
 }

@@ -19,9 +19,15 @@ pub struct Station {
 pub struct Dials {
     pub boldness: Option<f32>,
     pub patience: Option<Patience>,
-    pub verbosity: Option<u32>,
+    pub brainy: Option<Brainy>,
     pub tinker_keep: TinkerKeep,
     pub tinker_clip: TinkerClip,
+}
+
+impl Dials {
+    pub fn thinking_hidden(&self) -> bool {
+        self.brainy == Some(Brainy::Hush)
+    }
 }
 
 impl Default for Dials {
@@ -29,7 +35,7 @@ impl Default for Dials {
         Self {
             boldness: None,
             patience: None,
-            verbosity: None,
+            brainy: None,
             tinker_keep: TinkerVal::All,
             tinker_clip: TinkerVal::All,
         }
@@ -115,6 +121,34 @@ impl Patience {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Brainy {
+    Hush,
+    Murmur,
+    Chatty,
+    Gabby,
+}
+
+impl Brainy {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Brainy::Hush => "none",
+            Brainy::Murmur => "concise",
+            Brainy::Chatty => "auto",
+            Brainy::Gabby => "detailed",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Brainy::Hush => "hush",
+            Brainy::Murmur => "murmur",
+            Brainy::Chatty => "chatty",
+            Brainy::Gabby => "gabby",
+        }
+    }
+}
+
 impl Station {
     pub fn demo() -> Self {
         Self {
@@ -141,7 +175,7 @@ struct StationDef {
     #[serde(default)]
     patience: Option<PatienceField>,
     #[serde(default)]
-    verbosity: Option<u32>,
+    brainy: Option<BrainyField>,
     #[serde(default)]
     tinker_keep: Option<TinkerField>,
     #[serde(default)]
@@ -167,6 +201,25 @@ impl PatienceField {
             "slow" | "high" => Some(Patience::Slow),
             "deep" | "xhigh" => Some(Patience::Deep),
             "max" => Some(Patience::Max),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BrainyField {
+    Named(String),
+}
+
+impl BrainyField {
+    fn into_brainy(self) -> Option<Brainy> {
+        let BrainyField::Named(s) = self;
+        match s.to_lowercase().as_str() {
+            "hush" | "none" => Some(Brainy::Hush),
+            "murmur" | "concise" => Some(Brainy::Murmur),
+            "chatty" | "auto" => Some(Brainy::Chatty),
+            "gabby" | "detailed" => Some(Brainy::Gabby),
             _ => None,
         }
     }
@@ -213,8 +266,8 @@ impl StationDef {
         if self.patience.is_some() {
             dials.patience = self.patience.and_then(|p| p.into_patience());
         }
-        if self.verbosity.is_some() {
-            dials.verbosity = self.verbosity;
+        if self.brainy.is_some() {
+            dials.brainy = self.brainy.and_then(|b| b.into_brainy());
         }
         if let Some(k) = self.tinker_keep.and_then(|k| k.into_val()) {
             dials.tinker_keep = k;
@@ -266,7 +319,7 @@ name = "canned"
 model = "canned replies"
 # boldness = 0.7
 patience = "steady"
-# verbosity = 8000
+# brainy = "murmur"
 tinker_keep = "all"
 tinker_clip = "all"
 # voice = "Tara"
@@ -438,5 +491,64 @@ mod tests {
             Some(Patience::Max)
         );
         assert_eq!(PatienceField::Named("garbage".into()).into_patience(), None);
+    }
+
+    #[test]
+    fn brainy_parses_both_grandma_and_wire_words() {
+        assert_eq!(
+            BrainyField::Named("hush".into()).into_brainy(),
+            Some(Brainy::Hush)
+        );
+        assert_eq!(
+            BrainyField::Named("none".into()).into_brainy(),
+            Some(Brainy::Hush)
+        );
+        assert_eq!(
+            BrainyField::Named("MURMUR".into()).into_brainy(),
+            Some(Brainy::Murmur)
+        );
+        assert_eq!(
+            BrainyField::Named("concise".into()).into_brainy(),
+            Some(Brainy::Murmur)
+        );
+        assert_eq!(
+            BrainyField::Named("chatty".into()).into_brainy(),
+            Some(Brainy::Chatty)
+        );
+        assert_eq!(
+            BrainyField::Named("auto".into()).into_brainy(),
+            Some(Brainy::Chatty)
+        );
+        assert_eq!(
+            BrainyField::Named("gabby".into()).into_brainy(),
+            Some(Brainy::Gabby)
+        );
+        assert_eq!(
+            BrainyField::Named("detailed".into()).into_brainy(),
+            Some(Brainy::Gabby)
+        );
+        assert_eq!(BrainyField::Named("garbage".into()).into_brainy(), None);
+    }
+
+    #[test]
+    fn brainy_words_reach_the_wire() {
+        assert_eq!(Brainy::Hush.as_wire(), "none");
+        assert_eq!(Brainy::Murmur.as_wire(), "concise");
+        assert_eq!(Brainy::Chatty.as_wire(), "auto");
+        assert_eq!(Brainy::Gabby.as_wire(), "detailed");
+    }
+
+    #[test]
+    fn only_hush_hides_thinking() {
+        let mut d = Dials::default();
+        assert!(!d.thinking_hidden());
+        d.brainy = Some(Brainy::Gabby);
+        assert!(!d.thinking_hidden());
+        d.brainy = Some(Brainy::Murmur);
+        assert!(!d.thinking_hidden());
+        d.brainy = Some(Brainy::Chatty);
+        assert!(!d.thinking_hidden());
+        d.brainy = Some(Brainy::Hush);
+        assert!(d.thinking_hidden());
     }
 }

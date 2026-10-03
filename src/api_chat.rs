@@ -156,8 +156,6 @@ async fn stream_once(
         #[serde(skip_serializing_if = "Option::is_none")]
         temperature: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_completion_tokens: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<&'a str>,
         tool_choice: &'a str,
         tools: &'a [serde_json::Value],
@@ -200,7 +198,6 @@ async fn stream_once(
             include_usage: true,
         },
         temperature: station.dials.boldness,
-        max_completion_tokens: station.dials.verbosity,
         reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
         tool_choice,
         tools: &tools,
@@ -357,7 +354,7 @@ fn handle_event(
                 match choice.finish_reason.as_deref() {
                     Some("length") => {
                         let _ = tx.send(StreamEvent::Error {
-                            message: "stopped: token limit reached (bump verbosity)".into(),
+                            message: "stopped: token limit reached".into(),
                         });
                     }
                     Some("content_filter") => {
@@ -383,7 +380,7 @@ fn handle_event(
                     if let Some(reasoning) = delta.reasoning_content
                         && !reasoning.is_empty()
                     {
-                        let _ = tx.send(StreamEvent::Brain { text: reasoning });
+                        let _ = tx.send(StreamEvent::Heart { text: reasoning });
                     }
                     if let Some(tool_calls) = delta.tool_calls {
                         for tc in tool_calls {

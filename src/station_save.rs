@@ -84,8 +84,8 @@ fn serialize_block(station: &Station) -> String {
     if let Some(p) = station.dials.patience {
         block.push_str(&format!("patience = \"{}\"\n", p.label()));
     }
-    if let Some(v) = station.dials.verbosity {
-        block.push_str(&format!("verbosity = {}\n", v));
+    if let Some(b) = station.dials.brainy {
+        block.push_str(&format!("brainy = \"{}\"\n", b.label()));
     }
     if station.dials.tinker_keep != crate::station::TinkerKeep::All {
         block.push_str(&format!(
@@ -155,7 +155,7 @@ model = \"m3\"
             dials: Dials {
                 boldness: Some(1.2),
                 patience: Some(Patience::Slow),
-                verbosity: None,
+                brainy: Some(crate::station::Brainy::Murmur),
                 tinker_keep: crate::station::TinkerKeep::All,
                 tinker_clip: crate::station::TinkerVal::All,
             },
@@ -169,6 +169,7 @@ model = \"m3\"
         assert!(updated.contains("model = \"m2-updated\""));
         assert!(updated.contains("boldness = 1.2"));
         assert!(updated.contains("patience = \"slow\""));
+        assert!(updated.contains("brainy = \"murmur\""));
         assert!(!updated.contains("model = \"m2\"\n"));
         assert!(!updated.contains("boldness = 0.5"));
     }
