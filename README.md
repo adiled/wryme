@@ -129,6 +129,10 @@ The dials, all optional:
 - **`patience`**: how hard the AI thinks before answering. `quick`,
   `steady`, or `slow`. Only matters on models that support extended
   thinking. Unset means the AI decides.
+- **`brainy`**: how much of that thinking gets shown. `hush` (show none at
+  all), `murmur`, `chatty`, or `gabby`. Unset means the AI decides. A short
+  retelling of the thinking prints under **brain**; the thinking itself, on
+  models that hand it over, prints under **heart**.
 - **`verbosity`**: the most words the AI is allowed to say. A number like
   1024 or 4096. Unset means no cap; the AI stops when it thinks it is done.
 - **`tinker_keep`**: how many tool pairs survive in replay. `all` (default),

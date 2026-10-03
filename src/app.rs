@@ -41,6 +41,7 @@ pub struct Message {
     pub content: String,
     pub images: Vec<String>,
     pub brain: String,
+    pub heart: String,
     pub streaming: bool,
     pub timestamp: String,
     pub phase: Phase,
@@ -81,6 +82,7 @@ pub struct App {
     pub reservoir: Arc<Mutex<Reservoir>>,
     turn_counter: u64,
     last_stream_was_brain: bool,
+    last_stream_was_heart: bool,
 }
 
 fn api_tool_call(ev: &ToolEvent) -> ApiToolCall {
@@ -160,6 +162,7 @@ impl App {
             reservoir: Arc::new(Mutex::new(Reservoir::load())),
             turn_counter: 0,
             last_stream_was_brain: false,
+            last_stream_was_heart: false,
         }
     }
 
@@ -227,6 +230,7 @@ impl App {
             content,
             images,
             brain: String::new(),
+            heart: String::new(),
             streaming: false,
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
@@ -255,6 +259,7 @@ impl App {
             content: String::new(),
             images: Vec::new(),
             brain: String::new(),
+            heart: String::new(),
             streaming: true,
             timestamp: now_hhmm(),
             phase: Phase::Streaming,
@@ -280,12 +285,13 @@ impl App {
             .rposition(|m| m.role == Role::Assistant && m.streaming);
         let Some(idx) = idx else { return };
 
-        if self.last_stream_was_brain && !self.messages[idx].content.is_empty() {
+        if self.last_stream_was_thinking() && !self.messages[idx].content.is_empty() {
             let tid = self.messages[idx].turn_id;
             self.messages[idx].streaming = false;
             self.messages.push(Self::open_assistant_cluster(tid));
         }
         self.last_stream_was_brain = false;
+        self.last_stream_was_heart = false;
 
         let m = match self.messages.last_mut() {
             Some(m) => m,
@@ -295,7 +301,14 @@ impl App {
         m.phase = Phase::Writing;
     }
 
+    fn last_stream_was_thinking(&self) -> bool {
+        self.last_stream_was_brain || self.last_stream_was_heart
+    }
+
     pub fn append_to_last_brain(&mut self, delta: &str) {
+        if self.active_station.dials.thinking_hidden() {
+            return;
+        }
         let tid = self.turn_counter;
         if let Some(m) = self
             .messages
@@ -308,6 +321,24 @@ impl App {
             m.phase = Phase::Thinking;
         }
         self.last_stream_was_brain = true;
+    }
+
+    pub fn append_to_last_heart(&mut self, delta: &str) {
+        if self.active_station.dials.thinking_hidden() {
+            return;
+        }
+        let tid = self.turn_counter;
+        if let Some(m) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.role == Role::Assistant && m.turn_id == tid)
+        {
+            m.heart.push_str(delta);
+        }
+        if let Some(m) = self.streaming_assistant() {
+            m.phase = Phase::Thinking;
+        }
+        self.last_stream_was_heart = true;
     }
 
     pub fn record_tool_call(&mut self, name: Option<String>) {
@@ -373,8 +404,9 @@ impl App {
             let brain_text: String = self
                 .messages
                 .iter()
-                .filter(|m| m.role == Role::Assistant && m.turn_id == tid && !m.brain.is_empty())
-                .map(|m| m.brain.as_str())
+                .filter(|m| m.role == Role::Assistant && m.turn_id == tid)
+                .flat_map(|m| [m.brain.as_str(), m.heart.as_str()])
+                .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n");
             let tool_chars: u64 = self
@@ -395,7 +427,10 @@ impl App {
             let any_nonempty = self.messages.iter().any(|m| {
                 m.role == Role::Assistant
                     && m.turn_id == tid
-                    && (!m.content.is_empty() || !m.brain.is_empty() || m.current_tool.is_some())
+                    && (!m.content.is_empty()
+                        || !m.brain.is_empty()
+                        || !m.heart.is_empty()
+                        || m.current_tool.is_some())
             });
             if !any_nonempty {
                 self.messages

@@ -322,6 +322,9 @@ async fn run(
                     StreamEvent::Brain { text } => {
                         app.append_to_last_brain(&text);
                     }
+                    StreamEvent::Heart { text } => {
+                        app.append_to_last_heart(&text);
+                    }
                     StreamEvent::ToolCall { name } => {
                         app.record_tool_call(name);
                     }

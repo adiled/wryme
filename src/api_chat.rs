@@ -383,7 +383,7 @@ fn handle_event(
                     if let Some(reasoning) = delta.reasoning_content
                         && !reasoning.is_empty()
                     {
-                        let _ = tx.send(StreamEvent::Brain { text: reasoning });
+                        let _ = tx.send(StreamEvent::Heart { text: reasoning });
                     }
                     if let Some(tool_calls) = delta.tool_calls {
                         for tc in tool_calls {

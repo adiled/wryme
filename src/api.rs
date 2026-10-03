@@ -58,6 +58,9 @@ pub enum StreamEvent {
     Brain {
         text: String,
     },
+    Heart {
+        text: String,
+    },
     ToolCall {
         name: Option<String>,
     },

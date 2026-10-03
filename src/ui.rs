@@ -383,6 +383,30 @@ fn cut_at_width(s: &str, width: usize) -> &str {
     &s[..end]
 }
 
+fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, text: &str, cursor: bool, gap: bool) {
+    if gap {
+        out.push(Line::from(""));
+    }
+    let body = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC);
+    out.push(Line::from(Span::styled(
+        label.to_string(),
+        body.add_modifier(Modifier::BOLD),
+    )));
+    let last_idx = text.split('\n').count().saturating_sub(1);
+    for (i, raw) in text.split('\n').enumerate() {
+        if i == last_idx && cursor {
+            out.push(Line::from(vec![
+                Span::styled(raw.to_string(), body),
+                Span::styled("▌", Style::default().fg(Color::DarkGray)),
+            ]));
+        } else {
+            out.push(Line::from(Span::styled(raw.to_string(), body)));
+        }
+    }
+}
+
 fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     let (role_color, role_text) = match msg.role {
         Role::User => (Color::Green, "you"),
@@ -459,9 +483,11 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
 
     let has_reply = !msg.content.is_empty();
     let has_brain = !msg.brain.is_empty();
+    let has_heart = !msg.heart.is_empty();
     let cursor_in_reply = msg.streaming && has_reply;
     let cursor_in_brain = msg.streaming && !has_reply && has_brain;
-    let cursor_orphan = msg.streaming && !has_reply && !has_brain;
+    let cursor_in_heart = msg.streaming && !has_reply && !has_brain && has_heart;
+    let cursor_orphan = msg.streaming && !has_reply && !has_brain && !has_heart;
 
     if cursor_orphan {
         out.push(Line::from(Span::styled(
@@ -498,27 +524,17 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     }
 
     if has_brain {
-        if has_reply {
-            out.push(Line::from(""));
-        }
-        let brain_style = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
-        out.push(Line::from(Span::styled(
-            "brain",
-            brain_style.add_modifier(Modifier::BOLD),
-        )));
-        let last_idx = msg.brain.split('\n').count().saturating_sub(1);
-        for (i, raw) in msg.brain.split('\n').enumerate() {
-            if i == last_idx && cursor_in_brain {
-                out.push(Line::from(vec![
-                    Span::styled(raw.to_string(), brain_style),
-                    Span::styled("▌", Style::default().fg(Color::DarkGray)),
-                ]));
-            } else {
-                out.push(Line::from(Span::styled(raw.to_string(), brain_style)));
-            }
-        }
+        thinking_block(out, "brain", &msg.brain, cursor_in_brain, has_reply);
+    }
+
+    if has_heart {
+        thinking_block(
+            out,
+            "heart",
+            &msg.heart,
+            cursor_in_heart,
+            has_reply || has_brain,
+        );
     }
 }
 
@@ -575,5 +591,46 @@ mod tests {
         assert!(is_error_status("error: y"));
         assert!(!is_error_status("saved station 'a'"));
         assert!(!is_error_status(""));
+    }
+
+    fn thinking_message(brain: &str, heart: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: "the answer".into(),
+            images: Vec::new(),
+            brain: brain.into(),
+            heart: heart.into(),
+            streaming: false,
+            timestamp: "00:00".into(),
+            phase: Phase::Writing,
+            current_tool: None,
+            turn_id: 1,
+            tool_events: Vec::new(),
+        }
+    }
+
+    fn rendered(msg: &Message) -> Vec<String> {
+        let mut out = Vec::new();
+        push_message(&mut out, msg, 80);
+        out.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn heart_sits_below_brain() {
+        let lines = rendered(&thinking_message("a retelling", "the raw trace"));
+        let brain = lines.iter().position(|l| l.contains("brain"));
+        let heart = lines.iter().position(|l| l.contains("heart"));
+        assert!(brain.is_some(), "brain label missing: {lines:?}");
+        assert!(heart.is_some(), "heart label missing: {lines:?}");
+        assert!(brain < heart, "heart must follow brain: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("a retelling")));
+        assert!(lines.iter().any(|l| l.contains("the raw trace")));
+    }
+
+    #[test]
+    fn heart_renders_without_a_brain() {
+        let lines = rendered(&thinking_message("", "only the trace"));
+        assert!(lines.iter().any(|l| l.contains("heart")));
+        assert!(!lines.iter().any(|l| l.contains("brain")));
     }
 }

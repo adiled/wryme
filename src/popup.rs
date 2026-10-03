@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::input::Input;
 use crate::shop::Shop;
-use crate::station::{Dials, Patience, Station};
+use crate::station::{Brainy, Dials, Patience, Station};
 
 #[derive(Debug, Default)]
 pub struct Popup {
@@ -58,6 +58,11 @@ pub fn dial_metas() -> Vec<DialMeta> {
             name: "patience",
             label: |d| patience_label(d.patience).to_string(),
             cycle: |d, delta| cycle_patience_dials(d, delta),
+        },
+        DialMeta {
+            name: "brainy",
+            label: |d| brainy_label(d.brainy).to_string(),
+            cycle: |d, delta| cycle_brainy_dials(d, delta),
         },
         DialMeta {
             name: "verbosity",
@@ -383,6 +388,13 @@ pub fn patience_label(v: Option<Patience>) -> &'static str {
     }
 }
 
+pub fn brainy_label(v: Option<Brainy>) -> &'static str {
+    match v {
+        None => "—",
+        Some(b) => b.label(),
+    }
+}
+
 const VERBOSITY_PRESETS: &[(&str, u32)] = &[
     ("small", 256),
     ("medium", 1024),
@@ -456,6 +468,20 @@ pub fn cycle_patience_dials(dials: &mut Dials, delta: i32) {
     let n = states.len() as i32;
     let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
     dials.patience = states[next];
+}
+
+pub fn cycle_brainy_dials(dials: &mut Dials, delta: i32) {
+    let states: &[Option<Brainy>] = &[
+        None,
+        Some(Brainy::Hush),
+        Some(Brainy::Murmur),
+        Some(Brainy::Chatty),
+        Some(Brainy::Gabby),
+    ];
+    let cur = states.iter().position(|s| *s == dials.brainy).unwrap_or(0);
+    let n = states.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.brainy = states[next];
 }
 
 pub fn cycle_verbosity_dials(dials: &mut Dials, delta: i32) {
