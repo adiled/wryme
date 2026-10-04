@@ -99,6 +99,12 @@ fn serialize_block(station: &Station) -> String {
             station.dials.tinker_clip.label()
         ));
     }
+    if station.dials.tinker_depth != crate::station::TinkerVal::All {
+        block.push_str(&format!(
+            "tinker_depth = \"{}\"\n",
+            station.dials.tinker_depth.label()
+        ));
+    }
     if let Some(voice) = &station.voice {
         block.push_str(&format!("voice = {}\n", toml_str(voice)));
     }
@@ -158,6 +164,7 @@ model = \"m3\"
                 brainy: Some(crate::station::Brainy::Murmur),
                 tinker_keep: crate::station::TinkerKeep::All,
                 tinker_clip: crate::station::TinkerVal::All,
+                tinker_depth: crate::station::TinkerVal::All,
             },
             voice: None,
         };

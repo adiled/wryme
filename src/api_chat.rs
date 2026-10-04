@@ -51,12 +51,13 @@ pub(crate) async fn stream(
     }
 
     let mut bad_rounds: u32 = 0;
-    let mut rounds: u32 = 0;
+    let mut depth: u32 = 0;
     let mut nudged = false;
+    let cap = station.dials.tinker_depth.depth_n();
     loop {
-        if rounds >= crate::api::MAX_TOOL_ROUNDS && !nudged {
+        if cap.is_some_and(|c| depth as usize >= c) && !nudged {
             nudged = true;
-            tracing::warn!(rounds, "tool round cap reached, forcing final answer");
+            tracing::warn!(depth, "tinker depth reached, forcing final answer");
             conv.push(serde_json::json!({
                 "role": "system",
                 "content": crate::api::FINAL_ANSWER_NUDGE,
@@ -118,10 +119,10 @@ pub(crate) async fn stream(
         bad_rounds = 0;
         let calls = paired;
         if nudged {
-            tracing::warn!("model kept requesting tools after the round cap, ending turn");
+            tracing::warn!("model kept requesting tools past tinker depth, ending turn");
             return Ok(());
         }
-        rounds += 1;
+        depth += 1;
 
         let mut tcs = Vec::new();
         for c in &calls {
@@ -687,6 +688,14 @@ mod tests {
         let (offer_tools, filter_transcript) = tool_policy(false, false);
         assert!(offer_tools);
         assert!(!filter_transcript);
+    }
+
+    #[test]
+    fn tinker_depth_all_means_unbounded() {
+        use crate::station::TinkerVal;
+        assert_eq!(TinkerVal::All.depth_n(), None);
+        assert_eq!(TinkerVal::Count(8).depth_n(), Some(8));
+        assert_eq!(TinkerVal::Count(0).depth_n(), Some(0));
     }
 
     #[test]

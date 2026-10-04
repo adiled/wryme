@@ -22,6 +22,7 @@ pub struct Dials {
     pub brainy: Option<Brainy>,
     pub tinker_keep: TinkerKeep,
     pub tinker_clip: TinkerClip,
+    pub tinker_depth: TinkerDepth,
 }
 
 impl Dials {
@@ -38,6 +39,7 @@ impl Default for Dials {
             brainy: None,
             tinker_keep: TinkerVal::All,
             tinker_clip: TinkerVal::All,
+            tinker_depth: TinkerVal::All,
         }
     }
 }
@@ -51,6 +53,7 @@ pub enum TinkerVal {
 
 pub type TinkerKeep = TinkerVal;
 pub type TinkerClip = TinkerVal;
+pub type TinkerDepth = TinkerVal;
 
 impl TinkerVal {
     pub fn keep_n(self, total: usize) -> Option<usize> {
@@ -61,6 +64,13 @@ impl TinkerVal {
                 let p = (p as usize).min(100);
                 Some(((total * p).div_ceil(100)).min(total))
             }
+        }
+    }
+    pub fn depth_n(self) -> Option<usize> {
+        match self {
+            TinkerVal::All => None,
+            TinkerVal::Count(n) => Some(n),
+            TinkerVal::Percent(p) => Some(p as usize),
         }
     }
     pub fn clip(self, s: &str) -> String {
@@ -181,6 +191,8 @@ struct StationDef {
     #[serde(default)]
     tinker_clip: Option<TinkerField>,
     #[serde(default)]
+    tinker_depth: Option<TinkerField>,
+    #[serde(default)]
     voice: Option<String>,
 }
 
@@ -275,6 +287,9 @@ impl StationDef {
         if let Some(c) = self.tinker_clip.and_then(|c| c.into_val()) {
             dials.tinker_clip = c;
         }
+        if let Some(d) = self.tinker_depth.and_then(|d| d.into_val()) {
+            dials.tinker_depth = d;
+        }
         Station {
             name: self.name,
             model: self.model,
@@ -322,6 +337,7 @@ patience = "steady"
 # brainy = "murmur"
 tinker_keep = "all"
 tinker_clip = "all"
+tinker_depth = "all"
 # voice = "Tara"
 "#;
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
@@ -412,6 +428,43 @@ mod tests {
             dials: Dials::default(),
             voice: None,
         }
+    }
+
+    fn parse_one(body: &str) -> Station {
+        let wrapped = format!("[[station]]\n{body}");
+        let f: StationsFile = toml::from_str(&wrapped).expect("valid station toml");
+        let mut defs = f.station;
+        assert_eq!(defs.len(), 1, "expected exactly one station");
+        defs.pop().unwrap().resolve()
+    }
+
+    #[test]
+    fn tinker_depth_parses_from_station_toml() {
+        let s = parse_one("name = \"x\"\nmodel = \"m\"\ntinker_depth = \"8\"\n");
+        assert_eq!(s.dials.tinker_depth.depth_n(), Some(8));
+    }
+
+    #[test]
+    fn tinker_depth_accepts_a_bare_integer() {
+        let s = parse_one("name = \"x\"\nmodel = \"m\"\ntinker_depth = 4\n");
+        assert_eq!(s.dials.tinker_depth.depth_n(), Some(4));
+    }
+
+    #[test]
+    fn tinker_depth_absent_means_unbounded() {
+        let s = parse_one("name = \"x\"\nmodel = \"m\"\n");
+        assert_eq!(s.dials.tinker_depth.depth_n(), None);
+    }
+
+    #[test]
+    fn tinker_depth_all_parses_to_unbounded() {
+        let s = parse_one("name = \"x\"\nmodel = \"m\"\ntinker_depth = \"all\"\n");
+        assert_eq!(s.dials.tinker_depth.depth_n(), None);
+    }
+
+    #[test]
+    fn tinker_depth_defaults_to_all() {
+        assert_eq!(Dials::default().tinker_depth.depth_n(), None);
     }
 
     #[test]

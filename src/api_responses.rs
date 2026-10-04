@@ -135,12 +135,13 @@ async fn stream_warm(
     }
 
     let mut bad_rounds: u32 = 0;
-    let mut rounds: u32 = 0;
+    let mut depth: u32 = 0;
     let mut nudged = false;
+    let cap = station.dials.tinker_depth.depth_n();
     loop {
-        if rounds >= crate::api::MAX_TOOL_ROUNDS && !nudged {
+        if cap.is_some_and(|c| depth as usize >= c) && !nudged {
             nudged = true;
-            tracing::warn!(rounds, "tool round cap reached, forcing final answer");
+            tracing::warn!(depth, "tinker depth reached, forcing final answer");
             input.push(serde_json::json!({
                 "type": "message",
                 "role": "system",
@@ -193,10 +194,10 @@ async fn stream_warm(
         bad_rounds = 0;
         let calls = paired;
         if nudged {
-            tracing::warn!("model kept requesting tools after the round cap, ending turn");
+            tracing::warn!("model kept requesting tools past tinker depth, ending turn");
             return Ok(());
         }
-        rounds += 1;
+        depth += 1;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -257,12 +258,13 @@ async fn stream_full(
     }
 
     let mut bad_rounds: u32 = 0;
-    let mut rounds: u32 = 0;
+    let mut depth: u32 = 0;
     let mut nudged = false;
+    let cap = station.dials.tinker_depth.depth_n();
     loop {
-        if rounds >= crate::api::MAX_TOOL_ROUNDS && !nudged {
+        if cap.is_some_and(|c| depth as usize >= c) && !nudged {
             nudged = true;
-            tracing::warn!(rounds, "tool round cap reached, forcing final answer");
+            tracing::warn!(depth, "tinker depth reached, forcing final answer");
             input.push(serde_json::json!({
                 "type": "message",
                 "role": "system",
@@ -315,10 +317,10 @@ async fn stream_full(
         bad_rounds = 0;
         let calls = paired;
         if nudged {
-            tracing::warn!("model kept requesting tools after the round cap, ending turn");
+            tracing::warn!("model kept requesting tools past tinker depth, ending turn");
             return Ok(());
         }
-        rounds += 1;
+        depth += 1;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,

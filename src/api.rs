@@ -10,8 +10,6 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub(crate) static TOOLLESS_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-pub(crate) const MAX_TOOL_ROUNDS: u32 = 8;
-
 pub(crate) const FINAL_ANSWER_NUDGE: &str = "You have gathered enough information for this request. Do not call any more tools. Write the final answer now, using what you already have. If something remains genuinely unknown, say so in one line instead of looking it up.";
 
 pub(crate) fn is_toolless(model: &str) -> bool {

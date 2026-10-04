@@ -74,6 +74,11 @@ pub fn dial_metas() -> Vec<DialMeta> {
             label: |d| d.tinker_clip.label(),
             cycle: |d, delta| cycle_tinker_clip_dials(d, delta),
         },
+        DialMeta {
+            name: "tinker_depth",
+            label: |d| d.tinker_depth.label(),
+            cycle: |d, delta| cycle_tinker_depth_dials(d, delta),
+        },
     ]
 }
 
@@ -220,6 +225,7 @@ pub fn commit_dial_edit(app: &mut App) {
         match meta.name {
             "tinker_keep" => app.active_station.dials.tinker_keep = val,
             "tinker_clip" => app.active_station.dials.tinker_clip = val,
+            "tinker_depth" => app.active_station.dials.tinker_depth = val,
             _ => {}
         }
         app.note(format!("{} = {}", meta.name, val.label()));
@@ -408,6 +414,15 @@ const TINKER_CLIP_PRESETS: &[crate::station::TinkerVal] = &[
     crate::station::TinkerVal::Percent(50),
 ];
 
+const TINKER_DEPTH_PRESETS: &[crate::station::TinkerVal] = &[
+    crate::station::TinkerVal::All,
+    crate::station::TinkerVal::Count(2),
+    crate::station::TinkerVal::Count(4),
+    crate::station::TinkerVal::Count(8),
+    crate::station::TinkerVal::Count(16),
+    crate::station::TinkerVal::Count(32),
+];
+
 pub fn cycle_boldness_dials(dials: &mut Dials, delta: i32) {
     let states: Vec<Option<f32>> = std::iter::once(None)
         .chain(BOLDNESS_PRESETS.iter().map(|(_, v)| Some(*v)))
@@ -477,6 +492,16 @@ pub fn cycle_tinker_clip_dials(dials: &mut Dials, delta: i32) {
     let n = TINKER_CLIP_PRESETS.len() as i32;
     let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
     dials.tinker_clip = TINKER_CLIP_PRESETS[next];
+}
+
+pub fn cycle_tinker_depth_dials(dials: &mut Dials, delta: i32) {
+    let cur = TINKER_DEPTH_PRESETS
+        .iter()
+        .position(|s| *s == dials.tinker_depth)
+        .unwrap_or(0);
+    let n = TINKER_DEPTH_PRESETS.len() as i32;
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    dials.tinker_depth = TINKER_DEPTH_PRESETS[next];
 }
 
 pub fn switch_tab(app: &mut App) {
