@@ -28,29 +28,18 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
 
     let prompt = "› ";
     let input_block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::BOTTOM)
         .border_style(if app.in_flight {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(Color::Cyan)
-        })
-        .title(if app.in_flight {
-            if app.voice_is_active() {
-                " streaming + speaking… (Esc to quiet) "
-            } else {
-                " streaming… (Esc to interrupt) "
-            }
-        } else if app.voice_is_active() {
-            " speaking… (Esc to quiet) "
-        } else {
-            " write. Enter to send, Ctrl-C to quit "
         });
 
     let inner = ratatui::layout::Rect {
         x: input_chunk.x + 1,
-        y: input_chunk.y + 1,
+        y: input_chunk.y + input_chunk.height.saturating_sub(1) / 2,
         width: input_chunk.width.saturating_sub(2),
-        height: input_chunk.height.saturating_sub(2),
+        height: 1,
     };
     let visible_width = (inner.width as usize).saturating_sub(prompt.len());
     let h_scroll = input.scroll_offset(visible_width);
