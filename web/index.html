@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>wryme</title>
+  <link data-trunk rel="rust" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #0d1117;
+      color: #c9d1d9;
+      overflow: hidden;
+    }
+    body {
+      /* padding lives on the body: #wryme-term's box must be exactly the
+         cell grid, since the backend measures columns from its rect */
+      padding: 12px;
+      box-sizing: border-box;
+    }
+    #wryme-term:focus-visible {
+      outline: none;
+    }
+    #wryme-term {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      white-space: pre;
+      user-select: none;
+      -webkit-user-select: none;
+      font: 15px/20px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      /* terminal-grade rasterization: grayscale AA, no font ligatures /
+         contextual alternates (terminals never draw those), no auto
+         text-size adjustment on mobile zoom */
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+      font-variant-ligatures: none;
+      font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+    .wme-row {
+      height: 20px;
+      white-space: pre;
+    }
+    .wme-cursor {
+      position: absolute;
+      width: 9px;
+      height: 20px;
+      background: #c9d1d9;
+      opacity: 0.6;
+      pointer-events: none;
+      mix-blend-mode: difference;
+    }
+    /* the ruler: 20 M's, same font as the terminal, used to measure the cell */
+    #wryme-measure {
+      position: absolute;
+      visibility: hidden;
+      top: 0;
+      left: 0;
+      white-space: pre;
+      font: 15px/20px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      font-variant-ligatures: none;
+      font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="wryme-term" tabindex="0"></div>
+  <div id="wryme-measure">MMMMMMMMMMMMMMMMMMMM</div>
+</body>
+</html>

@@ -1,12 +1,16 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::OnceLock;
+#[cfg(not(target_arch = "wasm32"))]
+use std::process::Command;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
 static LOGIN_SHELL: OnceLock<String> = OnceLock::new();
 static LOGIN_PATH: OnceLock<Option<String>> = OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_arch = "wasm32"))]
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 pub fn shell() -> &'static str {
@@ -72,6 +76,7 @@ fn user_shell_from_dscl(out: &[u8]) -> Option<String> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn probe_login_path() -> Option<String> {
     let shell = shell();
     let mut child = Command::new(shell)
@@ -108,6 +113,12 @@ fn probe_login_path() -> Option<String> {
     } else {
         Some(p.to_string())
     }
+}
+
+/// No shell to probe from the browser.
+#[cfg(target_arch = "wasm32")]
+fn probe_login_path() -> Option<String> {
+    None
 }
 
 #[cfg(test)]

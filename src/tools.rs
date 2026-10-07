@@ -138,13 +138,13 @@ async fn run_shell(command: &str) -> String {
         );
     }
     let handle = jobs::spawn(command.to_string());
-    match tokio::time::timeout(Duration::from_secs(SHELL_TIMEOUT_SECS), handle.done).await {
-        Ok(Ok(output)) => {
+    match crate::platform::timeout(Duration::from_secs(SHELL_TIMEOUT_SECS), handle.done).await {
+        Some(Ok(output)) => {
             jobs::mark_delivered(handle.id);
             output
         }
-        Ok(Err(_)) => format!("{}: job channel closed", shell_name()),
-        Err(_) => format!("gone async · id={}", handle.id),
+        Some(Err(_)) => format!("{}: job channel closed", shell_name()),
+        None => format!("gone async · id={}", handle.id),
     }
 }
 

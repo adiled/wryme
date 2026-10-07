@@ -215,6 +215,31 @@ impl Engine {
 }
 
 pub fn open_book(dir: &Path) -> Result<Book> {
+    // The browser has no filesystem: an empty book that lives in memory for
+    // the session. Reads and writes still happen through the same API; they
+    // just fail per-call instead of at open.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = dir;
+        return Ok(Book {
+            dir: dir.to_path_buf(),
+            next_row: 0,
+            next_seg: 0,
+            watermark: 0,
+            unattr_tokens: 0,
+            unattr_turns: 0,
+            unattr_tail: Vec::new(),
+            index: Vec::new(),
+            pending: Vec::new(),
+            life_summary: String::new(),
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    open_book_fs(dir)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_book_fs(dir: &Path) -> Result<Book> {
     std::fs::create_dir_all(dir)?;
     let index_path = dir.join("index.parquet");
     let mut index = if index_path.exists() {
@@ -832,10 +857,7 @@ fn split_spans(s: &str) -> Vec<(u64, u64)> {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    (crate::platform::unix_secs() * 1000.0) as i64
 }
 
 #[cfg(test)]

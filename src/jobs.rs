@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncReadExt;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
@@ -18,6 +20,7 @@ static REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Job>>> =
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 const JOB_TIMEOUT_SECS: u64 = 120;
+#[cfg(not(target_arch = "wasm32"))]
 const JOB_OUTPUT_CAP: usize = 24_000;
 
 pub struct Handle {
@@ -40,15 +43,15 @@ pub fn spawn(command: String) -> Handle {
             },
         );
     }
-    tokio::spawn(async move {
-        let output = match tokio::time::timeout(
+    crate::platform::spawn(async move {
+        let output = match crate::platform::timeout(
             Duration::from_secs(JOB_TIMEOUT_SECS),
             run_command(&command, id),
         )
         .await
         {
-            Ok(out) => out,
-            Err(_) => format!("(timed out after {}s)", JOB_TIMEOUT_SECS),
+            Some(out) => out,
+            None => format!("(timed out after {}s)", JOB_TIMEOUT_SECS),
         };
         {
             let mut r = REGISTRY.lock().unwrap();
@@ -108,6 +111,7 @@ pub fn claim_due() -> Vec<(u64, String)> {
     due
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn run_command(command: &str, id: u64) -> String {
     let shell = crate::shell_env::shell();
     let mut child = match Command::new(shell)
@@ -174,6 +178,7 @@ async fn run_command(command: &str, id: u64) -> String {
     crate::api::truncate(&s, JOB_OUTPUT_CAP)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn append_partial(id: u64, chunk: &[u8]) {
     let s = String::from_utf8_lossy(chunk).into_owned();
     let mut r = REGISTRY.lock().unwrap();
@@ -182,6 +187,12 @@ fn append_partial(id: u64, chunk: &[u8]) {
     {
         job.partial.push_str(&s);
     }
+}
+
+/// No shell in the browser: the shop runs the shell.
+#[cfg(target_arch = "wasm32")]
+async fn run_command(_command: &str, _id: u64) -> String {
+    "(no shell in the browser — this tool runs on the shop)".to_string()
 }
 
 #[allow(clippy::await_holding_lock)]
