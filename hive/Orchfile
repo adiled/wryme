@@ -1,0 +1,3 @@
+SERVICE wryme-hive
+RUN ${HOME}/.local/bin/wryme-hive
+RESTART always

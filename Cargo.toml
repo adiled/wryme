@@ -8,7 +8,7 @@ repository = "https://github.com/adiled/wryme"
 homepage = "https://github.com/adiled/wryme"
 documentation = "https://github.com/adiled/wryme#readme"
 readme = "README.md"
-exclude = ["dist/", "desktop/", "target/", "web/"]
+exclude = ["dist/", "desktop/", "target/", "web/", "hive/"]
 keywords = ["tui", "terminal", "chat", "ai", "agent"]
 categories = ["command-line-interface"]
 
