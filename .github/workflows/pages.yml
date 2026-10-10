@@ -2,13 +2,8 @@ name: Pages
 
 on:
   push:
-    branches: [main]
-    paths:
-      - web/**
-      - src/**
-      - Cargo.toml
-      - Cargo.lock
-      - .github/workflows/pages.yml
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
