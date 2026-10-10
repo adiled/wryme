@@ -14,7 +14,8 @@ impl StyleSheet for Sheet {
 }
 
 pub fn render(content: &str, append_cursor: bool) -> Vec<Line<'static>> {
-    let text = tui_markdown::from_str_with_options(content, &Options::new(Sheet));
+    let content = content.replace('\t', "    ");
+    let text = tui_markdown::from_str_with_options(&content, &Options::new(Sheet));
     let mut out: Vec<Line<'static>> = text.lines.into_iter().map(line_to_static).collect();
     out = gutter_fences(out);
 
@@ -104,5 +105,16 @@ mod tests {
                 .iter()
                 .any(|s| s.content.starts_with("```") || s.content.contains('╰'))
         }));
+    }
+
+    #[test]
+    fn expands_tabs_in_code() {
+        let out = render("```go\nfunc f() {\n\tif x {\n\t\tfmt.Println(1)\n\t}\n}\n```", false);
+        for l in &out[1..] {
+            for s in &l.spans[1..] {
+                assert!(!s.content.contains('\t'));
+            }
+        }
+        assert!(out.iter().any(|l| l.to_string().contains("    if x {")));
     }
 }
