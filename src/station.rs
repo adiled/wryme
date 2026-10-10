@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 use crate::shop::Shop;
 
@@ -306,42 +305,13 @@ pub fn load_all() -> Result<Vec<Station>> {
         out.push(env_st);
     }
 
-    if let Some(path) = config_path() {
-        if !path.exists() {
-            let _ = ensure_default_file(&path);
-        }
-        if path.exists() {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let parsed: StationsFile =
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-            for def in parsed.station {
-                out.push(def.resolve());
-            }
+    if let Some(text) = crate::config::stations_text() {
+        let parsed: StationsFile = toml::from_str(&text).context("parsing stations.toml")?;
+        for def in parsed.station {
+            out.push(def.resolve());
         }
     }
     Ok(out)
-}
-
-fn ensure_default_file(path: &PathBuf) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let body = r#"# wryme stations — canned is local, no network. All dials shown with defaults.
-[[station]]
-name = "canned"
-model = "canned replies"
-# boldness = 0.7
-patience = "steady"
-# brainy = "murmur"
-tinker_keep = "all"
-tinker_clip = "all"
-tinker_depth = "all"
-# voice = "Tara"
-"#;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
 }
 
 fn from_env() -> Option<Station> {
@@ -352,15 +322,6 @@ fn from_env() -> Option<Station> {
         model,
         dials: Dials::default(),
         voice: None,
-    })
-}
-
-pub(crate) fn config_path() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| {
-        PathBuf::from(h)
-            .join(".config")
-            .join("wryme")
-            .join("stations.toml")
     })
 }
 

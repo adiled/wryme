@@ -27,6 +27,22 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let (input_chunk, messages_chunk, status_chunk) = (chunks[0], chunks[1], chunks[2]);
 
     let prompt = "› ";
+    let state = if app.in_flight {
+        if app.voice_is_active() {
+            "streaming + speaking… (Esc to quiet)"
+        } else {
+            "streaming… (Esc to interrupt)"
+        }
+    } else if app.voice_is_active() {
+        "speaking… (Esc to quiet)"
+    } else {
+        ""
+    };
+    let label = if state.is_empty() {
+        " wme. ".to_string()
+    } else {
+        format!(" wme. {state} ")
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(if app.in_flight {
@@ -34,17 +50,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         } else {
             Style::default().fg(Color::Cyan)
         })
-        .title(if app.in_flight {
-            if app.voice_is_active() {
-                " streaming + speaking… (Esc to quiet) "
-            } else {
-                " streaming… (Esc to interrupt) "
-            }
-        } else if app.voice_is_active() {
-            " speaking… (Esc to quiet) "
-        } else {
-            " write. Enter to send, Ctrl-C to quit "
-        });
+        .title(label)
+        .title(Line::from(" ^S Settings ^C Exit ").right_aligned());
 
     let inner = ratatui::layout::Rect {
         x: input_chunk.x + 1,
@@ -147,14 +154,6 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     } else {
         Color::Cyan
     };
-    let heart_score = app
-        .reservoir
-        .lock()
-        .ok()
-        .map(|r| r.static_figure())
-        .unwrap_or(0);
-    let ht = (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
-    let heart_color = hue_lit(120.0 * (1.0 - ht));
     let mut pieces = vec![
         Span::styled("wryme", Style::default().fg(Color::Cyan)),
         Span::raw(dot),
@@ -169,9 +168,25 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             format!("via {}", app.active_shop.name),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(" \u{2764}\u{FE0E} ", heart_color),
-        Span::raw(format!("{} msg", app.messages.len())),
     ];
+    #[cfg(feature = "reservoir")]
+    {
+        let heart_score = app
+            .reservoir
+            .lock()
+            .ok()
+            .map(|r| r.static_figure())
+            .unwrap_or(0);
+        let ht =
+            (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
+        let heart_color = hue_lit(120.0 * (1.0 - ht));
+        pieces.push(Span::styled(" \u{2764}\u{FE0E} ", heart_color));
+    }
+    #[cfg(not(feature = "reservoir"))]
+    {
+        pieces.push(Span::raw(dot));
+    }
+    pieces.push(Span::raw(format!("{} msg", app.messages.len())));
     if app.voice_on {
         pieces.push(Span::raw(dot));
         pieces.push(Span::styled("voice", Style::default().fg(Color::Cyan)));
@@ -276,6 +291,7 @@ fn is_error_status(s: &str) -> bool {
         || s.starts_with("update failed")
 }
 
+#[cfg(feature = "reservoir")]
 fn hue_lit(hue: f64) -> Color {
     const LIGHTNESS: f64 = 0.45;
     const SATURATION: f64 = 0.85;
