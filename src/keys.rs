@@ -77,7 +77,12 @@ pub fn handle_key(
                 Some(t) => {
                     t.abort();
                     app.finish_streaming();
-                    app.note("cancelled");
+                    if app.awaiting.is_empty() {
+                        app.note("cancelled");
+                    } else {
+                        let pending = std::mem::take(&mut app.awaiting);
+                        start_turn(app, client, tx, in_flight, pending);
+                    }
                 }
                 _ => {
                     if !app.status.is_empty() {
@@ -87,41 +92,20 @@ pub fn handle_key(
             }
         }
         KeyCode::Enter => {
-            if app.in_flight {
-                app.note("still streaming. Esc to cancel");
-                return;
-            }
             let text = input.take().trim().to_string();
             if text.is_empty() {
                 return;
             }
-            let images = attached_images(&text);
-            if app.messages.is_empty() {
-                tracing::info!("window start");
+            if app.in_flight {
+                if app.awaiting.is_empty() {
+                    app.awaiting = text;
+                } else {
+                    app.awaiting.push('\n');
+                    app.awaiting.push_str(&text);
+                }
+                return;
             }
-            app.push_user(text, images);
-            let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-            app.begin_assistant();
-            app.stop_voice();
-            app.unmute_voice();
-            app.in_flight = true;
-            app.current_page = 0;
-            app.scroll_row = 0;
-            app.wheel_accum = 0;
-            app.note("");
-
-            let msgs = app.api_messages();
-            let prev_id = app.last_response_id.clone();
-            let shop = app.active_shop.clone();
-            let station = app.active_station.clone();
-            let client = client.clone();
-            let engine = app.engine.clone();
-            let tx = tx.clone();
-            *in_flight = Some(crate::platform::spawn(async move {
-                client
-                    .stream_completion(shop, station, msgs, prev_id, engine, tx)
-                    .await;
-            }));
+            start_turn(app, client, tx, in_flight, text);
         }
         KeyCode::PageUp => match app.view_mode {
             ViewMode::Page => {
@@ -165,6 +149,42 @@ pub fn handle_key(
         }
         _ => {}
     }
+}
+
+pub fn start_turn(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<crate::platform::Task>,
+    text: String,
+) {
+    let images = attached_images(&text);
+    if app.messages.is_empty() {
+        tracing::info!("window start");
+    }
+    app.push_user(text, images);
+    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+    app.begin_assistant();
+    app.stop_voice();
+    app.unmute_voice();
+    app.in_flight = true;
+    app.current_page = 0;
+    app.scroll_row = 0;
+    app.wheel_accum = 0;
+    app.note("");
+
+    let msgs = app.api_messages();
+    let prev_id = app.last_response_id.clone();
+    let shop = app.active_shop.clone();
+    let station = app.active_station.clone();
+    let client = client.clone();
+    let engine = app.engine.clone();
+    let tx = tx.clone();
+    *in_flight = Some(crate::platform::spawn(async move {
+        client
+            .stream_completion(shop, station, msgs, prev_id, engine, tx)
+            .await;
+    }));
 }
 
 pub fn handle_paste(text: &str, app: &mut App, input: &mut Input) {

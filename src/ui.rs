@@ -101,6 +101,24 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
 
     let mut lines: Vec<Line> = Vec::new();
     let msg_width = messages_chunk.width;
+    if !app.awaiting.is_empty() {
+        let phantom = Message {
+            role: Role::User,
+            content: app.awaiting.clone(),
+            images: Vec::new(),
+            brain: String::new(),
+            heart: String::new(),
+            streaming: false,
+            waiting: true,
+            timestamp: String::new(),
+            phase: Phase::Streaming,
+            current_tool: None,
+            turn_id: 0,
+            tool_events: Vec::new(),
+        };
+        push_message(&mut lines, &phantom, msg_width, app.accent);
+        lines.push(Line::from(""));
+    }
     for msg in app.messages.iter().rev() {
         push_message(&mut lines, msg, msg_width, app.accent);
         lines.push(Line::from(""));
@@ -467,6 +485,13 @@ fn push_message(
         }
     }
 
+    if msg.waiting {
+        header.push(Span::styled(
+            "  waiting…".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
     let tool_span: Option<Span<'static>> = if msg.streaming {
         msg.current_tool
             .as_ref()
@@ -624,6 +649,7 @@ mod tests {
             brain: brain.into(),
             heart: heart.into(),
             streaming: false,
+            waiting: false,
             timestamp: "00:00".into(),
             phase: Phase::Writing,
             current_tool: None,
