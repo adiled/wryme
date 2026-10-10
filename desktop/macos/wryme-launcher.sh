@@ -4,25 +4,26 @@
 #
 # Opens wryme in a clean, app-like WezTerm window. No terminal chrome.
 #
-# Usage: this script is dropped inside Wryme.app/Contents/MacOS and is the
-# app's executable. It works from any location as long as `wme` and
-# `wezterm.lua` live in the bundle's Resources.
+# The wryme binary is NEVER bundled. It always comes from cargo: this
+# launcher resolves the cargo-installed `wme`, installs it from crates.io
+# if missing, and keeps it current. No fallbacks.
 
 set -euo pipefail
 
 # Bundle layout:
 #   Wryme.app/Contents/MacOS/wryme-launcher   <- this script
-#   Wryme.app/Contents/Resources/wme          <- the wryme binary
-#   Wryme.app/Contents/Resources/wezterm.lua  <- app-like WezTerm config
+#   Wryme.app/Contents/Resources/wezterm.lua   <- app-like WezTerm config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESC="$SCRIPT_DIR/../Resources"
-# Prefer wme from PATH (installed via cargo install), fall back to bundled.
-if command -v wme >/dev/null 2>&1; then
-    WME="$(command -v wme)"
-else
-    WME="$RESC/wme"
-fi
 CFG="$RESC/wezterm.lua"
+
+# --- Resolve cargo's bin dir regardless of PATH ----------------------------
+if [[ -n "${CARGO_HOME:-}" ]]; then
+    CARGO_BIN="$CARGO_HOME/bin"
+else
+    CARGO_BIN="$HOME/.cargo/bin"
+fi
+WME="$CARGO_BIN/wme"
 
 # --- Locate wezterm ---------------------------------------------------------
 find_wezterm() {
@@ -198,10 +199,27 @@ maybe_brand_wezterm() {
 }
 maybe_brand_wezterm 2>/dev/null || true
 
+# --- Cargo-first wryme ----------------------------------------------------
+# The desktop bundle never carries `wme`. If cargo hasn't installed it yet,
+# install the latest from crates.io now. No bundled fallback.
+ensure_wme() {
+    if [[ -x "$WME" ]]; then return 0; fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        osascript -e 'display dialog "wryme needs the cargo tools to install itself. Install Rust from https://rustup.rs then open wryme again." buttons {"OK"} default button "OK" with icon stop' >/dev/null 2>&1 || true
+        exit 1
+    fi
+    osascript -e 'display notification "Installing wryme from crates.io…" with title "wryme"' >/dev/null 2>&1 || true
+    if ! cargo install wryme --locked; then
+        osascript -e 'display dialog "Installing wryme from cargo failed. Run `cargo install wryme` manually, then open wryme again." buttons {"OK"} default button "OK" with icon stop' >/dev/null 2>&1 || true
+        exit 1
+    fi
+}
+ensure_wme
+
 # --- Silent auto-update ---------------------------------------------
-# Checks GitHub for a newer wryme release once per 24h, in background.
-# Fully silent: no prompts, no notifications. Replaces the bundled wme
-# inside this .app and re-signs, so next launch is new.
+# Checks crates.io once per 24h, in background. Fully silent. Keeps the
+# cargo-installed wme current: plain `cargo install` upgrades when a newer
+# version exists and is a no-op when already current.
 maybe_auto_update() {
     local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wryme"
     local stamp="$cache_dir/last_update_check"
@@ -219,103 +237,8 @@ maybe_auto_update() {
     if ! mkdir "$lock" 2>/dev/null; then return 0; fi
     trap 'rmdir "$lock" 2>/dev/null || true' RETURN
 
-    # Local version from wme or bundle plist
-    local cur="0.0.0"
-    if [[ -x "$WME" ]]; then
-        cur="$("$WME" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "0.0.0")"
-    fi
-    if [[ "$cur" == "0.0.0" && -f "$RESC/../Info.plist" ]]; then
-        cur="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$RESC/../Info.plist" 2>/dev/null || echo "0.0.0")"
-    fi
-    # Also check $SCRIPT_DIR/../Info.plist (when RESC is Resources)
-    if [[ "$cur" == "0.0.0" ]]; then
-        cur="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$SCRIPT_DIR/../Info.plist" 2>/dev/null || echo "0.0.0")"
-    fi
-
-    # Fetch latest release atomically with timeout
-    local api="https://api.github.com/repos/adiled/wryme/releases/latest"
-    local json
-    json="$(curl -fsSL --max-time 8 -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null || true)"
-    [[ -z "$json" ]] && { rmdir "$lock" 2>/dev/null || true; return 0; }
-
-    local latest tag url arch asset
-    latest="$(python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    print(d.get('tag_name',''))
-except: pass
-" <<< "$json" 2>/dev/null || true)"
-    tag="${latest#v}"
-    [[ -z "$tag" || "$tag" == "null" ]] && { rmdir "$lock" 2>/dev/null || true; return 0; }
-
-    # Semver compare: is tag > cur?
-    local need_update
-    need_update="$(python3 -c "
-import sys
-def parse(v): 
-    try: return tuple(int(x) for x in v.split('.'))
-    except: return (0,0,0)
-cur=tuple(parse('$cur'))
-tag=tuple(parse('$tag'))
-print('1' if tag>cur else '0')
-" 2>/dev/null || echo 0)"
-    [[ "$need_update" != "1" ]] && { date +%s > "$stamp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 0; }
-
-    # Pick asset for this arch. We publish wryme-darwin-arm64.zip and wryme-darwin-x86_64.zip
-    # (and aarch64 alias). Try arm64 first on Apple Silicon.
-    arch="$(uname -m)"
-    if [[ "$arch" == "arm64" ]]; then asset="wryme-darwin-arm64.zip"; else asset="wryme-darwin-x86_64.zip"; fi
-    # Support old naming wryme-darwin-aarch64.zip as fallback
-    url="$(python3 -c "
-import json,sys
-d=json.loads(sys.stdin.read())
-for a in d.get('assets',[]):
-    if a.get('name')=='$asset':
-        print(a.get('browser_download_url',''))
-        sys.exit(0)
-# fallback alias
-alias='wryme-darwin-aarch64.zip' if '$asset'=='wryme-darwin-arm64.zip' else ''
-if alias:
-    for a in d.get('assets',[]):
-        if a.get('name')==alias:
-            print(a.get('browser_download_url',''))
-            sys.exit(0)
-" <<< "$json" 2>/dev/null || true)"
-    [[ -z "$url" ]] && { date +%s > "$stamp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 0; }
-
-    local tmp
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"; rmdir "'$lock'" 2>/dev/null || true' RETURN
-
-    if ! curl -fsSL --max-time 90 "$url" -o "$tmp/bundle.zip" 2>/dev/null; then
-        date +%s > "$stamp" 2>/dev/null || true
-        return 0
-    fi
-    if ! unzip -q "$tmp/bundle.zip" -d "$tmp" 2>/dev/null; then
-        date +%s > "$stamp" 2>/dev/null || true
-        return 0
-    fi
-    local new_wme
-    new_wme="$(find "$tmp" -type f -name "wme" | head -1 || true)"
-    [[ -z "$new_wme" || ! -f "$new_wme" ]] && { date +%s > "$stamp" 2>/dev/null || true; return 0; }
-    chmod +x "$new_wme" 2>/dev/null || true
-    # Atomic replace
-    cp "$new_wme" "$WME.new" 2>/dev/null && chmod +x "$WME.new" 2>/dev/null && mv "$WME.new" "$WME" 2>/dev/null || true
-    # Ship the new config too: "New Window" spawns from default_prog,
-    # which the launcher command line does not cover. wme and wezterm.lua
-    # always live together in the bundle Resources/.
-    local new_cfg
-    new_cfg="$(find "$tmp" -type f -name "wezterm.lua" | head -1 || true)"
-    [[ -z "$new_cfg" || ! -f "$new_cfg" ]] || cp "$new_cfg" "$CFG.new" 2>/dev/null && mv "$CFG.new" "$CFG" 2>/dev/null || true
-    xattr -c "$WME" 2>/dev/null || true
-    # Re-sign the outer .app if we are inside one (so Gatekeeper stays happy)
-    local app_root
-    app_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    if [[ "$app_root" == *.app ]]; then
-        codesign --force --deep --sign - "$app_root" >/dev/null 2>&1 || true
-    elif [[ -d "$SCRIPT_DIR/../../Wryme.app" ]]; then
-        codesign --force --deep --sign - "$SCRIPT_DIR/../../Wryme.app" >/dev/null 2>&1 || true
+    if command -v cargo >/dev/null 2>&1; then
+        cargo install wryme --locked >/dev/null 2>&1 || true
     fi
     date +%s > "$stamp" 2>/dev/null || true
 }

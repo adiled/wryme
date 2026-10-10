@@ -4,13 +4,24 @@ rem wryme desktop runner - Windows
 rem
 rem Opens wryme in a clean, app-like WezTerm window. No terminal chrome.
 rem
+rem The wryme binary is NEVER bundled. It always comes from cargo: this
+rem launcher resolves the cargo-installed wme.exe, installs it from
+rem crates.io if missing, and keeps it current. No fallbacks.
+rem
 rem This script does the actual work; wryme-launcher.vbs invokes it hidden
 rem so double-clicking "wryme" feels like opening an app, not a console.
 
 setlocal enableextensions
 set "HERE=%~dp0"
-set "WME=%HERE%wme.exe"
 set "CFG=%HERE%wezterm.lua"
+
+rem --- Cargo bin dir (CARGO_HOME wins, else ~/.cargo) ----------------------
+if defined CARGO_HOME (
+    set "CARGO_BIN=%CARGO_HOME%\bin"
+) else (
+    set "CARGO_BIN=%USERPROFILE%\.cargo\bin"
+)
+set "WME=%CARGO_BIN%\wme.exe"
 
 rem --- Locate wezterm -------------------------------------------------------
 set "WEZTERM="
@@ -49,14 +60,32 @@ powershell -NoProfile -Command ^
 exit /b 1
 
 :found
-if not exist "%WME%" (
+
+rem --- Cargo-first wryme: install from crates.io if missing -----------------
+if exist "%WME%" goto :wme_ok
+
+if not exist "%CARGO_BIN%" mkdir "%CARGO_BIN%" >nul 2>&1
+where cargo >nul 2>&1
+if errorlevel 1 (
     powershell -NoProfile -Command ^
-      "Add-Type -AssemblyName PresentationFramework; [System.Windows.Forms.MessageBox]::Show('Could not find wme.exe next to this launcher.', 'wryme', 'OK', 'Error')" >nul 2>&1
+      "Add-Type -AssemblyName PresentationFramework; [System.Windows.Forms.MessageBox]::Show('wryme needs the cargo tools to install itself. Install Rust from https://rustup.rs then open wryme again.', 'wryme', 'OK', 'Error')" >nul 2>&1
     exit /b 1
 )
 
+powershell -NoProfile -Command ^
+  "Add-Type -AssemblyName PresentationFramework; [System.Windows.Forms.MessageBox]::Show('Installing wryme from crates.io. This can take a minute…', 'wryme', 'OK', 'Information')" >nul 2>&1
+cargo install wryme --locked
+if errorlevel 1 (
+    powershell -NoProfile -Command ^
+      "Add-Type -AssemblyName PresentationFramework; [System.Windows.Forms.MessageBox]::Show('Installing wryme from cargo failed. Run `cargo install wryme` manually, then open wryme again.', 'wryme', 'OK', 'Error')" >nul 2>&1
+    exit /b 1
+)
+if not exist "%WME%" goto :wme_missing
+:wme_ok
+
 rem --- Silent auto-update (Windows) --------------------------------------
-rem Fire-and-forget PowerShell that checks GitHub once per 24h and replaces wme.exe
+rem Keeps the cargo-installed wme current: plain `cargo install` upgrades
+rem when a newer version exists and is a no-op when already current.
 set "CACHE_DIR=%LOCALAPPDATA%\wryme"
 set "STAMP=%CACHE_DIR%\last_update_check"
 if not exist "%CACHE_DIR%" mkdir "%CACHE_DIR%" >nul 2>&1
@@ -68,21 +97,13 @@ if exist "%STAMP%" (
 )
 if "%DO_UPDATE%"=="1" (
     start /b powershell -NoProfile -WindowStyle Hidden -Command ^
-      "$ErrorActionPreference='SilentlyContinue';" ^
-      "$cur=(cmd /c '\"%WME%\" --version' 2>$null | Select-String -Pattern '[0-9]+\.[0-9]+\.[0-9]+' | %% { $_.Matches[0].Value } | Select-Object -First 1); if(-not $cur){$cur='0.0.0'};" ^
-      "$json=(Invoke-RestMethod -Uri 'https://api.github.com/repos/adiled/wryme/releases/latest' -TimeoutSec 8 -Headers @{'Accept'='application/vnd.github+json'} -ErrorAction SilentlyContinue);" ^
-      "$tag=$json.tag_name.TrimStart('v'); if(-not $tag){exit};" ^
-      "function parse($v){ try{ return [int]$v.Split('.')[0],[int]$v.Split('.')[1],[int]$v.Split('.')[2]}catch{return 0,0,0} };" ^
-      "$need=(parse $tag) -join '.' -gt (parse $cur) -join '.'; $c=parse $cur; $t=parse $tag; $need=($t[0]-gt$c[0]) -or ($t[0]-eq$c[0]-and $t[1]-gt$c[1]) -or ($t[0]-eq$c[0]-and $t[1]-eq$c[1]-and $t[2]-gt$c[2]); if(-not $need){ (Get-Date).ToString() | Out-File '%STAMP%' -Force; exit };" ^
-      "$asset='wryme-windows-x86_64.zip'; $url=($json.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1).browser_download_url; if(-not $url){exit};" ^
-      "$tmp=Join-Path $env:TEMP ('wryme-upd-'+[guid]::NewGuid()); New-Item -ItemType Directory -Path $tmp -Force | Out-Null;" ^
-      "$zip=Join-Path $tmp 'bundle.zip'; try{ Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 90 -UseBasicParsing }catch{ (Get-Date).ToString() | Out-File '%STAMP%' -Force; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue; exit };" ^
-      "try{ Expand-Archive -Path $zip -DestinationPath $tmp -Force }catch{ (Get-Date).ToString() | Out-File '%STAMP%' -Force; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue; exit };" ^
-      "$new=Get-ChildItem -Path $tmp -Filter 'wme.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($new){ Copy-Item $new.FullName '%WME%.new' -Force; Move-Item '%WME%.new' '%WME%' -Force };" ^
-      "$newCfg=Get-ChildItem -Path $tmp -Filter 'wezterm.lua' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($newCfg){ Copy-Item $newCfg.FullName '%CFG%.new' -Force; Move-Item '%CFG%.new' '%CFG%' -Force };" ^
-      "$newRun=Get-ChildItem -Path $tmp -Filter 'wryme-run.cmd' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($newRun){ Copy-Item $newRun.FullName '%WME%.runnew' -Force; Move-Item '%WME%.runnew' '%~f0' -Force };" ^
-      "(Get-Date).ToString() | Out-File '%STAMP%' -Force; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue" >nul 2>&1
+      "Start-Process cargo -ArgumentList 'install','wryme','--locked' -WindowStyle Hidden -Wait; (Get-Date).ToString() | Out-File '%STAMP%' -Force" >nul 2>&1
 )
 
 "%WEZTERM%" --config-file "%CFG%" start --class wryme -- "%WME%"
 exit /b %errorlevel%
+
+:wme_missing
+powershell -NoProfile -Command ^
+  "Add-Type -AssemblyName PresentationFramework; [System.Windows.Forms.MessageBox]::Show('wme not found after install at %WME%.', 'wryme', 'OK', 'Error')" >nul 2>&1
+exit /b 1
