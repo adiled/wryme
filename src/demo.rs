@@ -1,6 +1,9 @@
 use crate::api::StreamEvent;
+use std::time::Duration;
+
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::time::{Duration, sleep};
+
+use crate::platform::sleep;
 
 const THINK_BASE_MS: u64 = 180;
 const THINK_JITTER_MS: u64 = 220;

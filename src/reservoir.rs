@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use crate::platform::Instant;
 
 use ccft::brainrot::{Aggregate, Baseline, bot_score};
 use ccft::ledger::Record;
@@ -13,10 +14,7 @@ const STATIC_MIN_RECORDS: usize = 4;
 pub const STATIC_BOT_SCORE: u32 = 70;
 
 fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    crate::platform::unix_secs()
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -32,7 +30,7 @@ pub struct Reservoir {
     stations: HashMap<String, StationInk>,
     records: Vec<Record>,
     seen: HashSet<String>,
-    start_time: Option<SystemTime>,
+    start_time: Option<f64>,
     start: Option<Instant>,
     turn_station: Option<String>,
     turn_model: Option<String>,
@@ -98,7 +96,7 @@ impl Reservoir {
     }
 
     pub fn turn_started(&mut self) {
-        self.start_time = Some(SystemTime::now());
+        self.start_time = Some(now_secs());
         self.start = Some(Instant::now());
         self.turn_station = None;
         self.turn_model = None;
@@ -124,14 +122,7 @@ impl Reservoir {
         };
         let model = self.turn_model.clone().unwrap_or_default();
         let now = now_secs();
-        let ts = self
-            .start_time
-            .map(|t| {
-                t.duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(now)
-            })
-            .unwrap_or(now);
+        let ts = self.start_time.unwrap_or(now);
         let lat = self
             .start
             .map(|s| s.elapsed().as_millis() as u64)

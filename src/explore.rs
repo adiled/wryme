@@ -1,5 +1,7 @@
-use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::process::Command;
 
 use crate::api::truncate;
@@ -8,6 +10,7 @@ const REPORT_MAX_CHARS: usize = 24_000;
 const HELP_MAX_CHARS: usize = 4_000;
 const MAN_MAX_LINES: usize = 30;
 const FUZZY_MAX_RESULTS: usize = 5;
+#[cfg(not(target_arch = "wasm32"))]
 const HELP_TIMEOUT: Duration = Duration::from_secs(3);
 const RC_FILES: &[&str] = &[
     "~/.zshrc",
@@ -274,6 +277,7 @@ async fn binary_help(path: &str) -> Option<String> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let fut = Command::new(cmd).args(args).output();
     match tokio::time::timeout(HELP_TIMEOUT, fut).await {
@@ -286,6 +290,12 @@ async fn run(cmd: &str, args: &[&str]) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// No subprocesses in the browser — the shop runs explore.
+#[cfg(target_arch = "wasm32")]
+async fn run(_cmd: &str, _args: &[&str]) -> Option<String> {
+    None
 }
 
 fn first_lines(s: &str, n: usize) -> String {

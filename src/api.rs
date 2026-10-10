@@ -93,15 +93,25 @@ pub struct Client {
 }
 impl Client {
     pub fn new() -> Result<Self> {
-        let mut builder =
-            reqwest::Client::builder().user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")));
-        if let Some(proxy) = Self::read_proxy_settings() {
-            builder = builder.proxy(proxy);
-        }
+        // No user-agent / proxy knobs in the browser — the platform owns
+        // those. Everything else is the same client.
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = {
+            let mut builder =
+                reqwest::Client::builder().user_agent(concat!("wryme/", env!("CARGO_PKG_VERSION")));
+            if let Some(proxy) = Self::read_proxy_settings() {
+                builder = builder.proxy(proxy);
+            }
+            builder
+        };
+        #[cfg(target_arch = "wasm32")]
+        let builder = reqwest::Client::builder();
+
         let http = builder.build().context("building http client")?;
         Ok(Self { http })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn read_proxy_settings() -> Option<reqwest::Proxy> {
         let proxy_url = std::env::var("HTTP_PROXY")
             .or_else(|_| std::env::var("http_proxy"))

@@ -1,8 +1,9 @@
-# Rust build artifacts
-/target
+# Rust build artifacts (root, web, hive — every workspace)
+target/
 
-# Desktop packaging output (built in CI or locally)
-/dist
+# Build output — desktop bundles + web dist (built in CI or locally)
+dist/
+/desktop
 *.zip
 *.tar.gz
 

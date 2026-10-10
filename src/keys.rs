@@ -1,5 +1,6 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
+
+use crate::platform::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 
 const POPUP_ROWS_PER_TICK: i32 = 2;
 
@@ -33,7 +34,7 @@ pub fn handle_key(
     input: &mut Input,
     client: &Client,
     tx: &mpsc::UnboundedSender<StreamEvent>,
-    in_flight: &mut Option<tokio::task::JoinHandle<()>>,
+    in_flight: &mut Option<crate::platform::Task>,
 ) {
     if k.kind == KeyEventKind::Release {
         return;
@@ -126,7 +127,7 @@ pub fn handle_key(
             let client = client.clone();
             let engine = app.engine.clone();
             let tx = tx.clone();
-            *in_flight = Some(tokio::spawn(async move {
+            *in_flight = Some(crate::platform::spawn(async move {
                 client
                     .stream_completion(shop, station, msgs, prev_id, engine, tx)
                     .await;

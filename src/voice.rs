@@ -1,101 +1,8 @@
-use std::process::{Child, Command};
+//! Speech. Native shells out to `say` / `spd-say`; the browser has no such
+//! privilege yet, so wasm gets a silent Speaker.
 
 pub const DEFAULT_MAC_VOICE: &str = "Tara";
 pub const DEFAULT_MAC_RATE_WPM: &str = "260";
-
-fn has_bin(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths)
-            .map(|d| d.join(name))
-            .any(|p| p.is_file())
-    })
-}
-
-pub fn available() -> bool {
-    if cfg!(target_os = "macos") {
-        has_bin("say")
-    } else {
-        has_bin("spd-say")
-    }
-}
-
-fn spawn_say(body: &str, voice: Option<&str>) -> Option<Child> {
-    if body.trim().is_empty() {
-        return None;
-    }
-    if cfg!(target_os = "macos") {
-        return None;
-    }
-    let mut c = Command::new("spd-say");
-    if let Some(v) = voice {
-        c.arg("-v").arg(v);
-    }
-    c.arg("--").arg(body).spawn().ok()
-}
-
-static SPEECH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-type Cur = std::sync::Arc<std::sync::Mutex<Option<Child>>>;
-
-fn synth_file(body: &str, voice: Option<&str>, cur: &Cur) -> Option<std::path::PathBuf> {
-    let n = SPEECH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("wryme-say-{}-{}.aiff", std::process::id(), n));
-    let mut c = Command::new("say");
-    match voice {
-        Some(v) => {
-            c.arg("-v").arg(v);
-        }
-        None => {
-            c.arg("-v").arg(DEFAULT_MAC_VOICE);
-            c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
-        }
-    }
-    let spawned = c.arg("-o").arg(&path).arg("--").arg(body).spawn();
-    let Ok(child) = spawned else {
-        let _ = std::fs::remove_file(&path);
-        return None;
-    };
-    if let Ok(mut guard) = cur.lock() {
-        *guard = Some(child);
-    }
-    let ok = wait_releasable(cur);
-    if ok && path.is_file() {
-        Some(path)
-    } else {
-        let _ = std::fs::remove_file(&path);
-        None
-    }
-}
-
-fn wait_releasable(cur: &Cur) -> bool {
-    loop {
-        let done = match cur.lock() {
-            Ok(mut guard) => match guard.as_mut() {
-                Some(child) => match child.try_wait() {
-                    Ok(Some(status)) => Some(status.success()),
-                    Ok(None) => None,
-                    Err(_) => Some(false),
-                },
-                None => Some(false),
-            },
-            _ => None,
-        };
-        match done {
-            Some(ok) => return ok,
-            None => std::thread::sleep(std::time::Duration::from_millis(20)),
-        }
-    }
-}
-
-fn play_wait(path: &std::path::Path, cur: &Cur) {
-    if let Ok(child) = Command::new("afplay").arg(path).spawn() {
-        if let Ok(mut guard) = cur.lock() {
-            *guard = Some(child);
-        }
-        wait_releasable(cur);
-    }
-    let _ = std::fs::remove_file(path);
-}
 
 pub fn split_sentences(buffer: &mut String) -> Vec<String> {
     let mut out = Vec::new();
@@ -127,145 +34,291 @@ pub fn split_sentences(buffer: &mut String) -> Vec<String> {
     out
 }
 
-enum SpeakCmd {
-    Say(u64, String),
-    Flush,
-    Stop,
+#[cfg(target_arch = "wasm32")]
+mod imp {
+    pub fn available() -> bool {
+        false
+    }
+
+    /// Silent, for now. Web Speech API is the natural follow-up.
+    pub struct Speaker {
+        pub name: Option<String>,
+    }
+
+    impl Speaker {
+        pub fn new(voice: Option<String>) -> Self {
+            Self { name: voice }
+        }
+
+        pub fn say(&self, _text: String) {}
+
+        pub fn is_active(&self) -> bool {
+            false
+        }
+
+        pub fn flush(&self) {}
+
+        pub fn stop(&mut self) {}
+
+        pub fn shutdown(&mut self) {}
+    }
 }
 
-pub struct Speaker {
-    tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
-    current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
-    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    r#gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub name: Option<String>,
-}
+#[cfg(not(target_arch = "wasm32"))]
+mod imp {
+    use std::process::{Child, Command};
 
-impl Speaker {
-    pub fn new(voice: Option<String>) -> Self {
-        let current = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
-        let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let r#gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let cur = current.clone();
-        let cnt = queued.clone();
-        let thread_gen = r#gen.clone();
-        let thread_voice = voice.clone();
-        let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
-        std::thread::spawn(move || {
-            let mut pending: Vec<String> = Vec::new();
-            let speak_now = |text: String, cur: &Cur| {
-                if text.trim().is_empty() {
-                    return;
-                }
-                if cfg!(target_os = "macos") {
-                    if let Some(path) = synth_file(&text, thread_voice.as_deref(), cur) {
-                        play_wait(&path, cur);
-                    }
-                    return;
-                }
-                if let Some(child) = spawn_say(&text, thread_voice.as_deref()) {
-                    if let Ok(mut guard) = cur.lock() {
-                        *guard = Some(child);
-                    }
-                    if let Ok(mut guard) = cur.lock()
-                        && let Some(mut child) = guard.take()
-                    {
-                        let _ = child.wait();
-                    }
-                }
+    use super::*;
+
+    fn has_bin(name: &str) -> bool {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths)
+                .map(|d| d.join(name))
+                .any(|p| p.is_file())
+        })
+    }
+
+    pub fn available() -> bool {
+        if cfg!(target_os = "macos") {
+            has_bin("say")
+        } else {
+            has_bin("spd-say")
+        }
+    }
+
+    fn spawn_say(body: &str, voice: Option<&str>) -> Option<Child> {
+        if body.trim().is_empty() {
+            return None;
+        }
+        if cfg!(target_os = "macos") {
+            return None;
+        }
+        let mut c = Command::new("spd-say");
+        if let Some(v) = voice {
+            c.arg("-v").arg(v);
+        }
+        c.arg("--").arg(body).spawn().ok()
+    }
+
+    static SPEECH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    type Cur = std::sync::Arc<std::sync::Mutex<Option<Child>>>;
+
+    fn synth_file(body: &str, voice: Option<&str>, cur: &Cur) -> Option<std::path::PathBuf> {
+        let n = SPEECH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("wryme-say-{}-{}.aiff", std::process::id(), n));
+        let mut c = Command::new("say");
+        match voice {
+            Some(v) => {
+                c.arg("-v").arg(v);
+            }
+            None => {
+                c.arg("-v").arg(DEFAULT_MAC_VOICE);
+                c.arg("-r").arg(DEFAULT_MAC_RATE_WPM);
+            }
+        }
+        let spawned = c.arg("-o").arg(&path).arg("--").arg(body).spawn();
+        let Ok(child) = spawned else {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        };
+        if let Ok(mut guard) = cur.lock() {
+            *guard = Some(child);
+        }
+        let ok = wait_releasable(cur);
+        if ok && path.is_file() {
+            Some(path)
+        } else {
+            let _ = std::fs::remove_file(&path);
+            None
+        }
+    }
+
+    fn wait_releasable(cur: &Cur) -> bool {
+        loop {
+            let done = match cur.lock() {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => Some(status.success()),
+                        Ok(None) => None,
+                        Err(_) => Some(false),
+                    },
+                    None => Some(false),
+                },
+                _ => None,
             };
-            while let Ok(cmd) = rx.recv() {
-                match cmd {
-                    SpeakCmd::Stop => {
-                        pending.clear();
-                        cnt.store(0, std::sync::atomic::Ordering::Relaxed);
+            match done {
+                Some(ok) => return ok,
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
+    fn play_wait(path: &std::path::Path, cur: &Cur) {
+        if let Ok(child) = Command::new("afplay").arg(path).spawn() {
+            if let Ok(mut guard) = cur.lock() {
+                *guard = Some(child);
+            }
+            wait_releasable(cur);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    enum SpeakCmd {
+        Say(u64, String),
+        Flush,
+        Stop,
+    }
+
+    pub struct Speaker {
+        tx: Option<std::sync::mpsc::Sender<SpeakCmd>>,
+        current: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
+        queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        r#gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        pub name: Option<String>,
+    }
+
+    impl Speaker {
+        pub fn new(voice: Option<String>) -> Self {
+            let current = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
+            let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let r#gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let cur = current.clone();
+            let cnt = queued.clone();
+            let thread_gen = r#gen.clone();
+            let thread_voice = voice.clone();
+            let (tx, rx) = std::sync::mpsc::channel::<SpeakCmd>();
+            std::thread::spawn(move || {
+                let mut pending: Vec<String> = Vec::new();
+                let speak_now = |text: String, cur: &Cur| {
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    if cfg!(target_os = "macos") {
+                        if let Some(path) = synth_file(&text, thread_voice.as_deref(), cur) {
+                            play_wait(&path, cur);
+                        }
+                        return;
+                    }
+                    if let Some(child) = spawn_say(&text, thread_voice.as_deref()) {
+                        if let Ok(mut guard) = cur.lock() {
+                            *guard = Some(child);
+                        }
                         if let Ok(mut guard) = cur.lock()
                             && let Some(mut child) = guard.take()
                         {
-                            let _ = child.kill();
                             let _ = child.wait();
                         }
-                        while rx.try_recv().is_ok() {}
                     }
-                    SpeakCmd::Say(g, text) => {
-                        cnt.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                        if g != thread_gen.load(std::sync::atomic::Ordering::Relaxed) {
-                            continue;
-                        }
-                        pending.push(text);
-                        while pending.len() >= 2 {
-                            let pair = format!("{} {}", pending.remove(0), pending.remove(0));
-                            cnt.fetch_sub(2, std::sync::atomic::Ordering::Relaxed);
-                            speak_now(pair, &cur);
-                        }
-                    }
-                    SpeakCmd::Flush => {
-                        if !pending.is_empty() {
-                            let rest = pending.join(" ");
-                            cnt.store(0, std::sync::atomic::Ordering::Relaxed);
+                };
+                while let Ok(cmd) = rx.recv() {
+                    match cmd {
+                        SpeakCmd::Stop => {
                             pending.clear();
-                            speak_now(rest, &cur);
+                            cnt.store(0, std::sync::atomic::Ordering::Relaxed);
+                            if let Ok(mut guard) = cur.lock()
+                                && let Some(mut child) = guard.take()
+                            {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
+                            while rx.try_recv().is_ok() {}
+                        }
+                        SpeakCmd::Say(g, text) => {
+                            cnt.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                            if g != thread_gen.load(std::sync::atomic::Ordering::Relaxed) {
+                                continue;
+                            }
+                            pending.push(text);
+                            while pending.len() >= 2 {
+                                let pair =
+                                    format!("{} {}", pending.remove(0), pending.remove(0));
+                                cnt.fetch_sub(2, std::sync::atomic::Ordering::Relaxed);
+                                speak_now(pair, &cur);
+                            }
+                        }
+                        SpeakCmd::Flush => {
+                            if !pending.is_empty() {
+                                let rest = pending.join(" ");
+                                cnt.store(0, std::sync::atomic::Ordering::Relaxed);
+                                pending.clear();
+                                speak_now(rest, &cur);
+                            }
                         }
                     }
                 }
+            });
+            Self {
+                tx: Some(tx),
+                current,
+                queued,
+                r#gen,
+                name: voice,
             }
-        });
-        Self {
-            tx: Some(tx),
-            current,
-            queued,
-            r#gen,
-            name: voice,
         }
-    }
 
-    pub fn say(&self, text: String) {
-        let g = self.r#gen.load(std::sync::atomic::Ordering::Relaxed);
-        if self.tx.is_some() {
-            self.queued
+        pub fn say(&self, text: String) {
+            let g = self.r#gen.load(std::sync::atomic::Ordering::Relaxed);
+            if self.tx.is_some() {
+                self.queued
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(SpeakCmd::Say(g, text));
+            }
+        }
+
+        pub fn is_active(&self) -> bool {
+            if self.queued.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                return true;
+            }
+            self.current.lock().map(|g| g.is_some()).unwrap_or(false)
+        }
+
+        pub fn flush(&self) {
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(SpeakCmd::Flush);
+            }
+        }
+
+        pub fn stop(&mut self) {
+            self.r#gen
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(SpeakCmd::Stop);
+            }
+            if let Ok(mut guard) = self.current.lock()
+                && let Some(mut child) = guard.take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(SpeakCmd::Say(g, text));
+
+        pub fn shutdown(&mut self) {
+            self.stop();
+            self.tx = None;
         }
     }
 
-    pub fn is_active(&self) -> bool {
-        if self.queued.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-            return true;
-        }
-        self.current.lock().map(|g| g.is_some()).unwrap_or(false)
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-    pub fn flush(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(SpeakCmd::Flush);
+        #[test]
+        fn backend_detection_finds_path_bins() {
+            assert!(has_bin("sh"));
+            assert!(!has_bin("definitely-not-a-real-binary-xyz"));
         }
-    }
-
-    pub fn stop(&mut self) {
-        self.r#gen
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(SpeakCmd::Stop);
-        }
-        if let Ok(mut guard) = self.current.lock()
-            && let Some(mut child) = guard.take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    pub fn shutdown(&mut self) {
-        self.stop();
-        self.tx = None;
     }
 }
 
+pub use imp::{Speaker, available};
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::split_sentences;
 
     #[test]
     fn empty_text_speaks_nothing() {
@@ -280,11 +333,5 @@ mod tests {
         let out = split_sentences(&mut buf);
         assert_eq!(out, vec!["The kettle is warm.", "Second line!", "Is it?"]);
         assert_eq!(buf, " Yes");
-    }
-
-    #[test]
-    fn backend_detection_finds_path_bins() {
-        assert!(has_bin("sh"));
-        assert!(!has_bin("definitely-not-a-real-binary-xyz"));
     }
 }

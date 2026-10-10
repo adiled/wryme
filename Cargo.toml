@@ -8,37 +8,93 @@ repository = "https://github.com/adiled/wryme"
 homepage = "https://github.com/adiled/wryme"
 documentation = "https://github.com/adiled/wryme#readme"
 readme = "README.md"
-exclude = ["dist/", "desktop/", "target/"]
+exclude = ["dist/", "desktop/", "target/", "web/", "hive/"]
 keywords = ["tui", "terminal", "chat", "ai", "agent"]
 categories = ["command-line-interface"]
+
+[lib]
+name = "wryme"
+path = "src/lib.rs"
+
+[workspace]
+members = ["web"]
 
 [[bin]]
 name = "wme"
 path = "src/main.rs"
 
+# ---------------------------------------------------------------------------
+# shared: compiles for both native (terminal) and wasm32 (browser)
+# ---------------------------------------------------------------------------
 [dependencies]
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-tui-markdown = "0.3"
-clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-unicode-width = "0.2"
-unicode-segmentation = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "time", "process"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 futures-util = "0.3"
 base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-parquet = "53"
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+tracing = "0.1"
 arrow-array = "53"
 arrow-schema = "53"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sentry = { version = "0.42", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest"] }
 ccft = { version = "1.10.7", default-features = false, features = ["core"] }
+
+# ---------------------------------------------------------------------------
+# native: the terminal build (real crossterm events, tokio, rustls, sentry)
+# ---------------------------------------------------------------------------
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "time", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
+sentry = { version = "0.42", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tui-markdown = "0.3"
+parquet = "53"
+
+# ---------------------------------------------------------------------------
+# wasm: the browser build (own ratatui backend, DOM input, fetch transport)
+# ---------------------------------------------------------------------------
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["all-widgets", "macros", "layout-cache", "underline-color"] }
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+# no code highlighting (syntect drags in C oniguruma); no zstd (C library)
+tui-markdown = { version = "0.3", default-features = false }
+parquet = { version = "53", default-features = false, features = ["arrow", "base64", "snap", "flate2", "lz4", "brotli"] }
+# ratatui-core needs a critical-section impl; single-threaded std one
+critical-section = { version = "1", features = ["std"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Element",
+    "EventTarget",
+    "AddEventListenerOptions",
+    "HtmlElement",
+    "HtmlDivElement",
+    "HtmlSpanElement",
+    "Node",
+    "Text",
+    "Event",
+    "KeyboardEvent",
+    "MouseEvent",
+    "WheelEvent",
+    "ResizeObserver",
+    "ResizeObserverEntry",
+    "DomRect",
+    "Performance",
+    "CssStyleDeclaration",
+    "DomTokenList",
+] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+console_error_panic_hook = "0.1"
 
 [profile.release]
 opt-level = 3
