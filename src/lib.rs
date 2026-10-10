@@ -10,6 +10,7 @@ pub mod api_chat;
 pub mod api_responses;
 pub mod app;
 pub mod book;
+pub mod config;
 pub mod demo;
 pub mod explore;
 pub mod input;
@@ -19,6 +20,10 @@ pub mod md;
 pub mod platform;
 pub mod popup;
 pub mod popup_ui;
+#[cfg(feature = "reservoir")]
+pub mod reservoir;
+#[cfg(not(feature = "reservoir"))]
+#[path = "reservoir_stub.rs"]
 pub mod reservoir;
 pub mod shell_env;
 pub mod shop;
@@ -41,8 +46,7 @@ use app::App;
 use input::Input;
 use platform::{Event, Task};
 
-/// Everything resolved at launch: a client, a shop, a station, and any
-/// discovery trouble worth surfacing in the status bar.
+/// Everything resolved at launch: a client, a shop, a station.
 pub struct Boot {
     pub client: Client,
     pub shops: Vec<shop::Shop>,
@@ -50,13 +54,12 @@ pub struct Boot {
     pub active_station: station::Station,
     pub active_shop: shop::Shop,
     pub active_origin: Option<String>,
-    pub discovery_errors: Vec<(String, String)>,
 }
 
 /// Find shops, load stations, pick the active pair, build the http client.
 pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
     let mut shops = shop::load_all().context("loading shops")?;
-    let discovery_errors = shop::discover_all(&mut shops).await;
+    shop::discover_all(&mut shops).await;
     let stations = station::load_all().context("loading stations")?;
     let (active, active_origin) = station::pick(&stations, &shops, station_arg)?;
 
@@ -79,7 +82,6 @@ pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
         active_station: active,
         active_shop,
         active_origin,
-        discovery_errors,
     })
 }
 
@@ -97,7 +99,6 @@ pub async fn run<B, S>(
     active_station: station::Station,
     active_shop: shop::Shop,
     active_origin: Option<String>,
-    discovery_errors: Vec<(String, String)>,
     mut events: S,
 ) -> Result<()>
 where
@@ -112,14 +113,6 @@ where
         active_shop,
         active_origin,
     );
-    if !discovery_errors.is_empty() {
-        let summary = discovery_errors
-            .iter()
-            .map(|(s, e)| format!("{}: {}", s, e))
-            .collect::<Vec<_>>()
-            .join("; ");
-        app.note(format!("discovery: {}", summary));
-    }
     let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<Task> = None;
@@ -141,6 +134,22 @@ where
                         }
                         Event::Mouse(m) => keys::handle_mouse(m, &mut app),
                         Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
+                        #[cfg(target_arch = "wasm32")]
+                        Event::ReloadConfig => {
+                            match crate::boot(None).await {
+                                Ok(b) => {
+                                    app.reconfigure(
+                                        b.shops,
+                                        b.stations,
+                                        b.active_station,
+                                        b.active_shop,
+                                        b.active_origin,
+                                    );
+                                    app.note("config connected");
+                                }
+                                Err(e) => app.note(format!("config: {e:#}")),
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -409,7 +418,6 @@ async fn native_main() -> Result<()> {
         boot.active_station,
         boot.active_shop,
         boot.active_origin,
-        boot.discovery_errors,
         events,
     )
     .await;

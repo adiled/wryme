@@ -110,6 +110,7 @@ pub enum Event {
     Paste(String),
     FocusGained,
     FocusLost,
+    ReloadConfig,
 }
 
 // ---------------------------------------------------------------------------

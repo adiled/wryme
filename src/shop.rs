@@ -1,7 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tool {
+    pub name: String,
+    pub def: Value,
+}
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 
@@ -100,41 +106,13 @@ pub fn load_all() -> Result<Vec<Shop>> {
         out.push(env_shop);
     }
 
-    if let Some(path) = config_path() {
-        if !path.exists() {
-            let _ = ensure_default_file(&path);
-        }
-        if path.exists() {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let parsed: ShopsFile =
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-            for def in parsed.shop {
-                out.push(def.resolve());
-            }
+    if let Some(text) = crate::config::shops_text() {
+        let parsed: ShopsFile = toml::from_str(&text).context("parsing shops.toml")?;
+        for def in parsed.shop {
+            out.push(def.resolve());
         }
     }
     Ok(out)
-}
-
-fn ensure_default_file(path: &PathBuf) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let body = r#"# wryme shops — add your providers here. `canned` is local, no network. All shop knobs shown.
-[[shop]]
-name = "canned"
-url = ""
-models = ["canned replies"]
-# protocol = "chat-completions" # or "responses"
-# window = "full" # or "warm"
-# key = ""
-# key_env = "OPENAI_API_KEY"
-# headers = { }
-"#;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
 }
 
 fn from_env() -> Option<Shop> {
@@ -181,49 +159,36 @@ fn from_env() -> Option<Shop> {
     })
 }
 
-fn config_path() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| {
-        PathBuf::from(h)
-            .join(".config")
-            .join("wryme")
-            .join("shops.toml")
-    })
-}
-
 pub fn find_for_model<'a>(shops: &'a [Shop], model: &str) -> Option<&'a Shop> {
     shops.iter().find(|s| s.models.iter().any(|m| m == model))
 }
 
-pub async fn discover_all(shops: &mut [Shop]) -> Vec<(String, String)> {
+pub async fn discover_all(shops: &mut [Shop]) {
     let http = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
-            return shops
-                .iter()
-                .map(|s| (s.name.clone(), format!("http client: {}", e)))
-                .collect();
+            for shop in shops.iter() {
+                if shop.protocol != Protocol::Demo {
+                    tracing::warn!(shop = %shop.name, err = %e, "model discovery unavailable");
+                }
+            }
+            return;
         }
     };
-    let mut errors = Vec::new();
     for shop in shops.iter_mut() {
-        if shop.protocol == Protocol::Demo || !shop.models.is_empty() {
+        if shop.protocol == Protocol::Demo {
             continue;
         }
         if let Err(e) = discover_models(shop, &http).await {
-            errors.push((shop.name.clone(), format!("{:#}", e)));
+            tracing::warn!(shop = %shop.name, err = %format!("{e:#}"), "model discovery failed");
         }
     }
-    errors
 }
 
 async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> {
     #[derive(Deserialize)]
     struct ModelsResponse {
         data: Vec<ModelEntry>,
-    }
-    #[derive(Deserialize)]
-    struct ModelEntry {
-        id: String,
     }
 
     let url = format!("{}/models", shop.url.trim_end_matches('/'));
@@ -236,8 +201,56 @@ async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> 
         return Err(anyhow!("upstream {}", resp.status()));
     }
     let parsed: ModelsResponse = resp.json().await.context("parsing /v1/models response")?;
-    shop.models = parsed.data.into_iter().map(|m| m.id).collect();
+    let configured = shop.models.clone();
+    let (models, tools_by_model) = apply_discovery(parsed.data, &configured);
+    shop.models = models;
+    for (model, tools) in tools_by_model {
+        crate::api::record_tools(&shop.name, &model, tools);
+    }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+    #[serde(default)]
+    tools: Vec<Value>,
+}
+
+fn apply_discovery(
+    entries: Vec<ModelEntry>,
+    configured: &[String],
+) -> (Vec<String>, Vec<(String, Vec<Tool>)>) {
+    let mut models = Vec::new();
+    let mut tools_by_model = Vec::new();
+    for entry in entries {
+        if !configured.is_empty() && !configured.contains(&entry.id) {
+            continue;
+        }
+        let mut tools = Vec::new();
+        for def in entry.tools {
+            let Some(name) = tool_name(&def) else {
+                continue;
+            };
+            if !tools.iter().any(|t: &Tool| t.name == name) {
+                tools.push(Tool { name, def });
+            }
+        }
+        models.push(entry.id.clone());
+        tools_by_model.push((entry.id, tools));
+    }
+    if models.is_empty() && !configured.is_empty() {
+        models = configured.to_vec();
+    }
+    (models, tools_by_model)
+}
+
+fn tool_name(def: &Value) -> Option<String> {
+    def.get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|n| n.as_str())
+        .or_else(|| def.get("name").and_then(|n| n.as_str()))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -313,5 +326,78 @@ mod tests {
         assert_eq!(find_for_model(&shops, "m2").unwrap().name, "a");
         assert_eq!(find_for_model(&shops, "m3").unwrap().name, "b");
         assert!(find_for_model(&shops, "nope").is_none());
+    }
+
+    fn entry(id: &str, defs: Vec<serde_json::Value>) -> ModelEntry {
+        ModelEntry {
+            id: id.into(),
+            tools: defs,
+        }
+    }
+
+    fn fn_def(shape: &str, name: &str) -> serde_json::Value {
+        if shape == "chat" {
+            serde_json::json!({ "type": "function", "function": { "name": name } })
+        } else {
+            serde_json::json!({ "type": "function", "name": name })
+        }
+    }
+
+    #[test]
+    fn discovery_keeps_tools_per_model() {
+        let entries = vec![
+            entry("m1", vec![fn_def("chat", "sh"), fn_def("chat", "fs")]),
+            entry("m2", vec![fn_def("responses", "sh"), fn_def("responses", "curl")]),
+        ];
+        let (models, tools_by_model) = apply_discovery(entries, &[]);
+        assert_eq!(models, vec!["m1".to_string(), "m2".to_string()]);
+        assert_eq!(tools_by_model.len(), 2);
+        let (m1, m1_tools) = &tools_by_model[0];
+        assert_eq!((m1.as_str(), m1_tools.len()), ("m1", 2));
+        assert_eq!(m1_tools[0].name, "sh");
+        assert_eq!(m1_tools[1].name, "fs");
+        let (m2, m2_tools) = &tools_by_model[1];
+        assert_eq!((m2.as_str(), m2_tools.len()), ("m2", 2));
+        assert_eq!(m2_tools[0].name, "sh");
+        assert_eq!(m2_tools[1].name, "curl");
+    }
+
+    #[test]
+    fn discovery_config_filters_models_and_their_tools() {
+        let entries = vec![
+            entry("m1", vec![fn_def("chat", "sh")]),
+            entry("m2", vec![fn_def("chat", "curl")]),
+        ];
+        let configured = vec!["m2".to_string()];
+        let (models, tools_by_model) = apply_discovery(entries, &configured);
+        assert_eq!(models, vec!["m2".to_string()]);
+        assert_eq!(tools_by_model.len(), 1);
+        assert_eq!(tools_by_model[0].0, "m2");
+        assert_eq!(tools_by_model[0].1.len(), 1);
+        assert_eq!(tools_by_model[0].1[0].name, "curl");
+    }
+
+    #[test]
+    fn discovery_falls_back_to_config_when_nothing_matches() {
+        let entries = vec![entry("mx", vec![fn_def("chat", "sh")])];
+        let configured = vec!["m9".to_string()];
+        let (models, tools_by_model) = apply_discovery(entries, &configured);
+        assert_eq!(models, vec!["m9".to_string()]);
+        assert!(tools_by_model.is_empty());
+    }
+
+    #[test]
+    fn discovery_skips_defs_without_a_name() {
+        let entries = vec![entry(
+            "m1",
+            vec![
+                fn_def("chat", "sh"),
+                serde_json::json!({ "type": "function" }),
+            ],
+        )];
+        let (models, tools_by_model) = apply_discovery(entries, &[]);
+        assert_eq!(models, vec!["m1".to_string()]);
+        assert_eq!(tools_by_model[0].1.len(), 1);
+        assert_eq!(tools_by_model[0].1[0].name, "sh");
     }
 }

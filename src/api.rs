@@ -1,32 +1,66 @@
-use crate::shop::{Protocol, Shop};
+use crate::shop::{Protocol, Shop, Tool};
 use crate::station::Station;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub(crate) static TOOLLESS_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+type ShopToolMap = HashMap<(String, String), Vec<Tool>>;
+
+pub(crate) static SHOP_TOOLS: OnceLock<Mutex<ShopToolMap>> = OnceLock::new();
+
 pub(crate) const FINAL_ANSWER_NUDGE: &str = "You have gathered enough information for this request. Do not call any more tools. Write the final answer now, using what you already have. If something remains genuinely unknown, say so in one line instead of looking it up.";
 
-pub(crate) fn is_toolless(model: &str) -> bool {
+pub(crate) fn is_toolless(shop: &str, model: &str) -> bool {
     TOOLLESS_MODELS
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
-        .map(|s| s.contains(model))
+        .map(|s| s.contains(&toolless_key(shop, model)))
         .unwrap_or(false)
 }
 
-pub(crate) fn mark_toolless(model: &str) {
+pub(crate) fn mark_toolless(shop: &str, model: &str) {
     if let Ok(mut s) = TOOLLESS_MODELS
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
     {
-        s.insert(model.to_string());
+        s.insert(toolless_key(shop, model));
     }
+}
+
+fn toolless_key(shop: &str, model: &str) -> String {
+    format!("{shop}\u{1f}{model}")
+}
+
+pub(crate) fn record_tools(shop: &str, model: &str, tools: Vec<Tool>) {
+    if let Ok(mut m) = SHOP_TOOLS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        m.insert((shop.to_string(), model.to_string()), tools);
+    }
+}
+
+pub(crate) fn tools_for(shop: &str, model: &str) -> Vec<Tool> {
+    SHOP_TOOLS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&(shop.to_string(), model.to_string())).cloned())
+        .unwrap_or_default()
+}
+
+pub(crate) fn owns_tool(shop: &str, model: &str, name: &str) -> bool {
+    tools_for(shop, model).iter().any(|t| t.name == name)
+}
+
+pub(crate) fn client_runs_tools() -> bool {
+    !cfg!(target_arch = "wasm32")
 }
 
 pub(crate) fn is_tool_unsupported_msg(msg: &str) -> bool {

@@ -15,7 +15,29 @@ struct FuncCall {
     call_id: String,
     item_id: String,
     name: String,
+    rendered: bool,
     arguments: String,
+}
+
+#[derive(Default)]
+struct Turn {
+    calls: Vec<FuncCall>,
+    carry: Vec<serde_json::Value>,
+    new_id: Option<String>,
+    saw_text: bool,
+}
+
+fn hosted_tool_name(item_type: &str) -> Option<&'static str> {
+    match item_type {
+        "file_search_call" => Some("file_search"),
+        "web_search_call" => Some("web_search"),
+        "code_interpreter_call" => Some("code_interpreter"),
+        "image_generation_call" => Some("image_generation"),
+        "computer_call" | "computer_use_call" => Some("computer_use"),
+        "mcp_list_tools" => Some("mcp_list_tools"),
+        "mcp_approval_request" => Some("mcp_approval_request"),
+        _ => None,
+    }
 }
 
 const MAX_TOOL_CALLS: u32 = 10;
@@ -43,10 +65,10 @@ pub(crate) async fn stream(
         {
             Ok(()) => return Ok(()),
             Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
-                if crate::api::is_toolless(&station.model) {
+                if crate::api::is_toolless(&shop.name, &station.model) {
                     return Err(e);
                 }
-                crate::api::mark_toolless(&station.model);
+                crate::api::mark_toolless(&shop.name, &station.model);
                 tracing::warn!(model=%station.model, "tools unsupported, retrying responses without tools");
                 let _ = tx.send(StreamEvent::Error {
                     message: "tools unsupported by model, retrying without tools".into(),
@@ -73,10 +95,10 @@ pub(crate) async fn stream(
     match stream_full(client, shop, station, messages.clone(), engine.clone(), tx).await {
         Ok(()) => Ok(()),
         Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
-            if crate::api::is_toolless(&station.model) {
+            if crate::api::is_toolless(&shop.name, &station.model) {
                 return Err(e);
             }
-            crate::api::mark_toolless(&station.model);
+            crate::api::mark_toolless(&shop.name, &station.model);
             tracing::warn!(model=%station.model, "tools unsupported, retrying responses without tools");
             let _ = tx.send(StreamEvent::Error {
                 message: "tools unsupported by model, retrying without tools".into(),
@@ -198,11 +220,23 @@ async fn stream_warm(
             return Ok(());
         }
         depth += 1;
-        for call in calls {
+        if !crate::api::client_runs_tools() {
+            tracing::info!(shop = %shop.name, "provider runs tools server-side, client does not execute");
+            return Ok(());
+        }
+        for mut call in calls {
+            if call.rendered {
+                continue;
+            }
+            if crate::api::owns_tool(&shop.name, &station.model, &call.name) {
+                tracing::info!(shop = %shop.name, tool = %call.name, "shop executes tool server-side, client does not run it");
+                return Ok(());
+            }
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
+            call.rendered = true;
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
@@ -271,7 +305,7 @@ async fn stream_full(
                 "content": [{ "type": "input_text", "text": crate::api::FINAL_ANSWER_NUDGE }],
             }));
         }
-        let (calls, _new_id, reasoning_items) = stream_once(
+        let (calls, _new_id, carry) = stream_once(
             client,
             shop,
             station,
@@ -287,7 +321,7 @@ async fn stream_full(
             .into_iter()
             .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
         let mut follow = Vec::new();
-        follow.extend(reasoning_items);
+        follow.extend(carry);
         for c in &broken {
             let output = "error: unusable tool call — every call needs an id and a function name"
                 .to_string();
@@ -321,11 +355,23 @@ async fn stream_full(
             return Ok(());
         }
         depth += 1;
-        for call in calls {
+        if !crate::api::client_runs_tools() {
+            tracing::info!(shop = %shop.name, "provider runs tools server-side, client does not execute");
+            return Ok(());
+        }
+        for mut call in calls {
+            if call.rendered {
+                continue;
+            }
+            if crate::api::owns_tool(&shop.name, &station.model, &call.name) {
+                tracing::info!(shop = %shop.name, tool = %call.name, "shop executes tool server-side, client does not run it");
+                return Ok(());
+            }
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", call.name),
             };
+            call.rendered = true;
             let _ = tx.send(StreamEvent::ToolResult {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
@@ -433,11 +479,23 @@ async fn stream_once(
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content"]);
-    let toolless = crate::api::is_toolless(&station.model);
+    let toolless = crate::api::is_toolless(&shop.name, &station.model);
     let tools = if toolless {
         Vec::new()
     } else {
-        tools::tool_defs()
+        let mut tools: Vec<serde_json::Value> =
+            crate::api::tools_for(&shop.name, &station.model)
+                .iter()
+                .map(|t| t.def.clone())
+                .collect();
+        if crate::api::client_runs_tools() {
+            tools.extend(
+                tools::tool_defs()
+                    .into_iter()
+                    .filter(|d| !crate::api::owns_tool(&shop.name, &station.model, d["name"].as_str().unwrap_or_default())),
+            );
+        }
+        tools
     };
     let filtered_input: Vec<serde_json::Value>;
     let input: &[serde_json::Value] = if toolless {
@@ -500,9 +558,7 @@ async fn stream_once(
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
-    let mut calls: Vec<FuncCall> = Vec::new();
-    let mut reasoning_items: Vec<serde_json::Value> = Vec::new();
-    let mut new_id: Option<String> = None;
+    let mut turn = Turn::default();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading sse chunk")?;
@@ -510,15 +566,15 @@ async fn stream_once(
         while let Some(end) = find_event_boundary(&buf) {
             let event_bytes = buf.drain(..end.end).collect::<Vec<u8>>();
             let event = &event_bytes[..end.body_len];
-            handle_event(event, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
+            handle_event(event, tx, &mut turn)?;
         }
     }
     if !buf.is_empty() {
-        handle_event(&buf, tx, &mut calls, &mut reasoning_items, &mut new_id)?;
+        handle_event(&buf, tx, &mut turn)?;
     }
 
-    let new_id = new_id.context("no response.created seen")?;
-    Ok((calls, new_id, reasoning_items))
+    let new_id = turn.new_id.context("no response.created seen")?;
+    Ok((turn.calls, new_id, turn.carry))
 }
 
 fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
@@ -582,10 +638,14 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
 fn handle_event(
     bytes: &[u8],
     tx: &UnboundedSender<StreamEvent>,
-    calls: &mut Vec<FuncCall>,
-    reasoning: &mut Vec<serde_json::Value>,
-    new_id: &mut Option<String>,
+    turn: &mut Turn,
 ) -> Result<()> {
+    let Turn {
+        calls,
+        carry,
+        new_id,
+        saw_text,
+    } = turn;
     let text = std::str::from_utf8(bytes).context("non-utf8 sse event")?;
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
@@ -635,6 +695,20 @@ fn handle_event(
                     message: msg.to_string(),
                 });
             }
+            "error" => {
+                let msg = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .or_else(|| {
+                        v.get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                    })
+                    .unwrap_or("stream error");
+                let _ = tx.send(StreamEvent::Error {
+                    message: msg.to_string(),
+                });
+            }
             "response.incomplete" => {
                 let reason = v
                     .get("response")
@@ -658,6 +732,26 @@ fn handle_event(
                 }
             }
             "response.output_text.delta" => {
+                *saw_text = true;
+                if let Some(d) = v.get("delta").and_then(|d| d.as_str())
+                    && !d.is_empty()
+                {
+                    let _ = tx.send(StreamEvent::Delta {
+                        text: d.to_string(),
+                    });
+                }
+            }
+            "response.output_text.done" => {
+                if !*saw_text
+                    && let Some(t) = v.get("text").and_then(|t| t.as_str())
+                    && !t.is_empty()
+                {
+                    let _ = tx.send(StreamEvent::Delta {
+                        text: t.to_string(),
+                    });
+                }
+            }
+            "response.refusal.delta" => {
                 if let Some(d) = v.get("delta").and_then(|d| d.as_str())
                     && !d.is_empty()
                 {
@@ -721,15 +815,15 @@ fn handle_event(
                         item_id,
                         name,
                         arguments,
+                        rendered: false,
                     });
                 } else {
-                    let name: Option<String> = match item_type {
-                        "file_search_call" => Some("file_search".into()),
-                        "web_search_call" => Some("web_search".into()),
-                        "code_interpreter_call" => Some("code_interpreter".into()),
-                        "image_generation_call" => Some("image_generation".into()),
-                        "computer_use_call" => Some("computer_use".into()),
-                        _ => None,
+                    let name: Option<String> = if item_type == "mcp_call" {
+                        item.and_then(|i| i.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.to_string())
+                    } else {
+                        hosted_tool_name(item_type).map(|n| n.to_string())
                     };
                     if name.is_some() {
                         let _ = tx.send(StreamEvent::ToolCall { name });
@@ -766,29 +860,120 @@ fn handle_event(
                     .and_then(|i| i.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                if item_type == "reasoning" {
-                    if let Some(item) = item {
-                        reasoning.push(item.clone());
+                match item_type {
+                    "reasoning" => {
+                        if let Some(item) = item {
+                            carry.push(item.clone());
+                        }
                     }
-                } else if item_type == "function_call" {
-                    let item_id = item
-                        .and_then(|i| i.get("id"))
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if let Some(arguments) =
-                        item.and_then(|i| i.get("arguments")).and_then(arg_string)
-                        && let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id)
-                        && (c.arguments.is_empty() || !arguments.is_empty())
-                    {
-                        c.arguments = arguments;
+                    "function_call" => {
+                        let item_id = item
+                            .and_then(|i| i.get("id"))
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(arguments) =
+                            item.and_then(|i| i.get("arguments")).and_then(arg_string)
+                            && let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id)
+                            && (c.arguments.is_empty() || !arguments.is_empty())
+                        {
+                            c.arguments = arguments;
+                        }
+                        if let Some(item) = item
+                            && let Some(output) = item.get("output").and_then(arg_string)
+                            && !output.is_empty()
+                            && !calls
+                                .iter()
+                                .any(|c| c.item_id == item_id && c.rendered)
+                        {
+                            let name = item
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("tool")
+                                .to_string();
+                            let call_id = item
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = item
+                                .get("arguments")
+                                .and_then(arg_string)
+                                .unwrap_or_default();
+                            if let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id) {
+                                c.rendered = true;
+                            }
+                            carry.push(item.clone());
+                            let _ = tx.send(StreamEvent::ToolResult {
+                                call_id,
+                                name,
+                                arguments,
+                                output,
+                            });
+                        }
+                    }
+                    "mcp_call" => {
+                        if let Some(item) = item {
+                            carry.push(item.clone());
+                            let name = item
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("mcp")
+                                .to_string();
+                            let call_id = item
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = item
+                                .get("arguments")
+                                .and_then(arg_string)
+                                .unwrap_or_default();
+                            if let Some(output) = item.get("output").and_then(arg_string)
+                                && !output.is_empty()
+                            {
+                                let _ = tx.send(StreamEvent::ToolResult {
+                                    call_id,
+                                    name,
+                                    arguments,
+                                    output,
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        if hosted_tool_name(item_type).is_some()
+                            && let Some(item) = item
+                        {
+                            carry.push(item.clone());
+                        }
                     }
                 }
             }
             "response.file_search_call.in_progress"
+            | "response.file_search_call.searching"
             | "response.web_search_call.in_progress"
-            | "response.code_interpreter_call.in_progress" => {
+            | "response.web_search_call.searching"
+            | "response.code_interpreter_call.in_progress"
+            | "response.code_interpreter_call.interpreting"
+            | "response.code_interpreter_call_code.delta"
+            | "response.image_generation_call.generating"
+            | "response.image_generation_call.partial_image"
+            | "response.mcp_list_tools.in_progress"
+            | "response.mcp_call.in_progress"
+            | "response.mcp_call.arguments.delta"
+            | "response.mcp_call.arguments.done" => {
                 let _ = tx.send(StreamEvent::ToolCall { name: None });
+            }
+            "response.mcp_call.failed" => {
+                let msg = v
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("mcp call failed");
+                let _ = tx.send(StreamEvent::Error {
+                    message: msg.to_string(),
+                });
             }
             _ => {}
         }
@@ -947,15 +1132,11 @@ mod tests {
     #[test]
     fn completed_event_emits_usage() {
         let (tx, mut rx) = channel();
-        let mut calls = Vec::new();
-        let mut reasoning = Vec::new();
-        let mut id = None;
+        let mut turn = Turn::default();
         handle_event(
             b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":345,\"output_tokens\":69,\"total_tokens\":414}}}\n\n",
             &tx,
-            &mut calls,
-            &mut reasoning,
-            &mut id,
+            &mut turn,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -971,15 +1152,11 @@ mod tests {
     #[test]
     fn failed_and_incomplete_become_errors() {
         let (tx, mut rx) = channel();
-        let mut calls = Vec::new();
-        let mut reasoning = Vec::new();
-        let mut id = None;
+        let mut turn = Turn::default();
         handle_event(
             b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n",
             &tx,
-            &mut calls,
-            &mut reasoning,
-            &mut id,
+            &mut turn,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -988,9 +1165,7 @@ mod tests {
         handle_event(
             b"data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
             &tx,
-            &mut calls,
-            &mut reasoning,
-            &mut id,
+            &mut turn,
         )
         .unwrap();
         let ev = rx.try_recv().unwrap();
@@ -1002,21 +1177,19 @@ mod tests {
     #[test]
     fn arguments_done_event_fills_empty_args() {
         let (tx, _rx) = channel();
-        let mut calls = Vec::new();
-        let mut reasoning = Vec::new();
-        let mut id = None;
+        let mut turn = Turn::default();
         handle_event(
             b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"\"}}\n\n",
-            &tx, &mut calls, &mut reasoning, &mut id,
+            &tx, &mut turn,
         )
         .unwrap();
         handle_event(
             b"data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
-            &tx, &mut calls, &mut reasoning, &mut id,
+            &tx, &mut turn,
         )
         .unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+        assert_eq!(turn.calls.len(), 1);
+        assert_eq!(turn.calls[0].arguments, "{\"command\":\"ls\"}");
     }
 
     #[test]
@@ -1030,47 +1203,152 @@ mod tests {
     #[test]
     fn reasoning_done_item_is_captured() {
         let (tx, _rx) = channel();
-        let mut calls = Vec::new();
-        let mut reasoning = Vec::new();
-        let mut id = None;
+        let mut turn = Turn::default();
         handle_event(
             b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
             &tx,
-            &mut calls,
-            &mut reasoning,
-            &mut id,
+            &mut turn,
         )
         .unwrap();
-        assert_eq!(reasoning.len(), 1);
-        assert_eq!(reasoning[0]["id"], "rs_1");
+        assert_eq!(turn.carry.len(), 1);
+        assert_eq!(turn.carry[0]["id"], "rs_1");
     }
 
     #[test]
     fn summary_deltas_are_brain_and_raw_reasoning_is_heart() {
         let (tx, mut rx) = channel();
-        let mut calls = Vec::new();
-        let mut reasoning = Vec::new();
-        let mut id = None;
+        let mut turn = Turn::default();
 
         handle_event(
             b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"weighing it\"}\n\n",
             &tx,
-            &mut calls,
-            &mut reasoning,
-            &mut id,
+            &mut turn,
         )
         .unwrap();
         handle_event(
             b"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"so step one\"}\n\n",
             &tx,
-            &mut calls,
-            &mut reasoning,
-            &mut id,
+            &mut turn,
         )
         .unwrap();
 
         assert!(matches!(rx.try_recv(), Ok(StreamEvent::Brain { text }) if text == "weighing it"));
         assert!(matches!(rx.try_recv(), Ok(StreamEvent::Heart { text }) if text == "so step one"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mcp_call_surfaces_tool_and_result_and_carries() {
+        let (tx, mut rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"server_label\":\"hum\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"status\":\"in_progress\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::ToolCall { name }) if name.as_deref() == Some("zsh")));
+        assert!(turn.calls.is_empty(), "mcp_call is not a local function call");
+
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"server_label\":\"hum\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"status\":\"completed\",\"output\":\"README.md\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::ToolResult { call_id, name, arguments, output } if call_id == "mcp_1" && name == "zsh" && arguments == "{\"command\":\"ls\"}" && output == "README.md"));
+        assert_eq!(turn.carry.len(), 1, "done mcp_call item is carried for store:false continuity");
+        assert_eq!(turn.carry[0]["type"], "mcp_call");
+    }
+
+    #[test]
+    fn server_executed_function_call_surfaces_result_and_carries_once() {
+        let (tx, mut rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::ToolCall { name }) if name.as_deref() == Some("zsh")));
+        assert_eq!(turn.calls.len(), 1);
+
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::ToolResult { call_id, name, arguments, output } if call_id == "fc_1" && name == "zsh" && arguments == "{\"command\":\"ls\"}" && output == "README.md"));
+        assert_eq!(turn.carry.len(), 1, "server-executed function_call is carried for continuity");
+        assert_eq!(turn.carry[0]["type"], "function_call");
+        assert!(turn.calls[0].rendered, "server-executed call must not run again locally");
+
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert!(rx.try_recv().is_err(), "already-rendered result must not surface twice");
+    }
+
+    #[test]
+    fn hosted_call_items_carry_forward_but_never_become_local_calls() {
+        let (tx, _rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"name\":\"web_search\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"mcp_list_tools\",\"id\":\"ml_1\",\"server_label\":\"hum\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert_eq!(turn.carry.len(), 2);
+        assert!(turn.calls.is_empty());
+    }
+
+    #[test]
+    fn refusal_and_done_without_deltas_surface_as_text() {
+        let (tx, mut rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.refusal.delta\",\"delta\":\"i decline\"}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Delta { text }) if text == "i decline"));
+
+        handle_event(
+            b"data: {\"type\":\"response.output_text.done\",\"item_id\":\"t_1\",\"text\":\"fallback text\"}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Delta { text }) if text == "fallback text"));
+
+        handle_event(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"streamed\"}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.output_text.done\",\"item_id\":\"t_2\",\"text\":\"streamed\"}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Delta { text }) if text == "streamed"));
+        assert!(rx.try_recv().is_err(), "done must not double-emit text after deltas");
     }
 }

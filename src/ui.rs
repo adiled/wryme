@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -27,24 +27,32 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let (input_chunk, messages_chunk, status_chunk) = (chunks[0], chunks[1], chunks[2]);
 
     let prompt = "› ";
+    let state = if app.in_flight {
+        if app.voice_is_active() {
+            "streaming + speaking… (Esc to quiet)"
+        } else {
+            "streaming… (Esc to interrupt)"
+        }
+    } else if app.voice_is_active() {
+        "speaking… (Esc to quiet)"
+    } else {
+        ""
+    };
+    let label = if state.is_empty() {
+        " wme. ".to_string()
+    } else {
+        format!(" wme. {state} ")
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(if app.in_flight {
             Style::default().fg(Color::DarkGray)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(app.accent)
         })
-        .title(if app.in_flight {
-            if app.voice_is_active() {
-                " streaming + speaking… (Esc to quiet) "
-            } else {
-                " streaming… (Esc to interrupt) "
-            }
-        } else if app.voice_is_active() {
-            " speaking… (Esc to quiet) "
-        } else {
-            " write. Enter to send, Ctrl-C to quit "
-        });
+        .title(label)
+        .title(Line::from(" ^S Settings ^C Exit ").right_aligned());
 
     let inner = ratatui::layout::Rect {
         x: input_chunk.x + 1,
@@ -62,7 +70,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             prompt,
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(app.accent),
         ))),
         ratatui::layout::Rect {
             x: inner.x,
@@ -94,7 +102,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let mut lines: Vec<Line> = Vec::new();
     let msg_width = messages_chunk.width;
     for msg in app.messages.iter().rev() {
-        push_message(&mut lines, msg, msg_width);
+        push_message(&mut lines, msg, msg_width, app.accent);
         lines.push(Line::from(""));
     }
     if lines.is_empty() {
@@ -145,18 +153,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     } else if dirty {
         Color::Magenta
     } else {
-        Color::Cyan
+        app.accent
     };
-    let heart_score = app
-        .reservoir
-        .lock()
-        .ok()
-        .map(|r| r.static_figure())
-        .unwrap_or(0);
-    let ht = (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
-    let heart_color = hue_lit(120.0 * (1.0 - ht));
     let mut pieces = vec![
-        Span::styled("wryme", Style::default().fg(Color::Cyan)),
+        Span::styled("wryme", Style::default().fg(app.accent)),
         Span::raw(dot),
         Span::styled(
             format!("station: {}", station_label),
@@ -169,12 +169,28 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             format!("via {}", app.active_shop.name),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(" \u{2764}\u{FE0E} ", heart_color),
-        Span::raw(format!("{} msg", app.messages.len())),
     ];
+    #[cfg(feature = "reservoir")]
+    {
+        let heart_score = app
+            .reservoir
+            .lock()
+            .ok()
+            .map(|r| r.static_figure())
+            .unwrap_or(0);
+        let ht =
+            (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
+        let heart_color = hue_lit(120.0 * (1.0 - ht));
+        pieces.push(Span::styled(" \u{2764}\u{FE0E} ", heart_color));
+    }
+    #[cfg(not(feature = "reservoir"))]
+    {
+        pieces.push(Span::raw(dot));
+    }
+    pieces.push(Span::raw(format!("{} msg", app.messages.len())));
     if app.voice_on {
         pieces.push(Span::raw(dot));
-        pieces.push(Span::styled("voice", Style::default().fg(Color::Cyan)));
+        pieces.push(Span::styled("voice", Style::default().fg(app.accent)));
     }
     if !app.messages.is_empty() {
         pieces.push(Span::raw(dot));
@@ -183,7 +199,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
                 pieces.push(Span::styled(
                     format!("page {}/{}", page + 1, n_pages),
                     Style::default().fg(if n_pages > 1 {
-                        Color::Cyan
+                        app.accent
                     } else {
                         Color::DarkGray
                     }),
@@ -196,7 +212,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
                     } else {
                         format!("scroll +{}", scroll_offset)
                     },
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(app.accent),
                 ));
             }
         }
@@ -276,6 +292,7 @@ fn is_error_status(s: &str) -> bool {
         || s.starts_with("update failed")
 }
 
+#[cfg(feature = "reservoir")]
 fn hue_lit(hue: f64) -> Color {
     const LIGHTNESS: f64 = 0.45;
     const SATURATION: f64 = 0.85;
@@ -323,6 +340,7 @@ fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) 
     }
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Red))
         .title(Span::styled(" error ", Style::default().fg(Color::Red)));
     let text = Text::from(
@@ -407,7 +425,12 @@ fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, text: &str, cursor:
     }
 }
 
-fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
+fn push_message(
+    out: &mut Vec<Line<'static>>,
+    msg: &Message,
+    area_width: u16,
+    accent: Color,
+) {
     let (role_color, role_text) = match msg.role {
         Role::User => (Color::Green, "you"),
         Role::Assistant => (Color::Magenta, "assistant"),
@@ -452,7 +475,7 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
                 Span::styled(
                     name.clone(),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(accent)
                         .add_modifier(Modifier::BOLD),
                 )
             })
@@ -611,7 +634,7 @@ mod tests {
 
     fn rendered(msg: &Message) -> Vec<String> {
         let mut out = Vec::new();
-        push_message(&mut out, msg, 80);
+        push_message(&mut out, msg, 80, Color::Cyan);
         out.iter().map(|l| l.to_string()).collect()
     }
 

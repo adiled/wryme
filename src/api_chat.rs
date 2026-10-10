@@ -68,10 +68,10 @@ pub(crate) async fn stream(
         {
             Ok(v) => v,
             Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
-                if crate::api::is_toolless(&station.model) {
+                if crate::api::is_toolless(&shop.name, &station.model) {
                     return Err(e);
                 }
-                crate::api::mark_toolless(&station.model);
+                crate::api::mark_toolless(&shop.name, &station.model);
                 tracing::warn!(model=%station.model, "tools unsupported, retrying without tools and marking toolless");
                 let _ = tx.send(StreamEvent::Error {
                     message: "tools unsupported by model, retrying without tools".into(),
@@ -123,6 +123,10 @@ pub(crate) async fn stream(
             return Ok(());
         }
         depth += 1;
+        if !crate::api::client_runs_tools() {
+            tracing::info!(shop = %shop.name, "provider runs tools server-side, client does not execute");
+            return Ok(());
+        }
 
         let mut tcs = Vec::new();
         for c in &calls {
@@ -139,6 +143,10 @@ pub(crate) async fn stream(
         }));
 
         for c in &calls {
+            if crate::api::owns_tool(&shop.name, &station.model, &c.name) {
+                tracing::info!(shop = %shop.name, tool = %c.name, "shop executes tool server-side, client does not run it");
+                continue;
+            }
             let output = match tools::execute(&engine, &c.name, &c.arguments).await {
                 Some(o) => o,
                 None => format!("unknown tool '{}'", c.name),
@@ -191,14 +199,28 @@ async fn stream_once(
         include_usage: bool,
     }
 
-    let model_toolless = crate::api::is_toolless(&station.model);
+    let model_toolless = crate::api::is_toolless(&shop.name, &station.model);
     let (offer_tools, filter_transcript) = tool_policy(model_toolless, tools_off);
-    let tools = if offer_tools {
-        tools::tool_defs_chat()
-    } else {
-        Vec::new()
-    };
-    let tool_choice = if offer_tools { "auto" } else { "none" };
+    let mut tools = Vec::new();
+    if offer_tools {
+        tools.extend(
+            crate::api::tools_for(&shop.name, &station.model)
+                .iter()
+                .map(|t| t.def.clone()),
+        );
+        if crate::api::client_runs_tools() {
+            tools.extend(
+                tools::tool_defs_chat().into_iter().filter(|d| {
+                    !crate::api::owns_tool(
+                        &shop.name,
+                        &station.model,
+                        d["function"]["name"].as_str().unwrap_or_default(),
+                    )
+                }),
+            );
+        }
+    }
+    let tool_choice = if tools.is_empty() { "none" } else { "auto" };
     let filtered_conv: Vec<serde_json::Value>;
     let conv: &[serde_json::Value] = if filter_transcript {
         filtered_conv = conv
@@ -403,7 +425,7 @@ fn handle_event(
                         assistant_content.push_str(&refusal);
                         let _ = tx.send(StreamEvent::Delta { text: refusal });
                     }
-                    if let Some(reasoning) = delta.reasoning_content
+                    if let Some(reasoning) = delta.reasoning_content.or(delta.reasoning)
                         && !reasoning.is_empty()
                     {
                         let _ = tx.send(StreamEvent::Heart { text: reasoning });
@@ -481,6 +503,8 @@ struct Delta {
     refusal: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
     #[serde(default)]

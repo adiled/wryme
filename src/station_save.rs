@@ -1,32 +1,17 @@
 use anyhow::{Context, Result, anyhow};
-use std::path::PathBuf;
 
 use crate::station::Station;
 
-pub fn append_to_file(path: &PathBuf, station: &Station) -> Result<()> {
-    use std::io::Write;
-    let block = serialize_block(station);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("opening {} for append", path.display()))?;
-    f.write_all(block.as_bytes())
-        .with_context(|| format!("writing to {}", path.display()))?;
-    Ok(())
+pub fn save_new(station: &Station) -> Result<()> {
+    let mut text = crate::config::stations_text().unwrap_or_default();
+    text.push_str(&serialize_block(station));
+    crate::config::write_stations(&text)
 }
 
-pub fn update_in_file(path: &PathBuf, station: &Station) -> Result<()> {
-    let original =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let updated = replace_station_block(&original, station)
-        .with_context(|| format!("no station '{}' in {}", station.name, path.display()))?;
-    std::fs::write(path, updated).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+pub fn update(station: &Station) -> Result<()> {
+    let original = crate::config::stations_text().context("no stations.toml")?;
+    let updated = replace_station_block(&original, station)?;
+    crate::config::write_stations(&updated)
 }
 
 fn replace_station_block(content: &str, station: &Station) -> Result<String> {

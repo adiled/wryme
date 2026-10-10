@@ -72,6 +72,7 @@ pub struct App {
     pub voice_muted: bool,
     pub voice_speaker: Option<crate::voice::Speaker>,
     pub voice_buffer: String,
+    pub accent: ratatui::style::Color,
     pub shops: Vec<Shop>,
     pub stations: Vec<Station>,
     pub active_station: Station,
@@ -150,6 +151,7 @@ impl App {
             voice_muted: false,
             voice_speaker: None,
             voice_buffer: String::new(),
+            accent: crate::config::accent_pref(),
             shops,
             stations,
             active_station,
@@ -176,6 +178,24 @@ impl App {
         saved.model != self.active_station.model
             || saved.dials != self.active_station.dials
             || saved.voice != self.active_station.voice
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconfigure(
+        &mut self,
+        shops: Vec<Shop>,
+        stations: Vec<Station>,
+        active_station: Station,
+        active_shop: Shop,
+        active_origin: Option<String>,
+    ) {
+        self.shops = shops;
+        self.stations = stations;
+        self.active_station = active_station;
+        self.active_shop = active_shop;
+        self.active_origin = active_origin;
+        self.accent = crate::config::accent_pref();
+        self.last_response_id = None;
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
@@ -299,6 +319,7 @@ impl App {
         };
         m.content.push_str(delta);
         m.phase = Phase::Writing;
+        m.current_tool = None;
     }
 
     fn last_stream_was_thinking(&self) -> bool {
@@ -364,6 +385,7 @@ impl App {
                 arguments,
                 result,
             });
+            m.current_tool = None;
         }
     }
 
