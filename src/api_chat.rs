@@ -51,8 +51,21 @@ pub(crate) async fn stream(
     }
 
     let mut bad_rounds: u32 = 0;
+    let mut depth: u32 = 0;
+    let mut nudged = false;
+    let cap = station.dials.tinker_depth.depth_n();
     loop {
-        let (calls, assistant_content) = match stream_once(client, shop, station, &conv, tx).await {
+        if cap.is_some_and(|c| depth as usize >= c) && !nudged {
+            nudged = true;
+            tracing::warn!(depth, "tinker depth reached, forcing final answer");
+            conv.push(serde_json::json!({
+                "role": "system",
+                "content": crate::api::FINAL_ANSWER_NUDGE,
+            }));
+        }
+        let (calls, assistant_content) = match stream_once(client, shop, station, &conv, nudged, tx)
+            .await
+        {
             Ok(v) => v,
             Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
                 if crate::api::is_toolless(&station.model) {
@@ -63,7 +76,7 @@ pub(crate) async fn stream(
                 let _ = tx.send(StreamEvent::Error {
                     message: "tools unsupported by model, retrying without tools".into(),
                 });
-                match stream_once(client, shop, station, &conv, tx).await {
+                match stream_once(client, shop, station, &conv, nudged, tx).await {
                     Ok(v) => v,
                     Err(e2) => return Err(e2),
                 }
@@ -105,6 +118,11 @@ pub(crate) async fn stream(
         }
         bad_rounds = 0;
         let calls = paired;
+        if nudged {
+            tracing::warn!("model kept requesting tools past tinker depth, ending turn");
+            return Ok(());
+        }
+        depth += 1;
 
         let mut tcs = Vec::new();
         for c in &calls {
@@ -140,11 +158,18 @@ pub(crate) async fn stream(
     }
 }
 
+fn tool_policy(model_toolless: bool, tools_off: bool) -> (bool, bool) {
+    let offer_tools = !model_toolless && !tools_off;
+    let filter_transcript = model_toolless;
+    (offer_tools, filter_transcript)
+}
+
 async fn stream_once(
     client: &Client,
     shop: &Shop,
     station: &Station,
     conv: &[serde_json::Value],
+    tools_off: bool,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<(Vec<ChatToolCall>, String)> {
     #[derive(Serialize)]
@@ -166,15 +191,16 @@ async fn stream_once(
         include_usage: bool,
     }
 
-    let toolless = crate::api::is_toolless(&station.model);
-    let tools = if toolless {
-        Vec::new()
-    } else {
+    let model_toolless = crate::api::is_toolless(&station.model);
+    let (offer_tools, filter_transcript) = tool_policy(model_toolless, tools_off);
+    let tools = if offer_tools {
         tools::tool_defs_chat()
+    } else {
+        Vec::new()
     };
-    let tool_choice = if toolless { "none" } else { "auto" };
+    let tool_choice = if offer_tools { "auto" } else { "none" };
     let filtered_conv: Vec<serde_json::Value>;
-    let conv: &[serde_json::Value] = if toolless {
+    let conv: &[serde_json::Value] = if filter_transcript {
         filtered_conv = conv
             .iter()
             .filter(|v| v.get("tool_calls").is_none() && v.get("tool_call_id").is_none())
@@ -638,5 +664,43 @@ mod tests {
         )
         .unwrap();
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn tools_off_withholds_tools_but_keeps_transcript() {
+        let (offer_tools, filter_transcript) = tool_policy(false, true);
+        assert!(!offer_tools, "final round must not offer tools");
+        assert!(
+            !filter_transcript,
+            "final round must keep the tool transcript so the model can still read what it gathered"
+        );
+    }
+
+    #[test]
+    fn toolless_model_still_filters_transcript() {
+        let (offer_tools, filter_transcript) = tool_policy(true, false);
+        assert!(!offer_tools);
+        assert!(filter_transcript);
+    }
+
+    #[test]
+    fn normal_round_offers_tools_and_keeps_transcript() {
+        let (offer_tools, filter_transcript) = tool_policy(false, false);
+        assert!(offer_tools);
+        assert!(!filter_transcript);
+    }
+
+    #[test]
+    fn tinker_depth_all_means_unbounded() {
+        use crate::station::TinkerVal;
+        assert_eq!(TinkerVal::All.depth_n(), None);
+        assert_eq!(TinkerVal::Count(8).depth_n(), Some(8));
+        assert_eq!(TinkerVal::Count(0).depth_n(), Some(0));
+    }
+
+    #[test]
+    fn nudge_tells_the_model_to_stop_calling_tools() {
+        let n = crate::api::FINAL_ANSWER_NUDGE;
+        assert!(n.to_lowercase().contains("do not call"));
     }
 }

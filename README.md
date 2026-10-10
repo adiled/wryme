@@ -135,7 +135,8 @@ The dials, all optional:
   models that hand it over, prints under **heart**.
 - **`tinker_keep`**: how many tool pairs survive in replay. `all` (default),
   a positive integer (`8`, `3`), `0` (keep none), or a percent (`50%`). Keeps the last N pairs, pair stays atomic.
-- **`tinker_clip`**: how much of each kept tool result body survives. `all` (default, verbatim), a positive integer chars (`500`, `1000`), `0` (empty body keeps `call_id`), or a percent (`50%` of original).
+- **`tinker_clip`**: how much of each kept tool result body survives. `all` (default, verbatim), a positive integer chars (`500`, `1000`), `0` (empty body keeps `call_id`), or a percent (`50%` of original). Applies to replayed history, not the turn in progress.
+- **`tinker_depth`**: how many rounds of tool use one turn may take before wryme forces an answer. `all` (default, unbounded), or a positive integer (`8`). At the limit the agent gets one more request with tools withheld and a nudge to write up what it has. Bounds latency and context growth; a tool-hungry model otherwise re-sends the whole conversation every round, getting slower each time with nothing printed.
 - **`voice`**: speech voice for read-aloud replies. Any `say` voice on macOS
   (`Tara` at 260wpm when unset), any espeak voice on Linux. Needs `say`/`spd-say`
   on PATH; silently off otherwise.

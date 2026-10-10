@@ -135,7 +135,19 @@ async fn stream_warm(
     }
 
     let mut bad_rounds: u32 = 0;
+    let mut depth: u32 = 0;
+    let mut nudged = false;
+    let cap = station.dials.tinker_depth.depth_n();
     loop {
+        if cap.is_some_and(|c| depth as usize >= c) && !nudged {
+            nudged = true;
+            tracing::warn!(depth, "tinker depth reached, forcing final answer");
+            input.push(serde_json::json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": crate::api::FINAL_ANSWER_NUDGE }],
+            }));
+        }
         let (calls, new_id, _) = stream_once(
             client,
             shop,
@@ -145,6 +157,7 @@ async fn stream_warm(
             true,
             instructions,
             tx,
+            nudged,
         )
         .await?;
         let (paired, broken): (Vec<_>, Vec<_>) = calls
@@ -180,6 +193,11 @@ async fn stream_warm(
         }
         bad_rounds = 0;
         let calls = paired;
+        if nudged {
+            tracing::warn!("model kept requesting tools past tinker depth, ending turn");
+            return Ok(());
+        }
+        depth += 1;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -240,9 +258,31 @@ async fn stream_full(
     }
 
     let mut bad_rounds: u32 = 0;
+    let mut depth: u32 = 0;
+    let mut nudged = false;
+    let cap = station.dials.tinker_depth.depth_n();
     loop {
-        let (calls, _new_id, reasoning_items) =
-            stream_once(client, shop, station, &input, None, false, instructions, tx).await?;
+        if cap.is_some_and(|c| depth as usize >= c) && !nudged {
+            nudged = true;
+            tracing::warn!(depth, "tinker depth reached, forcing final answer");
+            input.push(serde_json::json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": crate::api::FINAL_ANSWER_NUDGE }],
+            }));
+        }
+        let (calls, _new_id, reasoning_items) = stream_once(
+            client,
+            shop,
+            station,
+            &input,
+            None,
+            false,
+            instructions,
+            tx,
+            nudged,
+        )
+        .await?;
         let (paired, broken): (Vec<_>, Vec<_>) = calls
             .into_iter()
             .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
@@ -276,6 +316,11 @@ async fn stream_full(
         }
         bad_rounds = 0;
         let calls = paired;
+        if nudged {
+            tracing::warn!("model kept requesting tools past tinker depth, ending turn");
+            return Ok(());
+        }
+        depth += 1;
         for call in calls {
             let output = match tools::execute(&engine, &call.name, &call.arguments).await {
                 Some(o) => o,
@@ -349,6 +394,7 @@ async fn stream_once(
     store: bool,
     instructions: Option<&str>,
     tx: &UnboundedSender<StreamEvent>,
+    tools_off: bool,
 ) -> Result<(Vec<FuncCall>, String, Vec<serde_json::Value>)> {
     #[derive(Serialize)]
     struct ResponsesReq<'a> {
@@ -424,7 +470,7 @@ async fn stream_once(
         temperature: station.dials.boldness,
         reasoning,
         include,
-        max_tool_calls: MAX_TOOL_CALLS,
+        max_tool_calls: if tools_off { 0 } else { MAX_TOOL_CALLS },
         truncation: "auto",
         tools: &tools,
     };

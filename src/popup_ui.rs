@@ -59,7 +59,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     let style = focus_style(selected);
                     lines.push(Line::from(vec![
                         Span::styled(marker, style),
-                        Span::styled("model       ", style),
+                        Span::styled("model        ", style),
                         Span::styled(app.active_station.model.clone(), style),
                     ]));
                 }
@@ -67,7 +67,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     let style = focus_style(selected);
                     if let Some(meta) = popup::dial_metas().get(*idx) {
                         let label = (meta.label)(&app.active_station.dials);
-                        let name = format!("{:<12}", meta.name);
+                        let name = format!("{:<13}", meta.name);
                         lines.push(Line::from(vec![
                             Span::styled(marker, style),
                             Span::styled(name, style),
