@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           REF="${GITHUB_REF_NAME}"
-          PREV="$(gh release list --limit 30 --json tagName --jq '.tagName[]' | sed "/^${REF}$/d" | head -1)"
+          PREV="$(gh release list --limit 30 --json tagName --jq '.[].tagName' | sed "/^${REF}$/d" | head -1)"
           CHANGED="1"
           if [[ -n "${PREV:-}" ]]; then
             if gh release view "$PREV" --json assets --jq '.assets[]?.name' 2>/dev/null | grep -qx "${{ matrix.artifact }}"; then
