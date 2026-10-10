@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::App;
+use crate::app::{App, ViewMode};
 use crate::popup::{self, Tab};
 
 const MODAL_WIDTH_RATIO: f32 = 0.60;
@@ -21,7 +21,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if app.popup.tab == Tab::Help {
+    if app.popup.tab == Tab::Shops {
+        lines = popup::shops_lines(app);
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  read-only · edit ~/.config/wryme/shops.toml · Tab switch · Esc / Ctrl-S close",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else if app.popup.tab == Tab::Help {
         for (key, what) in popup::help_rows() {
             if key.is_empty() {
                 lines.push(Line::from(""));
@@ -102,6 +109,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                         Span::styled("save active as new…", style),
                     ]));
                 }
+                popup::Row::PrefVoice => {
+                    let style = focus_style(selected);
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, style),
+                        Span::styled("voice", style),
+                        Span::styled(
+                            format!("  {}", if app.voice_on { "on" } else { "off" }),
+                            style,
+                        ),
+                    ]));
+                }
+                popup::Row::PrefView => {
+                    let style = focus_style(selected);
+                    let val = match app.view_mode {
+                        ViewMode::Page => "page",
+                        ViewMode::Scroll => "scroll",
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, style),
+                        Span::styled("view mode", style),
+                        Span::styled(format!("  {val}"), style),
+                    ]));
+                }
             }
         }
 
@@ -132,7 +162,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         } else if app.popup.mode == popup::Mode::DialEdit {
             "  Enter save  ·  Esc cancel  ·  all | 0 | 12 | 50%"
         } else {
-            "  ↑↓ select  ·  ←→ adjust  ·  Enter edit number  ·  Tab: Help  ·  F1 Help  ·  PgUp/PgDn scroll  ·  Esc / Ctrl-S close"
+            "  ↑↓ select  ·  ←→ / Enter toggle or adjust  ·  Tab: Shops / Pref / Help  ·  F1 Help  ·  PgUp/PgDn scroll  ·  Esc / Ctrl-S close"
         };
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -170,12 +200,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         " Station"
     };
+    let shops_tab = if app.popup.tab == Tab::Shops {
+        "▶ Shops"
+    } else {
+        " Shops"
+    };
+    let pref_tab = if app.popup.tab == Tab::Pref {
+        "▶ Pref"
+    } else {
+        " Pref"
+    };
     let help_tab = if app.popup.tab == Tab::Help {
         "▶ Help"
     } else {
         " Help"
     };
-    let title = format!("{}  {}", station_tab, help_tab);
+    let title = format!(
+        "{} {} {} {}",
+        station_tab, shops_tab, pref_tab, help_tab
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)

@@ -1,7 +1,9 @@
 use crate::app::App;
 use crate::input::Input;
-use crate::shop::Shop;
+use crate::shop::{Protocol, Shop, WindowMode};
 use crate::station::{Brainy, Dials, Patience, Station};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 #[derive(Debug, Default)]
 pub struct Popup {
@@ -18,6 +20,8 @@ pub struct Popup {
 pub enum Tab {
     #[default]
     Station,
+    Shops,
+    Pref,
     Help,
 }
 
@@ -38,6 +42,8 @@ pub enum Row {
     SavedStation(usize),
     UpdateAction,
     SaveAsAction,
+    PrefVoice,
+    PrefView,
     Blank,
 }
 
@@ -83,6 +89,22 @@ pub fn dial_metas() -> Vec<DialMeta> {
 }
 
 pub fn rows(app: &App) -> Vec<Row> {
+    match app.popup.tab {
+        Tab::Station => station_rows(app),
+        Tab::Pref => pref_rows(),
+        Tab::Shops | Tab::Help => vec![],
+    }
+}
+
+fn pref_rows() -> Vec<Row> {
+    vec![
+        Row::SectionHeader("preferences"),
+        Row::PrefVoice,
+        Row::PrefView,
+    ]
+}
+
+fn station_rows(app: &App) -> Vec<Row> {
     let mut out = vec![Row::SectionHeader("active"), Row::Model];
     for i in 0..dial_metas().len() {
         out.push(Row::Dial(i));
@@ -164,6 +186,8 @@ pub fn adjust(app: &mut App, delta: i32) {
                 (meta.cycle)(&mut app.active_station.dials, delta);
             }
         }
+        Some(Row::PrefVoice) => toggle_voice(app),
+        Some(Row::PrefView) => crate::keys::toggle_view_mode(app),
         _ => {}
     }
 }
@@ -171,26 +195,46 @@ pub fn adjust(app: &mut App, delta: i32) {
 pub fn activate(app: &mut App) {
     let r = rows(app);
     let row = r.get(app.popup.selected).cloned();
+    activate_row(app, row.unwrap_or(Row::Blank));
+}
+
+fn activate_row(app: &mut App, row: Row) {
     match row {
-        Some(Row::SavedStation(idx)) => {
+        Row::SavedStation(idx) => {
             if let Some(st) = app.stations.get(idx).cloned() {
                 load_station(app, st);
             }
         }
-        Some(Row::UpdateAction) => {
+        Row::UpdateAction => {
             commit_update(app);
         }
-        Some(Row::SaveAsAction) => {
+        Row::SaveAsAction => {
             app.popup.mode = Mode::SaveAs;
             app.popup.name_input = Input::new();
         }
-        Some(Row::Dial(idx)) => {
+        Row::Dial(idx) => {
             enter_dial_edit(app, idx);
         }
-        Some(Row::Model) => {
+        Row::Model => {
             adjust(app, 1);
         }
+        Row::PrefVoice => toggle_voice(app),
+        Row::PrefView => crate::keys::toggle_view_mode(app),
         _ => {}
+    }
+}
+
+pub fn toggle_voice(app: &mut App) {
+    if app.voice_on {
+        app.voice_on = false;
+        app.shutdown_voice();
+        app.note("voice off");
+    } else if crate::voice::available() {
+        app.voice_on = true;
+        app.unmute_voice();
+        app.note("voice on");
+    } else {
+        app.note("voice unavailable: no say/spd-say on PATH");
     }
 }
 
@@ -506,7 +550,9 @@ pub fn cycle_tinker_depth_dials(dials: &mut Dials, delta: i32) {
 
 pub fn switch_tab(app: &mut App) {
     app.popup.tab = match app.popup.tab {
-        Tab::Station => Tab::Help,
+        Tab::Station => Tab::Shops,
+        Tab::Shops => Tab::Pref,
+        Tab::Pref => Tab::Help,
         Tab::Help => Tab::Station,
     };
     app.popup.mode = Mode::Browse;
@@ -554,7 +600,7 @@ pub fn help_rows() -> Vec<(String, String)> {
         ("Ctrl-K".into(), "kill to end of line".into()),
         ("Ctrl-W".into(), "kill previous word".into()),
         ("Ctrl-S".into(), "open / close this popup".into()),
-        ("Tab / F1".into(), "switch Station / Help tab".into()),
+        ("Tab / F1".into(), "switch Station / Shops / Pref / Help tab".into()),
         ("Mouse wheel".into(), "scroll in page / scroll view".into()),
         ("".into(), "".into()),
         ("In the Station tab:".into(), "".into()),
@@ -568,4 +614,73 @@ pub fn help_rows() -> Vec<(String, String)> {
         ("Esc / Tab".into(), "leave Help back to Station".into()),
         ("F1".into(), "open Help tab from anywhere".into()),
     ]
+}
+
+pub fn shops_lines(app: &App) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for (i, s) in app.shops.iter().enumerate() {
+        let active = s.name == app.active_shop.name;
+        let tag = if active { "▶ " } else { "  " };
+        let name_style = if active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        out.push(Line::from(vec![
+            Span::styled(format!("{tag}{}", s.name), name_style),
+            Span::styled(
+                format!("   {}/{}", protocol_label(s.protocol), window_label(s.window)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        let url = if s.url.is_empty() {
+            "local (no network)".to_string()
+        } else {
+            s.url.clone()
+        };
+        out.push(Line::from(Span::styled(
+            format!("    url     {url}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+        out.push(Line::from(Span::styled(
+            format!("    models  {}", s.models.join(", ")),
+            Style::default().fg(Color::DarkGray),
+        )));
+        let key = if s.key.is_empty() {
+            "(none)"
+        } else {
+            "(set)"
+        };
+        out.push(Line::from(Span::styled(
+            format!("    key     {key}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+        if i + 1 < app.shops.len() {
+            out.push(Line::from(""));
+        }
+    }
+    if app.shops.is_empty() {
+        out.push(Line::from(Span::styled(
+            "  no shops configured",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    out
+}
+
+fn protocol_label(p: Protocol) -> &'static str {
+    match p {
+        Protocol::Demo => "demo",
+        Protocol::ChatCompletions => "chat",
+        Protocol::Responses => "responses",
+    }
+}
+
+fn window_label(w: WindowMode) -> &'static str {
+    match w {
+        WindowMode::Full => "full",
+        WindowMode::Warm => "warm",
+    }
 }

@@ -56,17 +56,7 @@ pub fn handle_key(
     }
 
     if ctrl && matches!(k.code, KeyCode::Char('v')) {
-        if app.voice_on {
-            app.voice_on = false;
-            app.shutdown_voice();
-            app.note("voice off");
-        } else if crate::voice::available() {
-            app.voice_on = true;
-            app.unmute_voice();
-            app.note("voice on");
-        } else {
-            app.note("voice unavailable: no say/spd-say on PATH");
-        }
+        crate::popup::toggle_voice(app);
         return;
     }
 
@@ -233,7 +223,7 @@ pub fn handle_mouse(m: MouseEvent, app: &mut App) {
     }
 }
 
-fn toggle_view_mode(app: &mut App) {
+pub(crate) fn toggle_view_mode(app: &mut App) {
     app.view_mode = match app.view_mode {
         ViewMode::Page => ViewMode::Scroll,
         ViewMode::Scroll => ViewMode::Page,
