@@ -283,6 +283,19 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         out
     }
 }
+pub(crate) fn unreachable(shop: &str, url: &str, err: &reqwest::Error) -> anyhow::Error {
+    if cfg!(target_arch = "wasm32") {
+        anyhow::anyhow!(
+            "couldn't reach {shop} ({url}): the browser blocked the request. likely CORS, so the server must allow this page's origin (Access-Control-Allow-Origin), or it's down / the URL is wrong"
+        )
+    } else {
+        let mut cause: &(dyn std::error::Error + 'static) = err;
+        while let Some(inner) = std::error::Error::source(cause) {
+            cause = inner;
+        }
+        anyhow::anyhow!("couldn't reach {shop} ({url}): {cause}")
+    }
+}
 pub fn image_data_url(path: &str) -> Option<(String, String)> {
     let mime = match std::path::Path::new(path)
         .extension()

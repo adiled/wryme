@@ -196,7 +196,10 @@ async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> 
     if !shop.key.is_empty() {
         req = req.bearer_auth(&shop.key);
     }
-    let resp = req.send().await.with_context(|| format!("GET {}", url))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| crate::api::unreachable(&shop.name, &url, &e))?;
     if !resp.status().is_success() {
         return Err(anyhow!("upstream {}", resp.status()));
     }

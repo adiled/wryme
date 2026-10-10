@@ -264,7 +264,10 @@ async fn stream_once(
         body = %serde_json::to_string(&body).unwrap_or_default(),
         "chat request"
     );
-    let resp = req.send().await.context("posting chat/completions")?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| crate::api::unreachable(&shop.name, &url, &e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
