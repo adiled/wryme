@@ -511,11 +511,7 @@ fn push_message(out: &mut Vec<Line<'static>>, msg: &Message, area_width: u16) {
     if has_reply {
         match msg.role {
             Role::Assistant => {
-                out.extend(crate::md::render(
-                    &msg.content,
-                    cursor_in_reply,
-                    area_width as usize,
-                ));
+                out.extend(crate::md::render(&msg.content, cursor_in_reply));
             }
             Role::User => {
                 for img in &msg.images {
