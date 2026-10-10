@@ -45,3 +45,31 @@ pub fn unix_secs() -> f64 {
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
+
+pub fn copy(text: &str) {
+    #[cfg(target_os = "macos")]
+    if pipe_to("pbcopy", text) {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if pipe_to("clip", text) {
+        return;
+    }
+    use crossterm::{clipboard::CopyToClipboard, execute};
+    let _ = execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(text));
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn pipe_to(program: &str, text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new(program).stdin(Stdio::piped()).spawn() else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && stdin.write_all(text.as_bytes()).is_err()
+    {
+        return false;
+    }
+    child.wait().is_ok()
+}

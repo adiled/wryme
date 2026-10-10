@@ -1,6 +1,8 @@
 use tokio::sync::mpsc;
 
-use crate::platform::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crate::platform::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 const POPUP_ROWS_PER_TICK: i32 = 2;
 
@@ -40,8 +42,15 @@ pub fn handle_key(
         return;
     }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    let super_ = k.modifiers.contains(KeyModifiers::SUPER);
 
-    if ctrl && matches!(k.code, KeyCode::Char('c')) {
+    if matches!(k.code, KeyCode::Char('c')) && (super_ || (ctrl && shift)) {
+        finish_selection(app);
+        return;
+    }
+
+    if ctrl && !shift && !super_ && matches!(k.code, KeyCode::Char('c')) {
         if let Some(t) = in_flight.take() {
             t.abort();
         }
@@ -65,8 +74,27 @@ pub fn handle_key(
         return;
     }
 
+    if shift {
+        let (dc, dr) = match k.code {
+            KeyCode::Left => (-1, 0),
+            KeyCode::Right => (1, 0),
+            KeyCode::Up => (0, -1),
+            KeyCode::Down => (0, 1),
+            _ => (0, 0),
+        };
+        if (dc, dr) != (0, 0)
+            && let Some(sel) = app.selection.as_mut()
+        {
+            sel.move_head(dc, dr);
+            return;
+        }
+    }
+
     match k.code {
         KeyCode::Esc => {
+            if app.selection.take().is_some() {
+                return;
+            }
             if app.voice_on && !app.voice_muted && app.in_flight {
                 app.mute_voice();
                 app.note("quiet");
@@ -196,7 +224,51 @@ pub fn handle_paste(text: &str, app: &mut App, input: &mut Input) {
     }
 }
 
+fn copy_selection(app: &mut App) -> bool {
+    let Some(sel) = app.selection else {
+        return false;
+    };
+    let text = sel.extract(&app.screen);
+    if text.trim().is_empty() {
+        return false;
+    }
+    crate::platform::copy(&text);
+    true
+}
+
+fn finish_selection(app: &mut App) {
+    if copy_selection(app) {
+        app.note("copied");
+    }
+    app.selection = None;
+}
+
 pub fn handle_mouse(m: MouseEvent, app: &mut App) {
+    if app.popup.mode == popup::Mode::Closed {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                app.selection = Some(crate::select::Selection::new(crate::select::Point {
+                    col: m.column,
+                    row: m.row,
+                }));
+                return;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(sel) = app.selection.as_mut() {
+                    sel.extend(crate::select::Point {
+                        col: m.column,
+                        row: m.row,
+                    });
+                }
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                finish_selection(app);
+                return;
+            }
+            _ => {}
+        }
+    }
     if app.popup.mode != popup::Mode::Closed {
         if matches!(
             m.kind,

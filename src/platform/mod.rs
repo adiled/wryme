@@ -25,7 +25,7 @@ pub use web::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Instant, Task, sleep, spawn, timeout, unix_secs};
+pub use native::{Instant, Task, copy, sleep, spawn, timeout, unix_secs};
 
 #[cfg(target_arch = "wasm32")]
-pub use web::{Instant, Task, sleep, spawn, timeout, unix_secs};
+pub use web::{Instant, Task, copy, sleep, spawn, timeout, unix_secs};

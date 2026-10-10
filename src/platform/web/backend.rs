@@ -364,9 +364,15 @@ fn escape(s: &str) -> String {
 
 /// Inline style for one cell. `Reset` colors inherit from the page theme.
 fn style_attr(c: &Painted) -> String {
-    let (mut fg, mut bg) = (c.fg, c.bg);
+    const DEFAULT_FG: Color = Color::Rgb(201, 209, 217);
+    const DEFAULT_BG: Color = Color::Rgb(13, 17, 23);
+    let mut fg = c.fg;
+    let mut bg = c.bg;
     if c.modifier.contains(Modifier::REVERSED) {
-        std::mem::swap(&mut fg, &mut bg);
+        let f = if fg == Color::Reset { DEFAULT_FG } else { fg };
+        let b = if bg == Color::Reset { DEFAULT_BG } else { bg };
+        fg = b;
+        bg = f;
     }
     let mut parts: Vec<String> = Vec::new();
     if let Some(css) = color_css(fg) {

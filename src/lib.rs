@@ -25,6 +25,7 @@ pub mod reservoir;
 #[cfg(not(feature = "reservoir"))]
 #[path = "reservoir_stub.rs"]
 pub mod reservoir;
+pub mod select;
 pub mod shell_env;
 pub mod shop;
 pub mod station;
