@@ -12,7 +12,7 @@ use futures_util::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{KeyboardEvent, WheelEvent};
+use web_sys::{ClipboardEvent, KeyboardEvent, WheelEvent};
 
 /// The element the terminal paints into.
 pub const TERM_ID: &str = "wryme-term";
@@ -245,11 +245,28 @@ pub fn install(tx: &UnboundedSender<Event>) {
         );
     }
     on_wheel.forget();
+
+    let paste_tx = tx.clone();
+    let on_paste: Closure<dyn FnMut(ClipboardEvent)> = Closure::new(move |ev: ClipboardEvent| {
+        ev.prevent_default();
+        let text = ev
+            .clipboard_data()
+            .and_then(|d| d.get_data("text").ok())
+            .filter(|t| !t.is_empty());
+        if let Some(text) = text {
+            let _ = paste_tx.send(Event::Paste(text));
+        }
+    });
+    let _ = doc.add_event_listener_with_callback("paste", on_paste.as_ref().unchecked_ref());
+    on_paste.forget();
 }
 
 /// DOM key -> crossterm-shaped key. Returns `None` for keys we don't model
 /// (IME composition, dead keys, media keys).
 fn map_key(ev: &KeyboardEvent) -> Option<KeyEvent> {
+    if (ev.ctrl_key() || ev.meta_key()) && ev.key().eq_ignore_ascii_case("v") {
+        return None;
+    }
     let mut modifiers = KeyModifiers::NONE;
     if ev.shift_key() {
         modifiers = modifiers.with(KeyModifiers::SHIFT);

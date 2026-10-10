@@ -140,6 +140,7 @@ where
                             keys::handle_key(k, &mut app, &mut input, &client, &tx, &mut in_flight_task);
                         }
                         Event::Mouse(m) => keys::handle_mouse(m, &mut app),
+                        Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
                         _ => {}
                     }
                 }
@@ -443,13 +444,18 @@ mod cli {
 fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
 {
     use crossterm::{
-        event::EnableMouseCapture,
+        event::{EnableBracketedPaste, EnableMouseCapture},
         execute,
         terminal::EnterAlternateScreen,
     };
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
     terminal.clear()?;
@@ -461,7 +467,7 @@ fn restore_terminal(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     use crossterm::{
-        event::DisableMouseCapture,
+        event::{DisableBracketedPaste, DisableMouseCapture},
         execute,
         terminal::LeaveAlternateScreen,
     };
@@ -469,7 +475,8 @@ fn restore_terminal(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -478,7 +485,7 @@ fn restore_terminal(
 #[cfg(not(target_arch = "wasm32"))]
 fn install_panic_hook() {
     use crossterm::{
-        event::DisableMouseCapture,
+        event::{DisableBracketedPaste, DisableMouseCapture},
         execute,
         terminal::LeaveAlternateScreen,
     };
@@ -488,7 +495,8 @@ fn install_panic_hook() {
         let _ = execute!(
             std::io::stdout(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         );
         prev(info);
     }));

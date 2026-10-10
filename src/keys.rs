@@ -177,6 +177,15 @@ pub fn handle_key(
     }
 }
 
+pub fn handle_paste(text: &str, app: &mut App, input: &mut Input) {
+    match app.popup.mode {
+        popup::Mode::Closed => input.insert_paste(text),
+        popup::Mode::SaveAs => app.popup.name_input.insert_paste(text),
+        popup::Mode::DialEdit => app.popup.dial_input.insert_paste(text),
+        popup::Mode::Browse => {}
+    }
+}
+
 pub fn handle_mouse(m: MouseEvent, app: &mut App) {
     if app.popup.mode != popup::Mode::Closed {
         if matches!(
