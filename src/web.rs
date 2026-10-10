@@ -26,6 +26,18 @@ pub fn start() {
     );
     setter.forget();
 
+    let prefs_tx = tx.clone();
+    let set_prefs = Closure::<dyn Fn(Option<String>)>::new(move |prefs: Option<String>| {
+        crate::config::set_prefs_text(prefs);
+        let _ = prefs_tx.send(platform::web::Event::ReloadConfig);
+    });
+    let _ = js_sys::Reflect::set(
+        &js_sys::global(),
+        &JsValue::from_str("wrymeSetPrefs"),
+        set_prefs.as_ref(),
+    );
+    set_prefs.forget();
+
     wasm_bindgen_futures::spawn_local(async {
         if let Err(e) = boot_and_run(events).await {
             log(&format!("wryme: {e:#}"));

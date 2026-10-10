@@ -14,6 +14,7 @@ pub struct Popup {
     pub name_input: Input,
     pub dial_input: Input,
     pub dial_idx: Option<usize>,
+    pub search: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -44,6 +45,7 @@ pub enum Row {
     SaveAsAction,
     PrefVoice,
     PrefView,
+    PrefAccent,
     Blank,
 }
 
@@ -101,10 +103,12 @@ fn pref_rows() -> Vec<Row> {
         Row::SectionHeader("preferences"),
         Row::PrefVoice,
         Row::PrefView,
+        Row::PrefAccent,
     ]
 }
 
 fn station_rows(app: &App) -> Vec<Row> {
+    let needle = app.popup.search.to_lowercase();
     let mut out = vec![Row::SectionHeader("active"), Row::Model];
     for i in 0..dial_metas().len() {
         out.push(Row::Dial(i));
@@ -113,6 +117,9 @@ fn station_rows(app: &App) -> Vec<Row> {
     out.push(Row::SectionHeader("saved"));
     for (i, st) in app.stations.iter().enumerate() {
         if st.name == crate::station::DEMO {
+            continue;
+        }
+        if !needle.is_empty() && !st.name.to_lowercase().contains(&needle) {
             continue;
         }
         out.push(Row::SavedStation(i));
@@ -155,6 +162,7 @@ pub fn close(app: &mut App) {
     app.popup.dial_idx = None;
     app.popup.selected = 0;
     app.popup.scroll = 0;
+    app.popup.search.clear();
 }
 
 fn first_selectable(app: &App) -> usize {
@@ -188,6 +196,7 @@ pub fn adjust(app: &mut App, delta: i32) {
         }
         Some(Row::PrefVoice) => toggle_voice(app),
         Some(Row::PrefView) => crate::keys::toggle_view_mode(app),
+        Some(Row::PrefAccent) => cycle_accent(app, delta),
         _ => {}
     }
 }
@@ -220,8 +229,18 @@ fn activate_row(app: &mut App, row: Row) {
         }
         Row::PrefVoice => toggle_voice(app),
         Row::PrefView => crate::keys::toggle_view_mode(app),
+        Row::PrefAccent => cycle_accent(app, 1),
         _ => {}
     }
+}
+
+fn cycle_accent(app: &mut App, delta: i32) {
+    let n = crate::config::ACCENTS.len() as i32;
+    let i = crate::config::accent_index(app.accent) as i32;
+    let (name, color) = crate::config::ACCENTS[(i + delta).rem_euclid(n) as usize];
+    app.accent = color;
+    let _ = crate::config::write_accent(color);
+    app.note(format!("accent: {name}"));
 }
 
 pub fn toggle_voice(app: &mut App) {
@@ -559,6 +578,35 @@ pub fn switch_tab(app: &mut App) {
     app.popup.name_input = Input::new();
     app.popup.selected = 0;
     app.popup.scroll = 0;
+    app.popup.search.clear();
+}
+
+pub fn type_search(app: &mut App, c: char) {
+    if app.popup.mode != Mode::Browse || app.popup.tab != Tab::Station {
+        return;
+    }
+    app.popup.search.push(c);
+    retarget_search(app);
+}
+
+pub fn backspace_search(app: &mut App) {
+    if app.popup.search.is_empty() {
+        return;
+    }
+    app.popup.search.pop();
+    retarget_search(app);
+}
+
+fn retarget_search(app: &mut App) {
+    if app.popup.search.is_empty() {
+        return;
+    }
+    for (i, row) in station_rows(app).iter().enumerate() {
+        if matches!(row, Row::SavedStation(_)) {
+            app.popup.selected = i;
+            return;
+        }
+    }
 }
 
 pub fn open_help(app: &mut App) {
@@ -570,6 +618,7 @@ pub fn open_help(app: &mut App) {
     app.popup.mode = Mode::Browse;
     app.popup.name_input = Input::new();
     app.popup.scroll = 0;
+    app.popup.search.clear();
 }
 
 pub fn scroll(app: &mut App, delta: i32) {
@@ -622,11 +671,9 @@ pub fn shops_lines(app: &App) -> Vec<Line<'static>> {
         let active = s.name == app.active_shop.name;
         let tag = if active { "▶ " } else { "  " };
         let name_style = if active {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(app.accent).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(app.accent)
         };
         out.push(Line::from(vec![
             Span::styled(format!("{tag}{}", s.name), name_style),

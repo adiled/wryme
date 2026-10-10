@@ -5,6 +5,7 @@
   const KEY = "dir";
   const SHOPS = "shops.toml";
   const STATIONS = "stations.toml";
+  const PREFS = "prefs.json";
   const WRITE = { mode: "readwrite" };
 
   let dir = null;
@@ -94,23 +95,33 @@
     window.wrymeSetConfig(shops, stations, connected);
   }
 
+  function pushPrefs(prefs) {
+    if (!window.wrymeSetPrefs) return;
+    window.wrymeSetPrefs(prefs);
+  }
+
   async function showCached() {
     const root = await opfs();
     const shops = await readFile(root, SHOPS);
     const stations = await readFile(root, STATIONS);
+    const prefs = await readFile(root, PREFS);
     if (shops === null && stations === null) return;
     push(shops, stations, false);
+    pushPrefs(prefs);
   }
 
   async function sync() {
     if (!dir) return;
     const shops = await readFile(dir, SHOPS);
     const stations = await readFile(dir, STATIONS);
+    const prefs = await readFile(dir, PREFS);
     const root = await opfs();
     if (shops !== null) await writeFile(root, SHOPS, shops);
     if (stations !== null) await writeFile(root, STATIONS, stations);
+    if (prefs !== null) await writeFile(root, PREFS, prefs);
     granted = true;
     push(shops, stations, true);
+    pushPrefs(prefs);
   }
 
   async function grant() {

@@ -258,6 +258,8 @@ fn popup_key(k: KeyEvent, app: &mut App) {
             KeyCode::Left => popup::adjust(app, -1),
             KeyCode::Right => popup::adjust(app, 1),
             KeyCode::Enter => popup::activate(app),
+            KeyCode::Backspace => popup::backspace_search(app),
+            KeyCode::Char(c) if !ctrl => popup::type_search(app, c),
             _ => {}
         },
         popup::Mode::SaveAs => match k.code {

@@ -27,6 +27,81 @@ tinker_depth = "all"
 # voice = "Tara"
 "#;
 
+pub const ACCENTS: &[(&str, ratatui::style::Color)] = &[
+    ("cyan", ratatui::style::Color::Cyan),
+    ("azure", ratatui::style::Color::Rgb(125, 185, 205)),
+    ("green", ratatui::style::Color::Green),
+    ("lightgreen", ratatui::style::Color::LightGreen),
+    ("yellow", ratatui::style::Color::Yellow),
+    ("magenta", ratatui::style::Color::Magenta),
+    ("red", ratatui::style::Color::Red),
+    ("blue", ratatui::style::Color::Blue),
+    ("white", ratatui::style::Color::White),
+    ("gray", ratatui::style::Color::Gray),
+    ("lightcyan", ratatui::style::Color::LightCyan),
+    ("lightyellow", ratatui::style::Color::LightYellow),
+    ("lightmagenta", ratatui::style::Color::LightMagenta),
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_PREFS: &str = "{\n  \"accent\": \"cyan\"\n}\n";
+
+pub fn accent_index(color: ratatui::style::Color) -> usize {
+    ACCENTS
+        .iter()
+        .position(|(_, c)| *c == color)
+        .unwrap_or(0)
+}
+
+pub fn accent_pref() -> ratatui::style::Color {
+    parse_accent(prefs_text().as_deref())
+}
+
+pub fn parse_accent(text: Option<&str>) -> ratatui::style::Color {
+    let Some(text) = text else {
+        return ACCENTS[0].1;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return ACCENTS[0].1;
+    };
+    let Some(name) = v.get("accent").and_then(|s| s.as_str()) else {
+        return ACCENTS[0].1;
+    };
+    ACCENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
+        .unwrap_or(ACCENTS[0].1)
+}
+
+pub fn write_accent(color: ratatui::style::Color) -> Result<()> {
+    let name = ACCENTS[accent_index(color)].0;
+    write_prefs(&format!("{{\n  \"accent\": \"{name}\"\n}}\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_round_trip() {
+        for (name, color) in ACCENTS {
+            let json = format!("{{\"accent\": \"{name}\"}}");
+            assert_eq!(parse_accent(Some(&json)), *color);
+        }
+    }
+
+    #[test]
+    fn accent_falls_back_to_cyan() {
+        assert_eq!(parse_accent(None), ratatui::style::Color::Cyan);
+        assert_eq!(
+            parse_accent(Some("{\"accent\": \"neon-pink\"}")),
+            ratatui::style::Color::Cyan
+        );
+        assert_eq!(parse_accent(Some("not json")), ratatui::style::Color::Cyan);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use anyhow::{Context, Result};
@@ -68,6 +143,19 @@ mod imp {
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 
+    pub fn prefs_text() -> Option<String> {
+        read_or_seed("prefs.json", super::DEFAULT_PREFS)
+    }
+
+    pub fn write_prefs(text: &str) -> Result<()> {
+        let path = dir().context("no $HOME")?.join("prefs.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    }
+
     pub fn can_write() -> bool {
         dir().is_some()
     }
@@ -82,6 +170,7 @@ mod imp {
     thread_local! {
         static SHOPS: RefCell<Option<String>> = const { RefCell::new(None) };
         static STATIONS: RefCell<Option<String>> = const { RefCell::new(None) };
+        static PREFS: RefCell<Option<String>> = const { RefCell::new(None) };
         static CONNECTED: RefCell<bool> = const { RefCell::new(false) };
     }
 
@@ -101,6 +190,23 @@ mod imp {
         SHOPS.with(|c| *c.borrow_mut() = shops);
         STATIONS.with(|c| *c.borrow_mut() = stations);
         CONNECTED.with(|c| *c.borrow_mut() = connected);
+    }
+
+    pub fn set_prefs_text(text: Option<String>) {
+        PREFS.with(|c| *c.borrow_mut() = text);
+    }
+
+    pub fn prefs_text() -> Option<String> {
+        PREFS.with(|c| c.borrow().clone())
+    }
+
+    pub fn write_prefs(text: &str) -> Result<()> {
+        PREFS.with(|c| *c.borrow_mut() = Some(text.to_string()));
+        call_global(
+            "wrymeWriteFile",
+            &[JsValue::from_str("prefs.json"), JsValue::from_str(text)],
+        );
+        Ok(())
     }
 
     pub fn shops_text() -> Option<String> {
@@ -135,6 +241,19 @@ pub fn stations_text() -> Option<String> {
 
 pub fn write_stations(text: &str) -> Result<()> {
     imp::write_stations(text)
+}
+
+pub fn prefs_text() -> Option<String> {
+    imp::prefs_text()
+}
+
+pub fn write_prefs(text: &str) -> Result<()> {
+    imp::write_prefs(text)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn set_prefs_text(text: Option<String>) {
+    imp::set_prefs_text(text)
 }
 
 pub fn can_write() -> bool {
