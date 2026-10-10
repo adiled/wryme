@@ -155,7 +155,7 @@ where
                 }
             }
             Some(stream_ev) = rx.recv() => {
-                handle_stream_event(stream_ev, &mut app, &mut in_flight_task);
+                handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
                 if jobs::has_due() && !app.in_flight {
@@ -190,6 +190,8 @@ fn handle_stream_event(
     stream_ev: StreamEvent,
     app: &mut App,
     in_flight_task: &mut Option<Task>,
+    client: &Client,
+    tx: &tokio::sync::mpsc::UnboundedSender<StreamEvent>,
 ) {
     match stream_ev {
         StreamEvent::Delta { text } => {
@@ -262,6 +264,10 @@ fn handle_stream_event(
             }
             if let Some(t) = in_flight_task.take() {
                 drop(t);
+            }
+            if !app.awaiting.is_empty() {
+                let pending = std::mem::take(&mut app.awaiting);
+                crate::keys::start_turn(app, client, tx, in_flight_task, pending);
             }
         }
         StreamEvent::Error { message } => {
