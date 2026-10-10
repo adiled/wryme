@@ -178,6 +178,23 @@ impl App {
             || saved.voice != self.active_station.voice
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconfigure(
+        &mut self,
+        shops: Vec<Shop>,
+        stations: Vec<Station>,
+        active_station: Station,
+        active_shop: Shop,
+        active_origin: Option<String>,
+    ) {
+        self.shops = shops;
+        self.stations = stations;
+        self.active_station = active_station;
+        self.active_shop = active_shop;
+        self.active_origin = active_origin;
+        self.last_response_id = None;
+    }
+
     pub fn note(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
     }
@@ -299,6 +316,7 @@ impl App {
         };
         m.content.push_str(delta);
         m.phase = Phase::Writing;
+        m.current_tool = None;
     }
 
     fn last_stream_was_thinking(&self) -> bool {
@@ -364,6 +382,7 @@ impl App {
                 arguments,
                 result,
             });
+            m.current_tool = None;
         }
     }
 

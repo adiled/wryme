@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>wryme</title>
   <link data-trunk rel="rust" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types" />
+  <link data-trunk rel="copy-file" href="app.js" />
   <style>
     :root { color-scheme: dark; }
     html, body {
@@ -69,10 +70,66 @@
       font-variant-ligatures: none;
       font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
     }
+    #wryme-config {
+      position: fixed;
+      bottom: 26px;
+      right: 18px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      z-index: 10;
+      font: 600 14px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    #wryme-config[hidden] {
+      display: none;
+    }
+    #wryme-config-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    #wryme-config button {
+      font: inherit;
+      font-weight: 400;
+      color: #e6f7fb;
+      padding: 12px 28px;
+      border: 1px solid #14839e;
+      border-radius: 999px;
+      cursor: pointer;
+      background: #0e7490;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+      transition: filter 0.3s ease, background 0.3s ease;
+    }
+    #wryme-config button:hover {
+      filter: brightness(1.12);
+    }
+    #wryme-config-status {
+      font-weight: 400;
+      color: #a5f3fc;
+      max-width: 58ch;
+      white-space: normal;
+      text-align: right;
+    }
+    #wryme-config #wryme-config-hint {
+      font: 500 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #a5f3fc;
+      background: none;
+      border: 1px solid rgba(165, 243, 252, 0.35);
+      padding: 8px 12px;
+      border-radius: 999px;
+      box-shadow: none;
+      opacity: 0.75;
+    }
+    #wryme-config #wryme-config-hint:hover {
+      opacity: 1;
+      filter: none;
+    }
   </style>
 </head>
 <body>
   <div id="wryme-term" tabindex="0"></div>
   <div id="wryme-measure">MMMMMMMMMMMMMMMMMMMM</div>
+  <script src="app.js?v=8" defer></script>
 </body>
 </html>

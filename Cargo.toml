@@ -23,6 +23,10 @@ members = ["web"]
 name = "wme"
 path = "src/main.rs"
 
+[features]
+default = ["reservoir"]
+reservoir = ["dep:ccft"]
+
 # ---------------------------------------------------------------------------
 # shared: compiles for both native (terminal) and wasm32 (browser)
 # ---------------------------------------------------------------------------
@@ -39,7 +43,7 @@ unicode-segmentation = "1"
 tracing = "0.1"
 arrow-array = "53"
 arrow-schema = "53"
-ccft = { version = "1.10.7", default-features = false, features = ["core"] }
+ccft = { version = "1.10.7", default-features = false, features = ["core"], optional = true }
 
 # ---------------------------------------------------------------------------
 # native: the terminal build (real crossterm events, tokio, rustls, sentry)

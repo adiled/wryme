@@ -271,11 +271,11 @@ pub fn commit_save_as(app: &mut App) {
         dials: app.active_station.dials,
         voice: app.active_station.voice.clone(),
     };
-    let Some(path) = crate::station::config_path() else {
-        app.note("save failed: no $HOME");
+    if !crate::config::can_write() {
+        app.note("save failed: no config folder connected");
         return;
-    };
-    if let Err(e) = crate::station_save::append_to_file(&path, &new_station) {
+    }
+    if let Err(e) = crate::station_save::save_new(&new_station) {
         app.note(format!("save failed: {}", e));
         return;
     }
@@ -292,17 +292,17 @@ pub fn commit_update(app: &mut App) {
         app.note("nothing to update; this is an untitled session");
         return;
     };
-    let Some(path) = crate::station::config_path() else {
-        app.note("save failed: no $HOME");
+    if !crate::config::can_write() {
+        app.note("update failed: no config folder connected");
         return;
-    };
+    }
     let updated = Station {
         name: origin.clone(),
         model: app.active_station.model.clone(),
         dials: app.active_station.dials,
         voice: app.active_station.voice.clone(),
     };
-    if let Err(e) = crate::station_save::update_in_file(&path, &updated) {
+    if let Err(e) = crate::station_save::update(&updated) {
         app.note(format!("update failed: {}", e));
         return;
     }
