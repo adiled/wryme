@@ -12,7 +12,7 @@ use futures_util::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{ClipboardEvent, KeyboardEvent, WheelEvent};
+use web_sys::{ClipboardEvent, KeyboardEvent, MouseEvent as WebMouseEvent, WheelEvent};
 
 /// The element the terminal paints into.
 pub const TERM_ID: &str = "wryme-term";
@@ -260,6 +260,85 @@ pub fn install(tx: &UnboundedSender<Event>) {
     });
     let _ = doc.add_event_listener_with_callback("paste", on_paste.as_ref().unchecked_ref());
     on_paste.forget();
+
+    if let Some(term) = doc.get_element_by_id(TERM_ID) {
+        let down_tx = tx.clone();
+        let on_down: Closure<dyn FnMut(WebMouseEvent)> = Closure::new(move |ev: WebMouseEvent| {
+            if ev.button() != 0 {
+                return;
+            }
+            ev.prevent_default();
+            if let Some((column, row)) = cell_point(&ev) {
+                let _ = down_tx.send(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }));
+            }
+        });
+        let _ = term.add_event_listener_with_callback("mousedown", on_down.as_ref().unchecked_ref());
+        on_down.forget();
+
+        let move_tx = tx.clone();
+        let on_move: Closure<dyn FnMut(WebMouseEvent)> = Closure::new(move |ev: WebMouseEvent| {
+            if ev.buttons() & 1 == 0 {
+                return;
+            }
+            if let Some((column, row)) = cell_point(&ev) {
+                let _ = move_tx.send(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }));
+            }
+        });
+        let _ = term.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref());
+        on_move.forget();
+    }
+
+    let up_tx = tx.clone();
+    let on_up: Closure<dyn FnMut(WebMouseEvent)> = Closure::new(move |ev: WebMouseEvent| {
+        if ev.button() != 0 {
+            return;
+        }
+        let _ = up_tx.send(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+    });
+    let _ = doc.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref());
+    on_up.forget();
+}
+
+fn metrics(doc: &web_sys::Document) -> (f64, f64) {
+    if let Some(el) = doc.get_element_by_id("wryme-measure")
+        && let r = el.get_bounding_client_rect()
+        && r.width() > 0.0
+        && r.height() > 0.0
+    {
+        return (r.width() / 20.0, r.height());
+    }
+    (9.0, 18.0)
+}
+
+fn cell_point(ev: &WebMouseEvent) -> Option<(u16, u16)> {
+    let doc = web_sys::window()?.document()?;
+    let term = doc.get_element_by_id(TERM_ID)?;
+    let rect = term.get_bounding_client_rect();
+    let (char_w, line_h) = metrics(&doc);
+    let col = ((f64::from(ev.client_x()) - rect.left()) / char_w).floor().max(0.0) as u16;
+    let row = ((f64::from(ev.client_y()) - rect.top()) / line_h).floor().max(0.0) as u16;
+    Some((col, row))
+}
+
+pub fn copy(text: &str) {
+    if let Some(win) = web_sys::window() {
+        let _ = win.navigator().clipboard().write_text(text);
+    }
 }
 
 /// DOM key -> crossterm-shaped key. Returns `None` for keys we don't model

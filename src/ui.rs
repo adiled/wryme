@@ -288,6 +288,38 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     if app.popup.mode != popup::Mode::Closed {
         crate::popup_ui::draw(f, app);
     }
+
+    paint_selection(f, app);
+}
+
+fn paint_selection(f: &mut Frame, app: &mut App) {
+    let Some(sel) = app.selection else {
+        return;
+    };
+    if sel.is_empty() {
+        return;
+    }
+    let buf = f.buffer_mut();
+    let area = buf.area;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    app.screen = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let (s, e) = sel.bounds();
+    let last_row = e.row.min(area.height - 1);
+    for y in s.row..=last_row {
+        let col_start = if y == s.row { s.col } else { 0 };
+        let col_end = if y == e.row { e.col } else { area.width - 1 };
+        for x in col_start..=col_end.min(area.width - 1) {
+            buf[(x, y)].modifier |= Modifier::REVERSED;
+        }
+    }
 }
 
 fn format_k(n: u64) -> String {
