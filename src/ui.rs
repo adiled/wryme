@@ -182,6 +182,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         let heart_color = hue_lit(120.0 * (1.0 - ht));
         pieces.push(Span::styled(" \u{2764}\u{FE0E} ", heart_color));
     }
+    #[cfg(not(feature = "reservoir"))]
+    {
+        pieces.push(Span::raw(dot));
+    }
     pieces.push(Span::raw(format!("{} msg", app.messages.len())));
     if app.voice_on {
         pieces.push(Span::raw(dot));
