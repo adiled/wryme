@@ -35,6 +35,25 @@ impl Input {
         self.col += s.graphemes(true).count();
     }
 
+    pub fn insert_paste(&mut self, s: &str) {
+        let mut clean = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' => {
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    clean.push(' ');
+                }
+                '\n' | '\t' => clean.push(' '),
+                c if c.is_control() => {}
+                c => clean.push(c),
+            }
+        }
+        self.insert_str(&clean);
+    }
+
     pub fn backspace(&mut self) {
         if self.col == 0 {
             return;
@@ -182,5 +201,39 @@ mod tests {
         assert_eq!(i.scroll_offset(10), 0);
         i.end();
         assert_eq!(i.scroll_offset(10), 7);
+    }
+
+    #[test]
+    fn paste_inserts_bulk_text() {
+        let mut i = Input::new();
+        i.insert_paste("hello world");
+        assert_eq!(i.text, "hello world");
+        assert_eq!(i.col, 11);
+    }
+
+    #[test]
+    fn paste_flattens_newlines_and_tabs() {
+        let mut i = Input::new();
+        i.insert_paste("a\r\nb\tc\nd");
+        assert_eq!(i.text, "a b c d");
+        assert_eq!(i.col, 7);
+    }
+
+    #[test]
+    fn paste_at_middle_keeps_caret_after_insert() {
+        let mut i = Input::new();
+        i.insert_str("ab");
+        i.home();
+        i.move_right();
+        i.insert_paste("XY");
+        assert_eq!(i.text, "aXYb");
+        assert_eq!(i.col, 3);
+    }
+
+    #[test]
+    fn paste_drops_other_controls() {
+        let mut i = Input::new();
+        i.insert_paste("a\u{7}b");
+        assert_eq!(i.text, "ab");
     }
 }
