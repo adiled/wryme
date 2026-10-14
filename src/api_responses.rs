@@ -460,7 +460,10 @@ async fn stream_once(
         reasoning: Option<Reasoning>,
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<&'a str>>,
-        max_tool_calls: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_tool_calls: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        multi_agent: Option<MultiAgent>,
         truncation: &'a str,
         tools: &'a [serde_json::Value],
     }
@@ -473,14 +476,12 @@ async fn stream_once(
         summary: Option<&'static str>,
     }
 
-    let reasoning =
-        (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
-            effort: station.dials.patience.map(|p| p.as_wire()),
-            summary: station.dials.brainy.map(|b| b.as_wire()),
-        });
-    let include = reasoning
-        .as_ref()
-        .map(|_| vec!["reasoning.encrypted_content"]);
+    #[derive(Serialize)]
+    struct MultiAgent {
+        enabled: bool,
+        max_concurrent_subagents: u8,
+    }
+
     let toolless = crate::api::is_toolless(&shop.name, &station.model);
     let tools = if toolless {
         Vec::new()
@@ -520,46 +521,89 @@ async fn stream_once(
 
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
-    let body = ResponsesReq {
-        model: &station.model,
-        input,
-        stream: true,
-        store,
-        instructions,
-        previous_response_id,
-        temperature: station.dials.boldness,
-        reasoning,
-        include,
-        max_tool_calls: if tools_off { 0 } else { MAX_TOOL_CALLS },
-        truncation: "auto",
-        tools: &tools,
-    };
 
-    let mut req = client.http.post(&url).json(&body);
-    if !shop.key.is_empty() {
-        req = req.bearer_auth(&shop.key);
-    }
-    for (k, v) in &shop.headers {
-        req = req.header(k, v);
-    }
-    tracing::debug!(
-        url = %url,
-        model = %station.model,
-        store = body.store,
-        body = %serde_json::to_string(&body).unwrap_or_default(),
-        "responses request"
-    );
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| crate::api::unreachable(&shop.name, &url, &e))?;
+    let mut attempt_multi = true;
+    let resp = loop {
+        let reasoning = if attempt_multi {
+            let effort = station.dials.patience.map(|p| p.as_wire());
+            if effort.is_none() {
+                None
+            } else {
+                Some(Reasoning {
+                    effort,
+                    summary: None,
+                })
+            }
+        } else {
+            (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
+                effort: station.dials.patience.map(|p| p.as_wire()),
+                summary: station.dials.brainy.map(|b| b.as_wire()),
+            })
+        };
+        let include = reasoning
+            .as_ref()
+            .map(|_| vec!["reasoning.encrypted_content"]);
+        let body = ResponsesReq {
+            model: &station.model,
+            input,
+            stream: true,
+            store,
+            instructions,
+            previous_response_id,
+            temperature: station.dials.boldness,
+            reasoning,
+            include,
+            max_tool_calls: if attempt_multi {
+                None
+            } else if tools_off {
+                Some(0)
+            } else {
+                Some(MAX_TOOL_CALLS)
+            },
+            multi_agent: attempt_multi.then_some(MultiAgent {
+                enabled: true,
+                max_concurrent_subagents: 3,
+            }),
+            truncation: "auto",
+            tools: &tools,
+        };
 
-    if !resp.status().is_success() {
+        let mut req = client.http.post(&url).json(&body);
+        if attempt_multi {
+            req = req.header("OpenAI-Beta", "responses_multi_agent=v1");
+        }
+        if !shop.key.is_empty() {
+            req = req.bearer_auth(&shop.key);
+        }
+        for (k, v) in &shop.headers {
+            req = req.header(k, v);
+        }
+        tracing::debug!(
+            url = %url,
+            model = %station.model,
+            store = body.store,
+            body = %serde_json::to_string(&body).unwrap_or_default(),
+            "responses request"
+        );
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::api::unreachable(&shop.name, &url, &e))?;
+
+        if resp.status().is_success() {
+            break resp;
+        }
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "responses upstream error");
-        return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
-    }
+        let msg = format!("upstream {}: {}", status, truncate(&body, 800));
+        if attempt_multi && msg.to_lowercase().contains("multi_agent") {
+            tracing::warn!(shop = %shop.name, "multi_agent unsupported, retrying without it");
+            attempt_multi = false;
+            continue;
+        }
+        return Err(anyhow!(msg));
+    };
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
