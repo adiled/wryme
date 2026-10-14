@@ -544,7 +544,8 @@ async fn stream_once(
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
 
-    let mut attempt_multi = supports_multi_agent(&station.model);
+    let mut attempt_multi =
+        supports_multi_agent(&station.model) && !crate::api::is_nomulti(&shop.name, &station.model);
     let resp = loop {
         let reasoning = if attempt_multi {
             let effort = station.dials.patience.map(|p| p.as_wire());
@@ -621,6 +622,7 @@ async fn stream_once(
         let msg = format!("upstream {}: {}", status, truncate(&body, 800));
         if attempt_multi && msg.to_lowercase().contains("multi_agent") {
             tracing::warn!(shop = %shop.name, "multi_agent unsupported, retrying without it");
+            crate::api::mark_nomulti(&shop.name, &station.model);
             attempt_multi = false;
             continue;
         }
