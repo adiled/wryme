@@ -138,17 +138,35 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let viewport_h = messages_chunk.height as usize;
     app.last_viewport_h = viewport_h;
     let total_rows = wrapped_row_count(&lines, messages_chunk.width);
+    let base = assistant_base(app, messages_chunk.width, viewport_h);
+    app.page_base = base;
+    let trigger = page_trigger(base, viewport_h);
     let n_pages = if total_rows == 0 || viewport_h == 0 {
         1
     } else {
         total_rows.div_ceil(viewport_h)
     };
-    let page = app.current_page.min(n_pages.saturating_sub(1));
+    let mut page = app.current_page.min(n_pages.saturating_sub(1));
+    if base > 0 && page >= 1 && viewport_h > 0 {
+        let max_page = if base >= total_rows {
+            1
+        } else {
+            (total_rows - base).div_ceil(viewport_h).max(1)
+        };
+        page = page.min(max_page).min(n_pages.saturating_sub(1).max(1));
+    }
     app.current_page = page;
 
     let max_scroll = total_rows.saturating_sub(1);
     let scroll_offset = match app.view_mode {
-        ViewMode::Page => page * viewport_h,
+        ViewMode::Page => {
+            if base == 0 || page >= 1 {
+                page_offset(base, page, 0, viewport_h)
+            } else {
+                app.scroll_row = app.scroll_row.min(trigger).min(max_scroll);
+                app.scroll_row
+            }
+        }
         ViewMode::Scroll => {
             app.scroll_row = app.scroll_row.min(max_scroll);
             app.scroll_row
@@ -632,6 +650,60 @@ fn wrapped_row_count(lines: &[Line<'_>], area_width: u16) -> usize {
     total
 }
 
+fn assistant_base(app: &App, width: u16, viewport_h: usize) -> usize {
+    if viewport_h == 0 {
+        return 0;
+    }
+    let Some(newest) = app.messages.last() else {
+        return 0;
+    };
+    if newest.role != Role::Assistant || newest.content.is_empty() {
+        return 0;
+    }
+    let mut prefix: Vec<Line<'static>> = Vec::new();
+    if !app.awaiting.is_empty() {
+        let phantom = Message {
+            role: Role::User,
+            content: app.awaiting.clone(),
+            images: Vec::new(),
+            brain: String::new(),
+            heart: String::new(),
+            streaming: false,
+            waiting: true,
+            timestamp: String::new(),
+            phase: Phase::Streaming,
+            current_tool: None,
+            turn_id: 0,
+            tool_events: Vec::new(),
+        };
+        push_message(&mut prefix, &phantom, width, app.accent);
+        prefix.push(Line::from(""));
+    }
+    let mut head: Vec<Line<'static>> = Vec::new();
+    push_message(&mut head, newest, width, app.accent);
+    let Some(header) = head.first() else {
+        return 0;
+    };
+    prefix.push(header.clone());
+    prefix.extend(crate::md::render(&newest.content, newest.streaming));
+    let end = wrapped_row_count(&prefix, width);
+    if end > viewport_h { end } else { 0 }
+}
+
+fn page_trigger(base: usize, viewport_h: usize) -> usize {
+    base.saturating_sub(viewport_h / 2)
+}
+
+fn page_offset(base: usize, page: usize, scroll_row: usize, viewport_h: usize) -> usize {
+    if base == 0 || viewport_h == 0 {
+        return page.saturating_mul(viewport_h);
+    }
+    if page == 0 {
+        return scroll_row.min(page_trigger(base, viewport_h));
+    }
+    base.saturating_add(page.saturating_sub(1).saturating_mul(viewport_h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,5 +785,18 @@ mod tests {
         let lines = rendered(&thinking_message("", "only the trace"));
         assert!(lines.iter().any(|l| l.contains("heart")));
         assert!(!lines.iter().any(|l| l.contains("brain")));
+    }
+
+    #[test]
+    fn page_starts_at_content_end_when_bled() {
+        assert_eq!(page_trigger(50, 20), 40);
+        assert_eq!(page_offset(50, 0, 0, 20), 0);
+        assert_eq!(page_offset(50, 0, 30, 20), 30);
+        assert_eq!(page_offset(50, 0, 40, 20), 40);
+        assert_eq!(page_offset(50, 0, 90, 20), 40);
+        assert_eq!(page_offset(50, 1, 0, 20), 50);
+        assert_eq!(page_offset(50, 2, 0, 20), 70);
+        assert_eq!(page_offset(50, 3, 0, 20), 90);
+        assert_eq!(page_offset(0, 1, 0, 20), 20);
     }
 }
