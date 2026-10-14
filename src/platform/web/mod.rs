@@ -111,6 +111,11 @@ pub enum Event {
     FocusGained,
     FocusLost,
     ReloadConfig,
+    GuestNote {
+        from: String,
+        id: String,
+        text: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

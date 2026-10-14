@@ -56,7 +56,10 @@ pub fn tag(id: &str) -> String {
 
 pub fn mint() -> String {
     #[cfg(target_arch = "wasm32")]
-    return "web".to_string();
+    {
+        let r = js_sys::Math::random() * 65536.0;
+        return format!("{:04x}", r as u32 & 0xffff);
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let now = std::time::SystemTime::now()
@@ -221,7 +224,13 @@ fn probe_live(path: &PathBuf) -> bool {
 
 pub fn active() -> Vec<String> {
     #[cfg(target_arch = "wasm32")]
-    return Vec::new();
+    {
+        let mut out: Vec<String> = crate::config::roster_text()
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+            .unwrap_or_default();
+        out.sort();
+        return out;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let Some(d) = dir() else {
@@ -320,8 +329,47 @@ pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<St
 
 #[cfg(target_arch = "wasm32")]
 pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<String, String> {
-    let _ = (to, from, text, reply_to);
-    Err("window messaging is native only".to_string())
+    use wasm_bindgen::JsCast;
+    let text: String = text.chars().take(4000).collect();
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    let global = js_sys::global();
+    let Ok(f) = js_sys::Reflect::get(&global, &wasm_bindgen::JsValue::from_str("wrymeMeshSend"))
+    else {
+        return Err("no doorway connection".to_string());
+    };
+    let Some(f) = f.dyn_ref::<js_sys::Function>() else {
+        return Err("no doorway connection".to_string());
+    };
+    let mut note = serde_json::json!({"to": to, "from": from, "text": text});
+    if !reply_to.trim().is_empty() {
+        note["reply_to"] = serde_json::json!(reply_to);
+    }
+    let arg = match serde_json::to_string(&note) {
+        Ok(s) => s,
+        Err(_) => return Err("could not encode note".to_string()),
+    };
+    let promise = match f.call1(&global, &wasm_bindgen::JsValue::from_str(&arg)) {
+        Ok(p) => p,
+        Err(_) => return Err("doorway send failed".to_string()),
+    };
+    let answer = match wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(promise)).await {
+        Ok(v) => v.as_string().unwrap_or_default(),
+        Err(_) => return Err("doorway send failed".to_string()),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&answer) {
+        Ok(v) => v,
+        Err(_) => return Err("bad doorway reply".to_string()),
+    };
+    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+        return Ok(format!("sent to wryme#{to}"));
+    }
+    Err(v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .unwrap_or("delivery failed")
+        .to_string())
 }
 
 #[cfg(test)]

@@ -120,6 +120,8 @@ where
     let mut in_flight_task: Option<Task> = None;
     let window_id = app.window_id.clone();
     crate::windows::register(&window_id);
+    #[cfg(target_arch = "wasm32")]
+    crate::web::announce_window(&window_id);
     let (guest_tx, mut guest_rx) =
         mpsc::unbounded_channel::<(String, String, String)>();
     #[cfg(target_arch = "wasm32")]
@@ -158,6 +160,17 @@ where
                         }
                         Event::Mouse(m) => keys::handle_mouse(m, &mut app),
                         Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
+                        #[cfg(target_arch = "wasm32")]
+                        Event::GuestNote { from, id, text } => {
+                            if app.in_flight {
+                                app.guest_queue.push((from, id, text));
+                            } else {
+                                let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+                                crate::keys::start_guest_turn(
+                                    &mut app, &client, &tx, &mut in_flight_task, from, id, text,
+                                );
+                            }
+                        }
                         #[cfg(target_arch = "wasm32")]
                         Event::ReloadConfig => {
                             match crate::boot(None).await {

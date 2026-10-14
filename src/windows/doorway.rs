@@ -128,6 +128,42 @@ pub fn stop_volunteer() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn broadcast_roster(conns: &WebConns) {
+    let msg = serde_json::json!({"roster": roster_read()}).to_string();
+    if let Ok(c) = conns.lock() {
+        for s in c.values() {
+            let _ = s.send(msg.clone());
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn handle_client_note(conns: &WebConns, web_id: &str, v: &serde_json::Value) {
+    let (Some(to), Some(text)) = (
+        v.get("to").and_then(|t| t.as_str()),
+        v.get("text").and_then(|t| t.as_str()),
+    ) else {
+        return;
+    };
+    let reply_to = v.get("reply_to").and_then(|r| r.as_str()).unwrap_or("");
+    let req = v.get("req");
+    let id = next_msg_id();
+    let ack = match transmit(to, web_id, text, reply_to, &id).await {
+        Ok(_) => serde_json::json!({"ok": true, "id": id}),
+        Err(e) => serde_json::json!({"ok": false, "error": e}),
+    };
+    let mut ack = ack;
+    if let Some(req) = req {
+        ack["req"] = req.clone();
+    }
+    if let Ok(c) = conns.lock()
+        && let Some(s) = c.get(web_id)
+    {
+        let _ = s.send(ack.to_string());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn serve_doorway(
     listener: tokio::net::TcpListener,
     conns: WebConns,
@@ -142,13 +178,14 @@ pub async fn serve_doorway(
             let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
                 return;
             };
-            let web_id = next_web_id();
+            let (mut write, mut read) = ws.split();
             let (wtx, mut wrx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let mut web_id = next_web_id();
             if let Ok(mut c) = conns.lock() {
-                c.insert(web_id.clone(), wtx);
+                c.insert(web_id.clone(), wtx.clone());
             }
             roster_add(&web_id);
-            let (mut write, mut read) = ws.split();
+            broadcast_roster(&conns);
             let hello = serde_json::json!({"hello": true, "you": web_id}).to_string();
             let _ = futures_util::SinkExt::send(
                 &mut write,
@@ -172,21 +209,41 @@ pub async fn serve_doorway(
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
                     continue;
                 };
-                let (Some(to), Some(text)) = (
-                    v.get("to").and_then(|t| t.as_str()),
-                    v.get("text").and_then(|t| t.as_str()),
-                ) else {
+                if v.get("to").is_none()
+                    && let Some(claim) = v.get("claim").and_then(|c| c.as_str())
+                    && !claim.trim().is_empty()
+                {
+                    let free = conns
+                        .lock()
+                        .map(|c| !c.contains_key(claim))
+                        .unwrap_or(false);
+                    if free {
+                        if let Ok(mut c) = conns.lock() {
+                            c.remove(&web_id);
+                            c.insert(claim.to_string(), wtx.clone());
+                        }
+                        roster_remove(&web_id);
+                        web_id = claim.to_string();
+                        roster_add(&web_id);
+                        broadcast_roster(&conns);
+                        let hello =
+                            serde_json::json!({"hello": true, "you": web_id}).to_string();
+                        if let Ok(c) = conns.lock()
+                            && let Some(s) = c.get(&web_id)
+                        {
+                            let _ = s.send(hello);
+                        }
+                    }
                     continue;
-                };
-                let reply_to = v.get("reply_to").and_then(|r| r.as_str()).unwrap_or("");
-                let id = next_msg_id();
-                transmit(to, &web_id, text, reply_to, &id).await.ok();
+                }
+                handle_client_note(&conns, &web_id, &v).await;
             }
             pump.abort();
             if let Ok(mut c) = conns.lock() {
                 c.remove(&web_id);
             }
             roster_remove(&web_id);
+            broadcast_roster(&conns);
         });
     }
 }
