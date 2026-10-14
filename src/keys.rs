@@ -137,7 +137,21 @@ pub fn handle_key(
         }
         KeyCode::PageUp => match app.view_mode {
             ViewMode::Page => {
-                app.current_page = app.current_page.saturating_add(1);
+                let base = app.page_base;
+                if base > 0 && app.current_page == 0 {
+                    let step = app.last_viewport_h.saturating_sub(1).max(1);
+                    let trigger = base.saturating_sub(app.last_viewport_h / 2);
+                    let cur = app.scroll_row.min(trigger);
+                    if cur.saturating_add(step) >= trigger {
+                        app.scroll_row = trigger;
+                        app.current_page = 1;
+                    } else {
+                        app.scroll_row = cur.saturating_add(step);
+                    }
+                    app.wheel_accum = 0;
+                } else {
+                    app.current_page = app.current_page.saturating_add(1);
+                }
             }
             ViewMode::Scroll => {
                 let step = app.last_viewport_h.saturating_sub(1).max(1);
@@ -146,7 +160,22 @@ pub fn handle_key(
         },
         KeyCode::PageDown => match app.view_mode {
             ViewMode::Page => {
-                app.current_page = app.current_page.saturating_sub(1);
+                let base = app.page_base;
+                if base > 0 {
+                    if app.current_page >= 2 {
+                        app.current_page -= 1;
+                    } else if app.current_page == 1 {
+                        app.current_page = 0;
+                        app.scroll_row = base.saturating_sub(app.last_viewport_h / 2);
+                        app.wheel_accum = 0;
+                    } else {
+                        let step = app.last_viewport_h.saturating_sub(1).max(1);
+                        app.scroll_row = app.scroll_row.saturating_sub(step);
+                        app.wheel_accum = 0;
+                    }
+                } else {
+                    app.current_page = app.current_page.saturating_sub(1);
+                }
             }
             ViewMode::Scroll => {
                 let step = app.last_viewport_h.saturating_sub(1).max(1);
@@ -285,6 +314,28 @@ pub fn handle_mouse(m: MouseEvent, app: &mut App) {
     }
     match app.view_mode {
         ViewMode::Page => {
+            let base = app.page_base;
+            let trigger = base.saturating_sub(app.last_viewport_h / 2);
+            if base > 0 && app.current_page == 0 {
+                const ROWS_PER_TICK: usize = 2;
+                match m.kind {
+                    MouseEventKind::ScrollUp => {
+                        let cur = app.scroll_row.min(trigger);
+                        if cur >= trigger {
+                            app.scroll_row = trigger;
+                            app.current_page = 1;
+                            app.wheel_accum = 0;
+                        } else {
+                            app.scroll_row = cur.saturating_add(ROWS_PER_TICK).min(trigger);
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        app.scroll_row = app.scroll_row.saturating_sub(ROWS_PER_TICK);
+                    }
+                    _ => return,
+                }
+                return;
+            }
             const TICKS_PER_PAGE: i32 = 3;
             match m.kind {
                 MouseEventKind::ScrollUp => app.wheel_accum += 1,
@@ -298,6 +349,9 @@ pub fn handle_mouse(m: MouseEvent, app: &mut App) {
             while app.wheel_accum <= -TICKS_PER_PAGE {
                 app.current_page = app.current_page.saturating_sub(1);
                 app.wheel_accum += TICKS_PER_PAGE;
+            }
+            if app.current_page == 0 && base > 0 {
+                app.scroll_row = base.saturating_sub(app.last_viewport_h / 2);
             }
         }
         ViewMode::Scroll => {
