@@ -195,7 +195,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     };
     let mut pieces = vec![
         Span::styled(
-            format!("wryme#{}", app.window_id),
+            crate::windows::tag(&app.window_id),
             Style::default().fg(app.accent),
         ),
         Span::raw(dot),

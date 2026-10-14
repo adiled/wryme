@@ -31,6 +31,14 @@ pub fn current() -> String {
         .unwrap_or_else(|| "web".to_string())
 }
 
+pub fn tag(id: &str) -> String {
+    if id == "web" {
+        "wryme".to_string()
+    } else {
+        format!("wryme#{id}")
+    }
+}
+
 pub fn mint() -> String {
     #[cfg(target_arch = "wasm32")]
     return "web".to_string();
