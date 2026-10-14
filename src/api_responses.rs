@@ -43,6 +43,28 @@ fn hosted_tool_name(item_type: &str) -> Option<&'static str> {
 }
 
 const MAX_TOOL_CALLS: u32 = 10;
+const MULTI_AGENT_MIN: f32 = 5.6;
+
+fn supports_multi_agent(model: &str) -> bool {
+    let rest = match model.strip_prefix("gpt-") {
+        Some(r) => r,
+        None => return false,
+    };
+    let seg = rest.split('-').next().unwrap_or("");
+    let mut num = String::new();
+    let mut dot = false;
+    for c in seg.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else if c == '.' && !dot {
+            dot = true;
+            num.push(c);
+        } else {
+            break;
+        }
+    }
+    num.parse::<f32>().is_ok_and(|v| v >= MULTI_AGENT_MIN)
+}
 
 pub(crate) async fn stream(
     client: &Client,
@@ -522,7 +544,7 @@ async fn stream_once(
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
 
-    let mut attempt_multi = true;
+    let mut attempt_multi = supports_multi_agent(&station.model);
     let resp = loop {
         let reasoning = if attempt_multi {
             let effort = station.dials.patience.map(|p| p.as_wire());
@@ -1348,6 +1370,18 @@ mod tests {
         )
         .unwrap();
         assert!(rx.try_recv().is_err(), "already-rendered result must not surface twice");
+    }
+
+    #[test]
+    fn multi_agent_gates_on_gpt_version() {
+        assert!(supports_multi_agent("gpt-5.6-mini"));
+        assert!(supports_multi_agent("gpt-6.1-sol"));
+        assert!(supports_multi_agent("gpt-6-astra"));
+        assert!(!supports_multi_agent("gpt-5.4"));
+        assert!(!supports_multi_agent("gpt-4o-mini"));
+        assert!(!supports_multi_agent("gpt-4o"));
+        assert!(!supports_multi_agent("llama-3.3-70b"));
+        assert!(!supports_multi_agent("o1-mini"));
     }
 
     #[test]
