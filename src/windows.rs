@@ -2,27 +2,12 @@
 use std::collections::hash_map::DefaultHasher;
 #[cfg(not(target_arch = "wasm32"))]
 use std::hash::{Hash, Hasher};
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(not(target_arch = "wasm32"))]
-const LIVE_SECS: u64 = 20;
-#[cfg(not(target_arch = "wasm32"))]
-const INBOX_CAP: usize = 50;
 #[cfg(not(target_arch = "wasm32"))]
 const TEXT_CAP: usize = 4000;
-
-#[cfg(not(target_arch = "wasm32"))]
-fn dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| {
-        PathBuf::from(h)
-            .join(".config")
-            .join("wryme")
-            .join("windows")
-    })
-}
 
 static CURRENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -45,8 +30,8 @@ pub fn mint() -> String {
     return "web".to_string();
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         let mut h = DefaultHasher::new();
@@ -56,23 +41,33 @@ pub fn mint() -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn presence_path(id: &str) -> Option<PathBuf> {
-    dir().map(|d| d.join(format!("{id}.presence")))
+fn dir() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("WRYME_WINDOWS_DIR")
+        && !custom.is_empty()
+    {
+        return Some(PathBuf::from(custom));
+    }
+    std::env::var("HOME").ok().map(|h| {
+        PathBuf::from(h)
+            .join(".config")
+            .join("wryme")
+            .join("windows")
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn inbox_path(id: &str) -> Option<PathBuf> {
-    dir().map(|d| d.join(format!("{id}.inbox")))
+fn sock_path(id: &str) -> Option<PathBuf> {
+    dir().map(|d| d.join(format!("{id}.sock")))
 }
 
 pub fn register(id: &str) {
     set_current(id);
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(d) = dir() else { return };
-        let _ = std::fs::create_dir_all(&d);
-        touch(id);
-        prune();
+        if let Some(d) = dir() {
+            let _ = std::fs::create_dir_all(&d);
+        }
+        let _ = try_bind(id);
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -80,32 +75,57 @@ pub fn register(id: &str) {
     }
 }
 
-pub fn touch(id: &str) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let Some(p) = presence_path(id) else {
-            return;
-        };
-        let pid = std::process::id();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = std::fs::write(&p, format!("{pid} {now}"));
+#[cfg(not(target_arch = "wasm32"))]
+fn try_bind(id: &str) -> Option<tokio::net::UnixListener> {
+    let path = sock_path(id)?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = id;
+    if path.exists() && std::os::unix::net::UnixStream::connect(&path).is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    tokio::net::UnixListener::bind(&path).ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, String)>) {
+    use tokio::io::AsyncBufReadExt;
+    let Some(listener) = try_bind(id) else {
+        return;
+    };
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let (Some(from), Some(text)) = (
+                    v.get("from").and_then(|f| f.as_str()),
+                    v.get("text").and_then(|t| t.as_str()),
+                ) else {
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let _ = tx.send((from.to_string(), text.to_string()));
+            }
+        });
     }
 }
 
 pub fn unregister(id: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(p) = presence_path(id) {
-            let _ = std::fs::remove_file(&p);
-        }
-        if let Some(p) = inbox_path(id) {
+        if let Some(p) = sock_path(id) {
             let _ = std::fs::remove_file(&p);
         }
     }
@@ -116,31 +136,12 @@ pub fn unregister(id: &str) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn live(path: &PathBuf) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = meta.modified() else {
-        return false;
-    };
-    SystemTime::now()
-        .duration_since(modified)
-        .map(|d| d.as_secs() < LIVE_SECS)
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn prune() {
-    let Some(d) = dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&d) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension().and_then(|x| x.to_str()) == Some("presence") && !live(&p) {
-            let _ = std::fs::remove_file(&p);
-        }
+fn probe_live(path: &PathBuf) -> bool {
+    if std::os::unix::net::UnixStream::connect(path).is_ok() {
+        return true;
     }
+    let _ = std::fs::remove_file(path);
+    false
 }
 
 pub fn active() -> Vec<String> {
@@ -151,16 +152,14 @@ pub fn active() -> Vec<String> {
         let Some(d) = dir() else {
             return Vec::new();
         };
-        prune();
         let Ok(entries) = std::fs::read_dir(&d) else {
             return Vec::new();
         };
         let mut out: Vec<String> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| {
-                p.extension().and_then(|x| x.to_str()) == Some("presence") && live(p)
-            })
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sock"))
+            .filter(probe_live)
             .filter_map(|p| {
                 p.file_stem()
                     .and_then(|s| s.to_str())
@@ -172,69 +171,34 @@ pub fn active() -> Vec<String> {
     }
 }
 
-pub fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (to, from, text);
-        return Err("window messaging is native only".to_string());
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    let text: String = text.chars().take(TEXT_CAP).collect();
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if !active().iter().any(|id| id == to) {
+    let Some(path) = sock_path(to) else {
+        return Err("no window dir".to_string());
+    };
+    let mut stream = match tokio::net::UnixStream::connect(&path).await {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
             return Err(format!("no live window wryme#{to}"));
         }
-        let Some(path) = inbox_path(to) else {
-            return Err("no window dir".to_string());
-        };
-        let text: String = text.chars().take(TEXT_CAP).collect();
-        if text.trim().is_empty() {
-            return Err("empty message".to_string());
-        }
-        let at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let line = serde_json::json!({"from": from, "text": text, "at": at}).to_string();
-        let mut existing: Vec<String> = std::fs::read_to_string(&path)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect();
-        existing.push(line);
-        if existing.len() > INBOX_CAP {
-            existing = existing.split_off(existing.len() - INBOX_CAP);
-        }
-        match std::fs::write(&path, existing.join("\n") + "\n") {
-            Ok(()) => Ok(format!("sent to wryme#{to}")),
-            Err(e) => Err(format!("inbox write failed: {e}")),
-        }
+    };
+    let line = serde_json::json!({"from": from, "text": text}).to_string() + "\n";
+    match stream.write_all(line.as_bytes()).await {
+        Ok(()) => Ok(format!("sent to wryme#{to}")),
+        Err(e) => Err(format!("delivery failed: {e}")),
     }
 }
 
-pub fn claim(id: &str) -> Vec<(String, String)> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = id;
-        return Vec::new();
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let Some(path) = inbox_path(id) else {
-            return Vec::new();
-        };
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            return Vec::new();
-        };
-        let _ = std::fs::remove_file(&path);
-        raw.lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter_map(|v| {
-                let from = v.get("from")?.as_str()?.to_string();
-                let text = v.get("text")?.as_str()?.to_string();
-                Some((from, text))
-            })
-            .collect()
-    }
+#[cfg(target_arch = "wasm32")]
+pub async fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
+    let _ = (to, from, text);
+    Err("window messaging is native only".to_string())
 }
 
 #[cfg(test)]
@@ -246,5 +210,26 @@ mod tests {
         let id = mint();
         assert!(!id.is_empty());
         assert!(id.len() <= 4 || cfg!(target_arch = "wasm32"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn socket_roundtrip_delivers_guest_note() {
+        let dir = std::env::temp_dir().join(format!("wryme_win_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::set_var("WRYME_WINDOWS_DIR", &dir) };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move { serve("aa01", tx).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let out = send("aa01", "bb02", "hello guest").await.unwrap();
+        assert!(out.contains("aa01"));
+        let (from, text) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert_eq!((from.as_str(), text.as_str()), ("bb02", "hello guest"));
+        assert!(send("zz99", "bb02", "hi").await.is_err());
+        unsafe { std::env::remove_var("WRYME_WINDOWS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

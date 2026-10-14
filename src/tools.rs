@@ -273,7 +273,7 @@ async fn message_execute(arguments: &str) -> String {
                 return format!("{MESSAGE_NAME}: send needs {{\"to\": \"id\", \"text\": \"...\"}}");
             }
             let from = crate::windows::current();
-            match crate::windows::send(to, &from, text) {
+            match crate::windows::send(to, &from, text).await {
                 Ok(out) => out,
                 Err(e) => format!("{MESSAGE_NAME}: {e}"),
             }

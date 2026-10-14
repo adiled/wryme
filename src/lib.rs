@@ -120,7 +120,19 @@ where
     let mut in_flight_task: Option<Task> = None;
     let window_id = app.window_id.clone();
     crate::windows::register(&window_id);
-    let mut tick: u64 = 0;
+    let (guest_tx, mut guest_rx) =
+        mpsc::unbounded_channel::<(String, String)>();
+    #[cfg(target_arch = "wasm32")]
+    let _ = &guest_tx;
+    #[cfg(not(target_arch = "wasm32"))]
+    let guest_task = {
+        let id = window_id.clone();
+        Some(platform::spawn(async move {
+            crate::windows::serve(&id, guest_tx).await;
+        }))
+    };
+    #[cfg(target_arch = "wasm32")]
+    let guest_task: Option<Task> = None;
 
     loop {
         terminal
@@ -162,19 +174,17 @@ where
             Some(stream_ev) = rx.recv() => {
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
-            _ = platform::sleep(std::time::Duration::from_millis(250)) => {
-                tick += 1;
-                if tick.is_multiple_of(8) {
-                    crate::windows::touch(&app.window_id);
-                }
-                if app.guest_queue.is_empty() {
-                    app.guest_queue = crate::windows::claim(&app.window_id);
-                }
-                if !app.guest_queue.is_empty() && !app.in_flight {
-                    let (from, text) = app.guest_queue.remove(0);
+            Some(guest) = guest_rx.recv() => {
+                let (from, text) = guest;
+                if app.in_flight {
+                    app.guest_queue.push((from, text));
+                } else {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     crate::keys::start_guest_turn(&mut app, &client, &tx, &mut in_flight_task, from, text);
-                } else if jobs::has_due() && !app.in_flight {
+                }
+            }
+            _ = platform::sleep(std::time::Duration::from_millis(250)) => {
+                if jobs::has_due() && !app.in_flight {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();
                     app.in_flight = true;
@@ -196,6 +206,9 @@ where
     }
 
     if let Some(t) = in_flight_task.take() {
+        t.abort();
+    }
+    if let Some(t) = guest_task {
         t.abort();
     }
     crate::windows::unregister(&window_id);
