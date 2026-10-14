@@ -125,14 +125,21 @@ where
     #[cfg(target_arch = "wasm32")]
     let _ = &guest_tx;
     #[cfg(not(target_arch = "wasm32"))]
+    let conns = crate::windows::new_conns();
+    #[cfg(not(target_arch = "wasm32"))]
     let guest_task = {
         let id = window_id.clone();
+        let conns = conns.clone();
         Some(platform::spawn(async move {
-            crate::windows::serve(&id, guest_tx).await;
+            crate::windows::serve(&id, guest_tx, conns).await;
         }))
     };
     #[cfg(target_arch = "wasm32")]
     let guest_task: Option<Task> = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut doorway_thread: Option<std::thread::JoinHandle<()>> = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut tick: u64 = 0;
 
     loop {
         terminal
@@ -184,6 +191,16 @@ where
                 }
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    tick += 1;
+                    if tick.is_multiple_of(8)
+                        && doorway_thread.is_none()
+                        && let Some(h) = crate::windows::doorway::spawn_volunteer(conns.clone())
+                    {
+                        doorway_thread = Some(h);
+                    }
+                }
                 if jobs::has_due() && !app.in_flight {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();
@@ -211,6 +228,8 @@ where
     if let Some(t) = guest_task {
         t.abort();
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = doorway_thread;
     crate::windows::unregister(&window_id);
     Ok(())
 }

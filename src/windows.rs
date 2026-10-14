@@ -1,16 +1,31 @@
 #[cfg(not(target_arch = "wasm32"))]
+pub mod doorway;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::hash_map::DefaultHasher;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::hash::{Hash, Hasher};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 const TEXT_CAP: usize = 4000;
 
 static CURRENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) static NEXT_MSG: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+#[cfg(target_arch = "wasm32")]
 static NEXT_MSG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn next_msg_id() -> String {
     let n = NEXT_MSG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -55,7 +70,7 @@ pub fn mint() -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn dir() -> Option<PathBuf> {
+pub(crate) fn dir() -> Option<PathBuf> {
     if let Ok(custom) = std::env::var("WRYME_WINDOWS_DIR")
         && !custom.is_empty()
     {
@@ -72,6 +87,14 @@ fn dir() -> Option<PathBuf> {
 #[cfg(not(target_arch = "wasm32"))]
 fn sock_path(id: &str) -> Option<PathBuf> {
     dir().map(|d| d.join(format!("{id}.sock")))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type WebConns = Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn new_conns() -> WebConns {
+    Arc::new(Mutex::new(HashMap::new()))
 }
 
 pub fn register(id: &str) {
@@ -102,7 +125,19 @@ fn try_bind(id: &str) -> Option<tokio::net::UnixListener> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, String, String)>) {
+fn decorate(text: &str, reply_to: Option<&str>) -> String {
+    match reply_to {
+        Some(re) if !re.trim().is_empty() => format!("[re {re}] {text}"),
+        _ => text.to_string(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn serve(
+    id: &str,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, String, String)>,
+    conns: WebConns,
+) {
     use tokio::io::AsyncBufReadExt;
     let Some(listener) = try_bind(id) else {
         return;
@@ -112,6 +147,7 @@ pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, Str
             continue;
         };
         let tx = tx.clone();
+        let conns = conns.clone();
         tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(stream).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -130,12 +166,27 @@ pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, Str
                 if text.trim().is_empty() {
                     continue;
                 }
-                let id = next_msg_id();
-                let mut text = text.to_string();
-                if let Some(re) = v.get("reply_to").and_then(|r| r.as_str())
-                    && !re.trim().is_empty()
+                let id = v
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(next_msg_id);
+                let text = decorate(
+                    text,
+                    v.get("reply_to").and_then(|r| r.as_str()),
+                );
+                if let Some(relay_for) =
+                    v.get("relay_for").and_then(|r| r.as_str())
                 {
-                    text = format!("[re {re}] {text}");
+                    let note =
+                        serde_json::json!({"from": from, "id": id, "text": text})
+                            .to_string();
+                    if let Ok(c) = conns.lock()
+                        && let Some(s) = c.get(relay_for)
+                    {
+                        let _ = s.send(note);
+                    }
+                    continue;
                 }
                 let _ = tx.send((from.to_string(), id, text));
             }
@@ -148,6 +199,9 @@ pub fn unregister(id: &str) {
     {
         if let Some(p) = sock_path(id) {
             let _ = std::fs::remove_file(&p);
+        }
+        if doorway::volunteering() {
+            doorway::stop_volunteer();
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -187,17 +241,52 @@ pub fn active() -> Vec<String> {
                     .map(str::to_string)
             })
             .collect();
+        if doorway::doorway_alive() {
+            out.extend(doorway::roster_read());
+        }
         out.sort();
         out
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<String, String> {
+pub(crate) async fn transmit(
+    to: &str,
+    from: &str,
+    text: &str,
+    reply_to: &str,
+    id: &str,
+) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
-    let text: String = text.chars().take(TEXT_CAP).collect();
-    if text.trim().is_empty() {
-        return Err("empty message".to_string());
+    if doorway::roster_read().iter().any(|x| x == to) {
+        let volid = doorway::volunteer_id();
+        if volid.is_empty() {
+            return Err(format!("no live window wryme#{to}"));
+        }
+        let Some(path) = sock_path(&volid) else {
+            return Err("no window dir".to_string());
+        };
+        let mut stream = match tokio::net::UnixStream::connect(&path).await {
+            Ok(s) => s,
+            Err(_) => {
+                doorway::clear_volunteer_hint();
+                return Err("volunteer gone, retry".to_string());
+            }
+        };
+        let mut note = serde_json::json!({
+            "relay_for": to,
+            "from": from,
+            "id": id,
+            "text": text,
+        });
+        if !reply_to.trim().is_empty() {
+            note["reply_to"] = serde_json::json!(reply_to);
+        }
+        let line = note.to_string() + "\n";
+        return match stream.write_all(line.as_bytes()).await {
+            Ok(()) => Ok(format!("sent to wryme#{to}")),
+            Err(e) => Err(format!("delivery failed: {e}")),
+        };
     }
     let Some(path) = sock_path(to) else {
         return Err("no window dir".to_string());
@@ -209,7 +298,7 @@ pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<St
             return Err(format!("no live window wryme#{to}"));
         }
     };
-    let mut note = serde_json::json!({"from": from, "text": text});
+    let mut note = serde_json::json!({"from": from, "id": id, "text": text});
     if !reply_to.trim().is_empty() {
         note["reply_to"] = serde_json::json!(reply_to);
     }
@@ -218,6 +307,15 @@ pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<St
         Ok(()) => Ok(format!("sent to wryme#{to}")),
         Err(e) => Err(format!("delivery failed: {e}")),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<String, String> {
+    let text: String = text.chars().take(TEXT_CAP).collect();
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    transmit(to, from, &text, reply_to, &next_msg_id()).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -240,11 +338,14 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn socket_roundtrip_delivers_guest_note() {
+        let _g = TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("wryme_win_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::set_var("WRYME_WINDOWS_DIR", &dir) };
+        let conns = new_conns();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(async move { serve("aa01", tx).await });
+        let c = conns.clone();
+        tokio::spawn(async move { serve("aa01", tx, c).await });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let out = send("aa01", "bb02", "hello guest", "").await.unwrap();
         assert!(out.contains("aa01"));
