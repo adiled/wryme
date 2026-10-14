@@ -207,11 +207,17 @@ where
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     tick += 1;
-                    if tick.is_multiple_of(8)
-                        && doorway_thread.is_none()
-                        && let Some(h) = crate::windows::doorway::spawn_volunteer(conns.clone())
-                    {
-                        doorway_thread = Some(h);
+                    if tick.is_multiple_of(8) {
+                        if !crate::windows::doorway::doorway_alive() {
+                            doorway_thread = None;
+                            crate::windows::doorway::stop_volunteer();
+                        }
+                        if doorway_thread.is_none()
+                            && let Some(h) =
+                                crate::windows::doorway::spawn_volunteer(conns.clone())
+                        {
+                            doorway_thread = Some(h);
+                        }
                     }
                 }
                 if jobs::has_due() && !app.in_flight {

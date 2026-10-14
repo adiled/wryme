@@ -23,7 +23,11 @@ fn doorway_port() -> u16 {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn doorway_alive() -> bool {
-    std::net::TcpStream::connect(("127.0.0.1", doorway_port())).is_ok()
+    if std::net::TcpStream::connect(("127.0.0.1", doorway_port())).is_ok() {
+        return true;
+    }
+    clear_volunteer_hint();
+    false
 }
 
 #[cfg(not(target_arch = "wasm32"))]
