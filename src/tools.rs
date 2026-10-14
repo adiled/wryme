@@ -225,9 +225,13 @@ pub fn message_name() -> &'static str {
 }
 
 pub const MESSAGE_DESCRIPTION: &str = "\
-Send a note to another live wryme window. The note lands there as a guest \
-prompt from your window id, stamped with a msg id like #m12. Actions:\n  list — show live window ids.\n  send {to, text, reply_to} — deliver text to wryme#id. Set reply_to \
-to the #id in brackets when answering a guest note, else empty.";
+Deliver notes between live wryme windows. Whenever the user asks you to \
+tell, ask, say, or send anything to a wryme#id, you MUST call this tool \
+with action send instead of writing the note yourself. The note lands \
+there as a guest prompt from your window id, stamped with a msg id like \
+#m12. Actions:\n  list — show live window ids. Call it first when the user \
+names no id.\n  send {to, text, reply_to} — deliver text to wryme#id. Set \
+reply_to to the #id in brackets when answering a guest note, else empty.";
 
 pub fn message_parameters() -> serde_json::Value {
     serde_json::json!({
