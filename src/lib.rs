@@ -33,6 +33,7 @@ pub mod station_save;
 pub mod tools;
 pub mod ui;
 pub mod voice;
+pub mod windows;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;
@@ -117,6 +118,9 @@ where
     let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<Task> = None;
+    let window_id = app.window_id.clone();
+    crate::windows::register(&window_id);
+    let mut tick: u64 = 0;
 
     loop {
         terminal
@@ -159,7 +163,18 @@ where
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
-                if jobs::has_due() && !app.in_flight {
+                tick += 1;
+                if tick.is_multiple_of(8) {
+                    crate::windows::touch(&app.window_id);
+                }
+                if app.guest_queue.is_empty() {
+                    app.guest_queue = crate::windows::claim(&app.window_id);
+                }
+                if !app.guest_queue.is_empty() && !app.in_flight {
+                    let (from, text) = app.guest_queue.remove(0);
+                    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+                    crate::keys::start_guest_turn(&mut app, &client, &tx, &mut in_flight_task, from, text);
+                } else if jobs::has_due() && !app.in_flight {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();
                     app.in_flight = true;
@@ -183,6 +198,7 @@ where
     if let Some(t) = in_flight_task.take() {
         t.abort();
     }
+    crate::windows::unregister(&window_id);
     Ok(())
 }
 
@@ -269,6 +285,9 @@ fn handle_stream_event(
             if !app.awaiting.is_empty() {
                 let pending = std::mem::take(&mut app.awaiting);
                 crate::keys::start_turn(app, client, tx, in_flight_task, pending);
+            } else if !app.guest_queue.is_empty() {
+                let (from, text) = app.guest_queue.remove(0);
+                crate::keys::start_guest_turn(app, client, tx, in_flight_task, from, text);
             }
         }
         StreamEvent::Error { message } => {

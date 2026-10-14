@@ -57,6 +57,8 @@ pub async fn execute(
         explore::execute(name, arguments).await
     } else if name == book_name() {
         Some(book_execute(engine, arguments).await)
+    } else if name == message_name() {
+        Some(message_execute(arguments).await)
     } else {
         None
     };
@@ -216,8 +218,72 @@ pub fn book_parameters() -> serde_json::Value {
     })
 }
 
+pub const MESSAGE_NAME: &str = "message";
+
+pub fn message_name() -> &'static str {
+    MESSAGE_NAME
+}
+
+pub const MESSAGE_DESCRIPTION: &str = "\
+Send a note to another live wryme window. The note lands there as a guest \
+prompt from your window id. Actions:\n  list — show live window ids.\n  send {to, text} — deliver text to wryme#id.";
+
+pub fn message_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "send"],
+                "description": "what to do"
+            },
+            "to": {
+                "type": "string",
+                "description": "window id without the wryme# prefix"
+            },
+            "text": {
+                "type": "string",
+                "description": "note to deliver"
+            }
+        },
+        "required": ["action", "to", "text"],
+        "additionalProperties": false
+    })
+}
+
+async fn message_execute(arguments: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(arguments) {
+        Ok(v) => v,
+        Err(_) => return format!("{MESSAGE_NAME}: could not parse arguments"),
+    };
+    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    match action {
+        "list" => {
+            let ids = crate::windows::active();
+            if ids.is_empty() {
+                return "no other live windows".to_string();
+            }
+            let names: Vec<String> = ids.iter().map(|id| format!("wryme#{id}")).collect();
+            format!("live windows: {}", names.join(", "))
+        }
+        "send" => {
+            let to = v.get("to").and_then(|t| t.as_str()).unwrap_or("");
+            let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if to.is_empty() || text.trim().is_empty() {
+                return format!("{MESSAGE_NAME}: send needs {{\"to\": \"id\", \"text\": \"...\"}}");
+            }
+            let from = crate::windows::current();
+            match crate::windows::send(to, &from, text) {
+                Ok(out) => out,
+                Err(e) => format!("{MESSAGE_NAME}: {e}"),
+            }
+        }
+        _ => format!("{MESSAGE_NAME}: unknown action '{action}'"),
+    }
+}
+
 pub fn is_hidden_tool(name: &str) -> bool {
-    name == BOOK_NAME || name == check_name() || is_communing_tool(name)
+    name == BOOK_NAME || name == check_name() || is_communing_tool(name) || name == MESSAGE_NAME
 }
 
 pub fn is_communing_tool(name: &str) -> bool {
@@ -396,6 +462,15 @@ pub fn tool_defs_chat() -> Vec<serde_json::Value> {
                 "strict": true,
             },
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": message_name(),
+                "description": MESSAGE_DESCRIPTION,
+                "parameters": message_parameters(),
+                "strict": true,
+            },
+        }),
     ]
 }
 
@@ -421,6 +496,13 @@ pub fn tool_defs() -> Vec<serde_json::Value> {
             "name": book_name(),
             "description": BOOK_DESCRIPTION,
             "parameters": book_parameters(),
+            "strict": true,
+        }),
+        serde_json::json!({
+            "type": "function",
+            "name": message_name(),
+            "description": MESSAGE_DESCRIPTION,
+            "parameters": message_parameters(),
             "strict": true,
         }),
     ]
@@ -467,20 +549,21 @@ mod tests {
     }
 
     #[test]
-    fn tool_defs_advertises_four_tools() {
+    fn tool_defs_advertises_five_tools() {
         let defs = tool_defs();
-        assert_eq!(defs.len(), 4);
+        assert_eq!(defs.len(), 5);
         let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&explore::tool_name().as_str()));
         assert!(names.contains(&check_name().as_str()));
         assert!(names.contains(&book_name()));
+        assert!(names.contains(&message_name()));
     }
 
     #[test]
     fn tool_defs_chat_uses_nested_function_wrapper() {
         let defs = tool_defs_chat();
-        assert_eq!(defs.len(), 4);
+        assert_eq!(defs.len(), 5);
         for d in &defs {
             assert_eq!(d["type"].as_str().unwrap(), "function");
             let f = &d["function"];
@@ -495,9 +578,16 @@ mod tests {
             .collect();
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&book_name()));
+        assert!(names.contains(&message_name()));
         for d in &defs {
             assert_eq!(d["function"]["strict"], true);
         }
+    }
+
+    #[test]
+    fn message_tool_is_hidden_and_lists() {
+        assert!(is_hidden_tool(message_name()));
+        assert!(!is_book_tool(message_name()));
     }
 
     #[test]
@@ -507,6 +597,7 @@ mod tests {
             explore::tool_parameters(),
             check_parameters(),
             book_parameters(),
+            message_parameters(),
         ] {
             assert_eq!(params["additionalProperties"], false);
             let props = params["properties"].as_object().unwrap();

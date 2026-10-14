@@ -41,6 +41,7 @@ pub struct Message {
     pub role: Role,
     pub content: String,
     pub images: Vec<String>,
+    pub guest: Option<String>,
     pub brain: String,
     pub heart: String,
     pub streaming: bool,
@@ -59,6 +60,8 @@ fn now_hhmm() -> String {
 pub struct App {
     pub messages: Vec<Message>,
     pub system: Option<String>,
+    pub window_id: String,
+    pub guest_queue: Vec<(String, String)>,
     pub in_flight: bool,
     pub status: String,
     pub awaiting: String,
@@ -142,6 +145,8 @@ impl App {
         Self {
             messages: Vec::new(),
             system,
+            window_id: crate::windows::mint(),
+            guest_queue: Vec::new(),
             in_flight: false,
             status: String::new(),
             awaiting: String::new(),
@@ -259,6 +264,7 @@ impl App {
             role: Role::User,
             content,
             images,
+            guest: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -277,6 +283,30 @@ impl App {
         }
     }
 
+    pub fn push_guest(&mut self, from: String, content: String) {
+        self.messages.push(Message {
+            role: Role::User,
+            content,
+            images: Vec::new(),
+            guest: Some(from.clone()),
+            brain: String::new(),
+            heart: String::new(),
+            streaming: false,
+            waiting: false,
+            timestamp: now_hhmm(),
+            phase: Phase::Streaming,
+            current_tool: None,
+            turn_id: 0,
+            tool_events: Vec::new(),
+        });
+        if let Some(last) = self.messages.last()
+            && last.role == Role::User
+            && let Ok(mut e) = self.engine.lock()
+        {
+            e.record_turn("user", &format!("[from wryme#{from}] {}", last.content));
+        }
+    }
+
     fn streaming_assistant(&mut self) -> Option<&mut Message> {
         self.messages
             .iter_mut()
@@ -289,6 +319,7 @@ impl App {
             role: Role::Assistant,
             content: String::new(),
             images: Vec::new(),
+            guest: None,
             brain: String::new(),
             heart: String::new(),
             streaming: true,
@@ -534,7 +565,10 @@ impl App {
                     Role::Assistant => "assistant",
                 }
                 .into(),
-                content: m.content.clone(),
+                content: match (&m.role, &m.guest) {
+                    (Role::User, Some(from)) => format!("[from wryme#{from}] {}", m.content),
+                    _ => m.content.clone(),
+                },
                 images: if m.role == Role::User {
                     m.images.clone()
                 } else {
