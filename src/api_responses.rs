@@ -36,6 +36,8 @@ fn hosted_tool_name(item_type: &str) -> Option<&'static str> {
         "computer_call" | "computer_use_call" => Some("computer_use"),
         "mcp_list_tools" => Some("mcp_list_tools"),
         "mcp_approval_request" => Some("mcp_approval_request"),
+        "multi_agent_call" | "multi_agent_call_output" => Some("multi_agent"),
+        "agent_message" => Some("agent_message"),
         _ => None,
     }
 }
@@ -968,6 +970,11 @@ fn handle_event(
             | "response.mcp_call.arguments.done" => {
                 let _ = tx.send(StreamEvent::ToolCall { name: None });
             }
+            "response.multi_agent_call.in_progress" | "response.agent_message.in_progress" => {
+                let _ = tx.send(StreamEvent::ToolCall {
+                    name: Some("multi_agent".to_string()),
+                });
+            }
             "response.mcp_call.failed" => {
                 let msg = v
                     .get("error")
@@ -1311,6 +1318,35 @@ mod tests {
         .unwrap();
         handle_event(
             b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"mcp_list_tools\",\"id\":\"ml_1\",\"server_label\":\"hum\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert_eq!(turn.carry.len(), 2);
+        assert!(turn.calls.is_empty());
+    }
+
+    #[test]
+    fn multi_agent_items_signal_communing_and_carry_silently() {
+        let (tx, mut rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::ToolCall { name } if name.as_deref() == Some("multi_agent")));
+        assert!(turn.calls.is_empty());
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"amsg_1\",\"type\":\"agent_message\",\"author\":\"/root/a\",\"recipient\":\"/root\"}}\n\n",
             &tx,
             &mut turn,
         )

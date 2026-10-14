@@ -217,7 +217,21 @@ pub fn book_parameters() -> serde_json::Value {
 }
 
 pub fn is_hidden_tool(name: &str) -> bool {
-    name == BOOK_NAME || name == check_name()
+    name == BOOK_NAME || name == check_name() || is_communing_tool(name)
+}
+
+pub fn is_communing_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "multi_agent"
+            | "spawn_agent"
+            | "send_message"
+            | "followup_task"
+            | "wait_agent"
+            | "interrupt_agent"
+            | "list_agents"
+            | "agent_message"
+    )
 }
 
 pub fn is_book_tool(name: &str) -> bool {
@@ -441,6 +455,15 @@ mod tests {
     fn check_name_is_shell_suffixed() {
         let n = check_name();
         assert!(n.ends_with("_check"));
+    }
+
+    #[test]
+    fn communing_tools_stay_hidden() {
+        for n in ["multi_agent", "spawn_agent", "agent_message", "list_agents"] {
+            assert!(is_communing_tool(n));
+            assert!(is_hidden_tool(n));
+        }
+        assert!(!is_communing_tool(&shell_name()));
     }
 
     #[test]

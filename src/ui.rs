@@ -522,6 +522,7 @@ fn push_message(
         let label = match (msg.phase, hidden, bookish) {
             (Phase::Writing, ..) => Some("  writing…"),
             (Phase::Thinking, ..) => Some("  thinking…"),
+            (Phase::Communing, ..) => Some("  communing…"),
             (Phase::Tinkering, false, _) => Some("  tinkering…"),
             (Phase::Tinkering, true, true) => Some("  reminiscing…"),
             (Phase::Tinkering, true, false) => None,
