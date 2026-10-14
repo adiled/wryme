@@ -121,7 +121,7 @@ where
     let window_id = app.window_id.clone();
     crate::windows::register(&window_id);
     let (guest_tx, mut guest_rx) =
-        mpsc::unbounded_channel::<(String, String)>();
+        mpsc::unbounded_channel::<(String, String, String)>();
     #[cfg(target_arch = "wasm32")]
     let _ = &guest_tx;
     #[cfg(not(target_arch = "wasm32"))]
@@ -175,12 +175,12 @@ where
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
             Some(guest) = guest_rx.recv() => {
-                let (from, text) = guest;
+                let (from, id, text) = guest;
                 if app.in_flight {
-                    app.guest_queue.push((from, text));
+                    app.guest_queue.push((from, id, text));
                 } else {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-                    crate::keys::start_guest_turn(&mut app, &client, &tx, &mut in_flight_task, from, text);
+                    crate::keys::start_guest_turn(&mut app, &client, &tx, &mut in_flight_task, from, id, text);
                 }
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
@@ -299,8 +299,8 @@ fn handle_stream_event(
                 let pending = std::mem::take(&mut app.awaiting);
                 crate::keys::start_turn(app, client, tx, in_flight_task, pending);
             } else if !app.guest_queue.is_empty() {
-                let (from, text) = app.guest_queue.remove(0);
-                crate::keys::start_guest_turn(app, client, tx, in_flight_task, from, text);
+                let (from, id, text) = app.guest_queue.remove(0);
+                crate::keys::start_guest_turn(app, client, tx, in_flight_task, from, id, text);
             }
         }
         StreamEvent::Error { message } => {

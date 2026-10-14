@@ -42,6 +42,7 @@ pub struct Message {
     pub content: String,
     pub images: Vec<String>,
     pub guest: Option<String>,
+    pub msg_id: Option<String>,
     pub brain: String,
     pub heart: String,
     pub streaming: bool,
@@ -61,7 +62,7 @@ pub struct App {
     pub messages: Vec<Message>,
     pub system: Option<String>,
     pub window_id: String,
-    pub guest_queue: Vec<(String, String)>,
+    pub guest_queue: Vec<(String, String, String)>,
     pub in_flight: bool,
     pub status: String,
     pub awaiting: String,
@@ -265,6 +266,7 @@ impl App {
             content,
             images,
             guest: None,
+            msg_id: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -283,12 +285,13 @@ impl App {
         }
     }
 
-    pub fn push_guest(&mut self, from: String, content: String) {
+    pub fn push_guest(&mut self, from: String, id: String, content: String) {
         self.messages.push(Message {
             role: Role::User,
             content,
             images: Vec::new(),
             guest: Some(from.clone()),
+            msg_id: Some(id.clone()),
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -303,7 +306,7 @@ impl App {
             && last.role == Role::User
             && let Ok(mut e) = self.engine.lock()
         {
-            e.record_turn("user", &format!("[from wryme#{from}] {}", last.content));
+            e.record_turn("user", &format!("[from wryme#{from} #{id}] {}", last.content));
         }
     }
 
@@ -320,6 +323,7 @@ impl App {
             content: String::new(),
             images: Vec::new(),
             guest: None,
+            msg_id: None,
             brain: String::new(),
             heart: String::new(),
             streaming: true,
@@ -565,8 +569,13 @@ impl App {
                     Role::Assistant => "assistant",
                 }
                 .into(),
-                content: match (&m.role, &m.guest) {
-                    (Role::User, Some(from)) => format!("[from wryme#{from}] {}", m.content),
+                content: match (&m.role, &m.guest, &m.msg_id) {
+                    (Role::User, Some(from), Some(id)) => {
+                        format!("[from wryme#{from} #{id}] {}", m.content)
+                    }
+                    (Role::User, Some(from), None) => {
+                        format!("[from wryme#{from}] {}", m.content)
+                    }
                     _ => m.content.clone(),
                 },
                 images: if m.role == Role::User {

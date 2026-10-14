@@ -250,9 +250,10 @@ pub fn start_guest_turn(
     tx: &mpsc::UnboundedSender<StreamEvent>,
     in_flight: &mut Option<crate::platform::Task>,
     from: String,
+    id: String,
     text: String,
 ) {
-    app.push_guest(from, text);
+    app.push_guest(from, id, text);
     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
     app.begin_assistant();
     app.stop_voice();

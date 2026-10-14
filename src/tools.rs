@@ -226,7 +226,8 @@ pub fn message_name() -> &'static str {
 
 pub const MESSAGE_DESCRIPTION: &str = "\
 Send a note to another live wryme window. The note lands there as a guest \
-prompt from your window id. Actions:\n  list — show live window ids.\n  send {to, text} — deliver text to wryme#id.";
+prompt from your window id, stamped with a msg id like #m12. Actions:\n  list — show live window ids.\n  send {to, text, reply_to} — deliver text to wryme#id. Set reply_to \
+to the #id in brackets when answering a guest note, else empty.";
 
 pub fn message_parameters() -> serde_json::Value {
     serde_json::json!({
@@ -244,9 +245,13 @@ pub fn message_parameters() -> serde_json::Value {
             "text": {
                 "type": "string",
                 "description": "note to deliver"
+            },
+            "reply_to": {
+                "type": "string",
+                "description": "msg id being answered, or empty for a new note"
             }
         },
-        "required": ["action", "to", "text"],
+        "required": ["action", "to", "text", "reply_to"],
         "additionalProperties": false
     })
 }
@@ -269,11 +274,12 @@ async fn message_execute(arguments: &str) -> String {
         "send" => {
             let to = v.get("to").and_then(|t| t.as_str()).unwrap_or("");
             let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let reply_to = v.get("reply_to").and_then(|t| t.as_str()).unwrap_or("");
             if to.is_empty() || text.trim().is_empty() {
-                return format!("{MESSAGE_NAME}: send needs {{\"to\": \"id\", \"text\": \"...\"}}");
+                return format!("{MESSAGE_NAME}: send needs {{\"to\": \"id\", \"text\": \"...\", \"reply_to\": \"\"}}");
             }
             let from = crate::windows::current();
-            match crate::windows::send(to, &from, text).await {
+            match crate::windows::send(to, &from, text, reply_to).await {
                 Ok(out) => out,
                 Err(e) => format!("{MESSAGE_NAME}: {e}"),
             }

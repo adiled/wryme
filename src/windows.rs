@@ -10,6 +10,12 @@ use std::path::PathBuf;
 const TEXT_CAP: usize = 4000;
 
 static CURRENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static NEXT_MSG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn next_msg_id() -> String {
+    let n = NEXT_MSG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("m{n}")
+}
 
 pub fn set_current(id: &str) {
     if let Ok(mut c) = CURRENT.lock() {
@@ -88,7 +94,7 @@ fn try_bind(id: &str) -> Option<tokio::net::UnixListener> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, String)>) {
+pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, String, String)>) {
     use tokio::io::AsyncBufReadExt;
     let Some(listener) = try_bind(id) else {
         return;
@@ -116,7 +122,14 @@ pub async fn serve(id: &str, tx: tokio::sync::mpsc::UnboundedSender<(String, Str
                 if text.trim().is_empty() {
                     continue;
                 }
-                let _ = tx.send((from.to_string(), text.to_string()));
+                let id = next_msg_id();
+                let mut text = text.to_string();
+                if let Some(re) = v.get("reply_to").and_then(|r| r.as_str())
+                    && !re.trim().is_empty()
+                {
+                    text = format!("[re {re}] {text}");
+                }
+                let _ = tx.send((from.to_string(), id, text));
             }
         });
     }
@@ -172,7 +185,7 @@ pub fn active() -> Vec<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
+pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
     let text: String = text.chars().take(TEXT_CAP).collect();
     if text.trim().is_empty() {
@@ -188,7 +201,11 @@ pub async fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
             return Err(format!("no live window wryme#{to}"));
         }
     };
-    let line = serde_json::json!({"from": from, "text": text}).to_string() + "\n";
+    let mut note = serde_json::json!({"from": from, "text": text});
+    if !reply_to.trim().is_empty() {
+        note["reply_to"] = serde_json::json!(reply_to);
+    }
+    let line = note.to_string() + "\n";
     match stream.write_all(line.as_bytes()).await {
         Ok(()) => Ok(format!("sent to wryme#{to}")),
         Err(e) => Err(format!("delivery failed: {e}")),
@@ -196,8 +213,8 @@ pub async fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub async fn send(to: &str, from: &str, text: &str) -> Result<String, String> {
-    let _ = (to, from, text);
+pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<String, String> {
+    let _ = (to, from, text, reply_to);
     Err("window messaging is native only".to_string())
 }
 
@@ -221,14 +238,23 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move { serve("aa01", tx).await });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let out = send("aa01", "bb02", "hello guest").await.unwrap();
+        let out = send("aa01", "bb02", "hello guest", "").await.unwrap();
         assert!(out.contains("aa01"));
-        let (from, text) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        let (from, id, text) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("timed out")
             .expect("channel closed");
-        assert_eq!((from.as_str(), text.as_str()), ("bb02", "hello guest"));
-        assert!(send("zz99", "bb02", "hi").await.is_err());
+        assert_eq!(from.as_str(), "bb02");
+        assert!(id.starts_with('m'));
+        assert_eq!(text.as_str(), "hello guest");
+        let out = send("aa01", "bb02", "got it", &id).await.unwrap();
+        assert!(out.contains("aa01"));
+        let (_, _, text) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert!(text.contains(&format!("[re {id}]")));
+        assert!(send("zz99", "bb02", "hi", "").await.is_err());
         unsafe { std::env::remove_var("WRYME_WINDOWS_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
