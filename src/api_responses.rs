@@ -36,11 +36,35 @@ fn hosted_tool_name(item_type: &str) -> Option<&'static str> {
         "computer_call" | "computer_use_call" => Some("computer_use"),
         "mcp_list_tools" => Some("mcp_list_tools"),
         "mcp_approval_request" => Some("mcp_approval_request"),
+        "multi_agent_call" | "multi_agent_call_output" => Some("multi_agent"),
+        "agent_message" => Some("agent_message"),
         _ => None,
     }
 }
 
 const MAX_TOOL_CALLS: u32 = 10;
+const MULTI_AGENT_MIN: f32 = 5.6;
+
+fn supports_multi_agent(model: &str) -> bool {
+    let rest = match model.strip_prefix("gpt-") {
+        Some(r) => r,
+        None => return false,
+    };
+    let seg = rest.split('-').next().unwrap_or("");
+    let mut num = String::new();
+    let mut dot = false;
+    for c in seg.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else if c == '.' && !dot {
+            dot = true;
+            num.push(c);
+        } else {
+            break;
+        }
+    }
+    num.parse::<f32>().is_ok_and(|v| v >= MULTI_AGENT_MIN)
+}
 
 pub(crate) async fn stream(
     client: &Client,
@@ -458,7 +482,10 @@ async fn stream_once(
         reasoning: Option<Reasoning>,
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<&'a str>>,
-        max_tool_calls: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_tool_calls: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        multi_agent: Option<MultiAgent>,
         truncation: &'a str,
         tools: &'a [serde_json::Value],
     }
@@ -471,14 +498,12 @@ async fn stream_once(
         summary: Option<&'static str>,
     }
 
-    let reasoning =
-        (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
-            effort: station.dials.patience.map(|p| p.as_wire()),
-            summary: station.dials.brainy.map(|b| b.as_wire()),
-        });
-    let include = reasoning
-        .as_ref()
-        .map(|_| vec!["reasoning.encrypted_content"]);
+    #[derive(Serialize)]
+    struct MultiAgent {
+        enabled: bool,
+        max_concurrent_subagents: u8,
+    }
+
     let toolless = crate::api::is_toolless(&shop.name, &station.model);
     let tools = if toolless {
         Vec::new()
@@ -518,46 +543,91 @@ async fn stream_once(
 
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/responses", base);
-    let body = ResponsesReq {
-        model: &station.model,
-        input,
-        stream: true,
-        store,
-        instructions,
-        previous_response_id,
-        temperature: station.dials.boldness,
-        reasoning,
-        include,
-        max_tool_calls: if tools_off { 0 } else { MAX_TOOL_CALLS },
-        truncation: "auto",
-        tools: &tools,
-    };
 
-    let mut req = client.http.post(&url).json(&body);
-    if !shop.key.is_empty() {
-        req = req.bearer_auth(&shop.key);
-    }
-    for (k, v) in &shop.headers {
-        req = req.header(k, v);
-    }
-    tracing::debug!(
-        url = %url,
-        model = %station.model,
-        store = body.store,
-        body = %serde_json::to_string(&body).unwrap_or_default(),
-        "responses request"
-    );
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| crate::api::unreachable(&shop.name, &url, &e))?;
+    let mut attempt_multi =
+        supports_multi_agent(&station.model) && !crate::api::is_nomulti(&shop.name, &station.model);
+    let resp = loop {
+        let reasoning = if attempt_multi {
+            let effort = station.dials.patience.map(|p| p.as_wire());
+            if effort.is_none() {
+                None
+            } else {
+                Some(Reasoning {
+                    effort,
+                    summary: None,
+                })
+            }
+        } else {
+            (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
+                effort: station.dials.patience.map(|p| p.as_wire()),
+                summary: station.dials.brainy.map(|b| b.as_wire()),
+            })
+        };
+        let include = reasoning
+            .as_ref()
+            .map(|_| vec!["reasoning.encrypted_content"]);
+        let body = ResponsesReq {
+            model: &station.model,
+            input,
+            stream: true,
+            store,
+            instructions,
+            previous_response_id,
+            temperature: station.dials.boldness,
+            reasoning,
+            include,
+            max_tool_calls: if attempt_multi {
+                None
+            } else if tools_off {
+                Some(0)
+            } else {
+                Some(MAX_TOOL_CALLS)
+            },
+            multi_agent: attempt_multi.then_some(MultiAgent {
+                enabled: true,
+                max_concurrent_subagents: 3,
+            }),
+            truncation: "auto",
+            tools: &tools,
+        };
 
-    if !resp.status().is_success() {
+        let mut req = client.http.post(&url).json(&body);
+        if attempt_multi {
+            req = req.header("OpenAI-Beta", "responses_multi_agent=v1");
+        }
+        if !shop.key.is_empty() {
+            req = req.bearer_auth(&shop.key);
+        }
+        for (k, v) in &shop.headers {
+            req = req.header(k, v);
+        }
+        tracing::debug!(
+            url = %url,
+            model = %station.model,
+            store = body.store,
+            body = %serde_json::to_string(&body).unwrap_or_default(),
+            "responses request"
+        );
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::api::unreachable(&shop.name, &url, &e))?;
+
+        if resp.status().is_success() {
+            break resp;
+        }
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         tracing::warn!(url = %url, %status, body = %truncate(&body, 2000), "responses upstream error");
-        return Err(anyhow!("upstream {}: {}", status, truncate(&body, 800)));
-    }
+        let msg = format!("upstream {}: {}", status, truncate(&body, 800));
+        if attempt_multi && msg.to_lowercase().contains("multi_agent") {
+            tracing::warn!(shop = %shop.name, "multi_agent unsupported, retrying without it");
+            crate::api::mark_nomulti(&shop.name, &station.model);
+            attempt_multi = false;
+            continue;
+        }
+        return Err(anyhow!(msg));
+    };
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -968,6 +1038,11 @@ fn handle_event(
             | "response.mcp_call.arguments.done" => {
                 let _ = tx.send(StreamEvent::ToolCall { name: None });
             }
+            "response.multi_agent_call.in_progress" | "response.agent_message.in_progress" => {
+                let _ = tx.send(StreamEvent::ToolCall {
+                    name: Some("multi_agent".to_string()),
+                });
+            }
             "response.mcp_call.failed" => {
                 let msg = v
                     .get("error")
@@ -1300,6 +1375,18 @@ mod tests {
     }
 
     #[test]
+    fn multi_agent_gates_on_gpt_version() {
+        assert!(supports_multi_agent("gpt-5.6-mini"));
+        assert!(supports_multi_agent("gpt-6.1-sol"));
+        assert!(supports_multi_agent("gpt-6-astra"));
+        assert!(!supports_multi_agent("gpt-5.4"));
+        assert!(!supports_multi_agent("gpt-4o-mini"));
+        assert!(!supports_multi_agent("gpt-4o"));
+        assert!(!supports_multi_agent("llama-3.3-70b"));
+        assert!(!supports_multi_agent("o1-mini"));
+    }
+
+    #[test]
     fn hosted_call_items_carry_forward_but_never_become_local_calls() {
         let (tx, _rx) = channel();
         let mut turn = Turn::default();
@@ -1311,6 +1398,35 @@ mod tests {
         .unwrap();
         handle_event(
             b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"mcp_list_tools\",\"id\":\"ml_1\",\"server_label\":\"hum\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert_eq!(turn.carry.len(), 2);
+        assert!(turn.calls.is_empty());
+    }
+
+    #[test]
+    fn multi_agent_items_signal_communing_and_carry_silently() {
+        let (tx, mut rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        let ev = rx.try_recv().unwrap();
+        assert!(matches!(ev, StreamEvent::ToolCall { name } if name.as_deref() == Some("multi_agent")));
+        assert!(turn.calls.is_empty());
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"amsg_1\",\"type\":\"agent_message\",\"author\":\"/root/a\",\"recipient\":\"/root\"}}\n\n",
             &tx,
             &mut turn,
         )

@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub(crate) static TOOLLESS_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+pub(crate) static NOMULTI_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 type ShopToolMap = HashMap<(String, String), Vec<Tool>>;
 
@@ -35,6 +36,23 @@ pub(crate) fn mark_toolless(shop: &str, model: &str) {
 
 fn toolless_key(shop: &str, model: &str) -> String {
     format!("{shop}\u{1f}{model}")
+}
+
+pub(crate) fn is_nomulti(shop: &str, model: &str) -> bool {
+    NOMULTI_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|s| s.contains(&toolless_key(shop, model)))
+        .unwrap_or(false)
+}
+
+pub(crate) fn mark_nomulti(shop: &str, model: &str) {
+    if let Ok(mut s) = NOMULTI_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+    {
+        s.insert(toolless_key(shop, model));
+    }
 }
 
 pub(crate) fn record_tools(shop: &str, model: &str, tools: Vec<Tool>) {

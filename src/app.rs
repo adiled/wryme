@@ -18,6 +18,7 @@ pub enum Phase {
     Streaming,
     Thinking,
     Tinkering,
+    Communing,
     Writing,
 }
 
@@ -375,7 +376,14 @@ impl App {
 
     pub fn record_tool_call(&mut self, name: Option<String>) {
         if let Some(m) = self.streaming_assistant() {
-            m.phase = Phase::Tinkering;
+            let communing = name
+                .as_deref()
+                .is_some_and(crate::tools::is_communing_tool);
+            m.phase = if communing {
+                Phase::Communing
+            } else {
+                Phase::Tinkering
+            };
             if let Some(n) = name {
                 m.current_tool = Some(n);
             }
