@@ -127,17 +127,7 @@ where
     #[cfg(target_arch = "wasm32")]
     let _ = &guest_tx;
     #[cfg(not(target_arch = "wasm32"))]
-    let conns = crate::windows::new_conns();
-    #[cfg(not(target_arch = "wasm32"))]
-    let guest_task = {
-        let id = window_id.clone();
-        let conns = conns.clone();
-        Some(platform::spawn(async move {
-            crate::windows::serve(&id, guest_tx, conns).await;
-        }))
-    };
-    #[cfg(target_arch = "wasm32")]
-    let guest_task: Option<Task> = None;
+    crate::windows::ensure_reader(&window_id, guest_tx);
     #[cfg(not(target_arch = "wasm32"))]
     let mut doorway_thread: Option<std::thread::JoinHandle<()>> = None;
     #[cfg(not(target_arch = "wasm32"))]
@@ -207,17 +197,11 @@ where
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     tick += 1;
-                    if tick.is_multiple_of(8) {
-                        if !crate::windows::doorway::doorway_alive() {
-                            doorway_thread = None;
-                            crate::windows::doorway::stop_volunteer();
-                        }
-                        if doorway_thread.is_none()
-                            && let Some(h) =
-                                crate::windows::doorway::spawn_volunteer(conns.clone())
-                        {
-                            doorway_thread = Some(h);
-                        }
+                    if tick.is_multiple_of(8)
+                        && doorway_thread.is_none()
+                        && let Some(h) = crate::windows::hub::spawn_volunteer()
+                    {
+                        doorway_thread = Some(h);
                     }
                 }
                 if jobs::has_due() && !app.in_flight {
@@ -242,9 +226,6 @@ where
     }
 
     if let Some(t) = in_flight_task.take() {
-        t.abort();
-    }
-    if let Some(t) = guest_task {
         t.abort();
     }
     #[cfg(not(target_arch = "wasm32"))]

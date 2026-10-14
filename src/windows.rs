@@ -1,17 +1,15 @@
 #[cfg(not(target_arch = "wasm32"))]
-pub mod doorway;
+pub mod hub;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::hash_map::DefaultHasher;
-#[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::hash::{Hash, Hasher};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(not(target_arch = "wasm32"))]
 const TEXT_CAP: usize = 4000;
@@ -88,16 +86,8 @@ pub(crate) fn dir() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn sock_path(id: &str) -> Option<PathBuf> {
-    dir().map(|d| d.join(format!("{id}.sock")))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub type WebConns = Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn new_conns() -> WebConns {
-    Arc::new(Mutex::new(HashMap::new()))
+pub(crate) fn hub_path() -> Option<PathBuf> {
+    dir().map(|d| d.join("hub.sock"))
 }
 
 pub fn register(id: &str) {
@@ -107,7 +97,6 @@ pub fn register(id: &str) {
         if let Some(d) = dir() {
             let _ = std::fs::create_dir_all(&d);
         }
-        let _ = try_bind(id);
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -115,111 +104,62 @@ pub fn register(id: &str) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn try_bind(id: &str) -> Option<tokio::net::UnixListener> {
-    let path = sock_path(id)?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if path.exists() && std::os::unix::net::UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path);
-    }
-    tokio::net::UnixListener::bind(&path).ok()
-}
+pub fn unregister(_id: &str) {}
 
 #[cfg(not(target_arch = "wasm32"))]
-fn decorate(text: &str, reply_to: Option<&str>) -> String {
-    match reply_to {
-        Some(re) if !re.trim().is_empty() => format!("[re {re}] {text}"),
-        _ => text.to_string(),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn serve(
+pub fn ensure_reader(
     id: &str,
     tx: tokio::sync::mpsc::UnboundedSender<(String, String, String)>,
-    conns: WebConns,
 ) {
-    use tokio::io::AsyncBufReadExt;
-    let Some(listener) = try_bind(id) else {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
         return;
-    };
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let tx = tx.clone();
-        let conns = conns.clone();
-        tokio::spawn(async move {
-            let mut lines = tokio::io::BufReader::new(stream).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.trim().is_empty() {
-                    continue;
+    }
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+        loop {
+            if let Some(path) = hub_path()
+                && let Ok(stream) = std::os::unix::net::UnixStream::connect(&path)
+            {
+                let mut writer = stream.try_clone().ok();
+                if let Some(w) = writer.as_mut() {
+                    let _ = w.write_all(format!("{{\"hello\":\"{id}\"}}\n").as_bytes());
                 }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                let (Some(from), Some(text)) = (
-                    v.get("from").and_then(|f| f.as_str()),
-                    v.get("text").and_then(|t| t.as_str()),
-                ) else {
-                    continue;
-                };
-                if text.trim().is_empty() {
-                    continue;
-                }
-                let id = v
-                    .get("id")
-                    .and_then(|i| i.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(next_msg_id);
-                let text = decorate(
-                    text,
-                    v.get("reply_to").and_then(|r| r.as_str()),
-                );
-                if let Some(relay_for) =
-                    v.get("relay_for").and_then(|r| r.as_str())
-                {
-                    let note =
-                        serde_json::json!({"from": from, "id": id, "text": text})
-                            .to_string();
-                    if let Ok(c) = conns.lock()
-                        && let Some(s) = c.get(relay_for)
-                    {
-                        let _ = s.send(note);
+                let reader = std::io::BufReader::new(stream);
+                for line in reader.lines() {
+                    let Ok(line) = line else {
+                        break;
+                    };
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    let (Some(from), Some(text)) = (
+                        v.get("from").and_then(|f| f.as_str()),
+                        v.get("text").and_then(|t| t.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if text.trim().is_empty() {
+                        continue;
                     }
-                    continue;
+                    let mid = v
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(next_msg_id);
+                    let text = match v.get("reply_to").and_then(|r| r.as_str()) {
+                        Some(re) if !re.trim().is_empty() => {
+                            format!("[re {re}] {text}")
+                        }
+                        _ => text.to_string(),
+                    };
+                    let _ = tx.send((from.to_string(), mid, text));
                 }
-                let _ = tx.send((from.to_string(), id, text));
             }
-        });
-    }
-}
-
-pub fn unregister(id: &str) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if let Some(p) = sock_path(id) {
-            let _ = std::fs::remove_file(&p);
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        if doorway::volunteering() {
-            doorway::stop_volunteer();
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = id;
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn probe_live(path: &PathBuf) -> bool {
-    if std::os::unix::net::UnixStream::connect(path).is_ok() {
-        return true;
-    }
-    let _ = std::fs::remove_file(path);
-    false
+    });
 }
 
 pub fn active() -> Vec<String> {
@@ -233,98 +173,69 @@ pub fn active() -> Vec<String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(d) = dir() else {
+        use std::io::{BufRead, Write};
+        let Some(path) = hub_path() else {
             return Vec::new();
         };
-        let Ok(entries) = std::fs::read_dir(&d) else {
+        let Ok(stream) = std::os::unix::net::UnixStream::connect(&path) else {
             return Vec::new();
         };
-        let mut out: Vec<String> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sock"))
-            .filter(probe_live)
-            .filter_map(|p| {
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(str::to_string)
-            })
-            .collect();
-        if doorway::doorway_alive() {
-            out.extend(doorway::roster_read());
+        let _ = stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut stream = stream;
+        if stream.write_all(b"{\"list\":true}\n").is_err() {
+            return Vec::new();
         }
+        let mut line = String::new();
+        if std::io::BufReader::new(&stream).read_line(&mut line).is_err() {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .and_then(|v| v.get("roster").cloned())
+            .and_then(|r| serde_json::from_value(r).ok())
+            .unwrap_or_default();
         out.sort();
         out
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) async fn transmit(
-    to: &str,
-    from: &str,
-    text: &str,
-    reply_to: &str,
-    id: &str,
-) -> Result<String, String> {
-    use tokio::io::AsyncWriteExt;
-    if doorway::roster_read().iter().any(|x| x == to) {
-        let volid = doorway::volunteer_id();
-        if volid.is_empty() {
-            return Err(format!("no live window wryme#{to}"));
-        }
-        let Some(path) = sock_path(&volid) else {
-            return Err("no window dir".to_string());
-        };
-        let mut stream = match tokio::net::UnixStream::connect(&path).await {
-            Ok(s) => s,
-            Err(_) => {
-                doorway::clear_volunteer_hint();
-                return Err("volunteer gone, retry".to_string());
-            }
-        };
-        let mut note = serde_json::json!({
-            "relay_for": to,
-            "from": from,
-            "id": id,
-            "text": text,
-        });
-        if !reply_to.trim().is_empty() {
-            note["reply_to"] = serde_json::json!(reply_to);
-        }
-        let line = note.to_string() + "\n";
-        return match stream.write_all(line.as_bytes()).await {
-            Ok(()) => Ok(format!("sent to wryme#{to}")),
-            Err(e) => Err(format!("delivery failed: {e}")),
-        };
-    }
-    let Some(path) = sock_path(to) else {
-        return Err("no window dir".to_string());
-    };
-    let mut stream = match tokio::net::UnixStream::connect(&path).await {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = std::fs::remove_file(&path);
-            return Err(format!("no live window wryme#{to}"));
-        }
-    };
-    let mut note = serde_json::json!({"from": from, "id": id, "text": text});
-    if !reply_to.trim().is_empty() {
-        note["reply_to"] = serde_json::json!(reply_to);
-    }
-    let line = note.to_string() + "\n";
-    match stream.write_all(line.as_bytes()).await {
-        Ok(()) => Ok(format!("sent to wryme#{to}")),
-        Err(e) => Err(format!("delivery failed: {e}")),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn send(to: &str, from: &str, text: &str, reply_to: &str) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let text: String = text.chars().take(TEXT_CAP).collect();
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
-    transmit(to, from, &text, reply_to, &next_msg_id()).await
+    let Some(path) = hub_path() else {
+        return Err("no window dir".to_string());
+    };
+    let mut stream = tokio::net::UnixStream::connect(&path)
+        .await
+        .map_err(|_| "mesh down, no hub".to_string())?;
+    let mut note = serde_json::json!({"from": from, "to": to, "id": next_msg_id(), "text": text});
+    if !reply_to.trim().is_empty() {
+        note["reply_to"] = serde_json::json!(reply_to);
+    }
+    stream
+        .write_all((note.to_string() + "\n").as_bytes())
+        .await
+        .map_err(|e| format!("delivery failed: {e}"))?;
+    let mut line = String::new();
+    tokio::io::BufReader::new(&mut stream)
+        .read_line(&mut line)
+        .await
+        .map_err(|e| format!("delivery failed: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&line).map_err(|_| "bad hub reply".to_string())?;
+    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+        return Ok(format!("sent to wryme#{to}"));
+    }
+    Err(v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .unwrap_or("delivery failed")
+        .to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -385,33 +296,15 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn socket_roundtrip_delivers_guest_note() {
+    async fn send_fails_without_hub() {
         let _g = TEST_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("wryme_win_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wryme_nohub_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
         unsafe { std::env::set_var("WRYME_WINDOWS_DIR", &dir) };
-        let conns = new_conns();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let c = conns.clone();
-        tokio::spawn(async move { serve("aa01", tx, c).await });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let out = send("aa01", "bb02", "hello guest", "").await.unwrap();
-        assert!(out.contains("aa01"));
-        let (from, id, text) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out")
-            .expect("channel closed");
-        assert_eq!(from.as_str(), "bb02");
-        assert!(id.starts_with('m'));
-        assert_eq!(text.as_str(), "hello guest");
-        let out = send("aa01", "bb02", "got it", &id).await.unwrap();
-        assert!(out.contains("aa01"));
-        let (_, _, text) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out")
-            .expect("channel closed");
-        assert!(text.contains(&format!("[re {id}]")));
-        assert!(send("zz99", "bb02", "hi", "").await.is_err());
+        let err = send("zz99", "bb02", "hi", "").await.unwrap_err();
+        assert!(err.contains("mesh down"));
+        assert!(active().is_empty());
         unsafe { std::env::remove_var("WRYME_WINDOWS_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
