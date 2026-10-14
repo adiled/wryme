@@ -519,6 +519,14 @@ async fn stream_once(
                     .into_iter()
                     .filter(|d| !crate::api::owns_tool(&shop.name, &station.model, d["name"].as_str().unwrap_or_default())),
             );
+        } else {
+            tools.extend(tools::web_tool_defs().into_iter().filter(|d| {
+                !crate::api::owns_tool(
+                    &shop.name,
+                    &station.model,
+                    d["name"].as_str().unwrap_or_default(),
+                )
+            }));
         }
         tools
     };

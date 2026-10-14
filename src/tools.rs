@@ -484,8 +484,29 @@ pub fn tool_defs_chat() -> Vec<serde_json::Value> {
     ]
 }
 
-pub fn tool_defs() -> Vec<serde_json::Value> {
-    vec![
+pub fn web_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "type": "function",
+        "name": message_name(),
+        "description": MESSAGE_DESCRIPTION,
+        "parameters": message_parameters(),
+        "strict": true,
+    })]
+}
+
+pub fn web_tool_defs_chat() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": message_name(),
+            "description": MESSAGE_DESCRIPTION,
+            "parameters": message_parameters(),
+            "strict": true,
+        },
+    })]
+}
+
+pub fn tool_defs() -> Vec<serde_json::Value> {    vec![
         serde_json::json!({
             "type": "function",
             "name": shell_name(),
@@ -598,6 +619,16 @@ mod tests {
     fn message_tool_is_hidden_and_lists() {
         assert!(is_hidden_tool(message_name()));
         assert!(!is_book_tool(message_name()));
+    }
+
+    #[test]
+    fn web_defs_offer_message_only() {
+        let defs = web_tool_defs();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["name"].as_str().unwrap(), message_name());
+        let chat = web_tool_defs_chat();
+        assert_eq!(chat.len(), 1);
+        assert_eq!(chat[0]["function"]["name"].as_str().unwrap(), message_name());
     }
 
     #[test]

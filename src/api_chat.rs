@@ -218,6 +218,16 @@ async fn stream_once(
                     )
                 }),
             );
+        } else {
+            tools.extend(
+                tools::web_tool_defs_chat().into_iter().filter(|d| {
+                    !crate::api::owns_tool(
+                        &shop.name,
+                        &station.model,
+                        d["function"]["name"].as_str().unwrap_or_default(),
+                    )
+                }),
+            );
         }
     }
     let tool_choice = if tools.is_empty() { "none" } else { "auto" };
