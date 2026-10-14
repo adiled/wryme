@@ -222,19 +222,37 @@ pub fn install(tx: &UnboundedSender<Event>) {
     on_key.forget();
 
     let wheel_tx = tx.clone();
+    let mut wheel_accum = 0.0f64;
     let on_wheel: Closure<dyn FnMut(WheelEvent)> = Closure::new(move |ev: WheelEvent| {
         ev.prevent_default();
-        let kind = if ev.delta_y() < 0.0 {
-            MouseEventKind::ScrollUp
-        } else {
-            MouseEventKind::ScrollDown
-        };
-        let _ = wheel_tx.send(Event::Mouse(MouseEvent {
-            kind,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
+        let mut dy = ev.delta_y();
+        match ev.delta_mode() {
+            1 => dy *= 16.0,
+            2 => dy *= 400.0,
+            _ => {}
+        }
+        if !dy.is_finite() || dy == 0.0 {
+            return;
+        }
+        if wheel_accum != 0.0 && wheel_accum.signum() != dy.signum() {
+            wheel_accum = 0.0;
+        }
+        wheel_accum += dy;
+        while wheel_accum >= 30.0 || wheel_accum <= -30.0 {
+            let kind = if wheel_accum < 0.0 {
+                wheel_accum += 30.0;
+                MouseEventKind::ScrollUp
+            } else {
+                wheel_accum -= 30.0;
+                MouseEventKind::ScrollDown
+            };
+            let _ = wheel_tx.send(Event::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
     });
     if let Some(term) = doc.get_element_by_id(TERM_ID) {
         let opts = web_sys::AddEventListenerOptions::new();
