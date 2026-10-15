@@ -1,7 +1,4 @@
-
-
-https://github.com/user-attachments/assets/2a5374dd-0441-43bc-98e7-4e2b18f4b1c7
-
+https://github.com/user-attachments/assets/eaa35391-7219-41ea-8736-b928e5edf280
 
 
 # wryme
