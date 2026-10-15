@@ -106,6 +106,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             role: Role::User,
             content: app.awaiting.clone(),
             images: Vec::new(),
+            guest: None,
+            msg_id: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -192,7 +194,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         app.accent
     };
     let mut pieces = vec![
-        Span::styled("wryme", Style::default().fg(app.accent)),
+        Span::styled(
+            crate::windows::tag(&app.window_id),
+            Style::default().fg(app.accent),
+        ),
         Span::raw(dot),
         Span::styled(
             format!("station: {}", station_label),
@@ -499,9 +504,10 @@ fn push_message(
     area_width: u16,
     accent: Color,
 ) {
-    let (role_color, role_text) = match msg.role {
-        Role::User => (Color::Green, "you"),
-        Role::Assistant => (Color::Magenta, "assistant"),
+    let (role_color, role_text) = match (&msg.role, &msg.guest) {
+        (Role::User, Some(from)) => (Color::Green, format!("guest@{from}")),
+        (Role::User, None) => (Color::Green, "you".to_string()),
+        (Role::Assistant, _) => (Color::Magenta, "assistant".to_string()),
     };
 
     let mut header: Vec<Span<'static>> = vec![Span::styled(
@@ -667,6 +673,8 @@ fn assistant_base(app: &App, width: u16, viewport_h: usize) -> usize {
             role: Role::User,
             content: app.awaiting.clone(),
             images: Vec::new(),
+            guest: None,
+            msg_id: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -751,6 +759,8 @@ mod tests {
             role: Role::Assistant,
             content: "the answer".into(),
             images: Vec::new(),
+            guest: None,
+            msg_id: None,
             brain: brain.into(),
             heart: heart.into(),
             streaming: false,

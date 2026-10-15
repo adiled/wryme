@@ -33,6 +33,7 @@ pub mod station_save;
 pub mod tools;
 pub mod ui;
 pub mod voice;
+pub mod windows;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;
@@ -117,6 +118,20 @@ where
     let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<Task> = None;
+    let window_id = app.window_id.clone();
+    crate::windows::register(&window_id);
+    #[cfg(target_arch = "wasm32")]
+    crate::web::announce_window(&window_id);
+    let (guest_tx, mut guest_rx) =
+        mpsc::unbounded_channel::<(String, String, String)>();
+    #[cfg(target_arch = "wasm32")]
+    let _ = &guest_tx;
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::windows::ensure_reader(&window_id, guest_tx);
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut doorway_thread: Option<std::thread::JoinHandle<()>> = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut tick: u64 = 0;
 
     loop {
         terminal
@@ -135,6 +150,17 @@ where
                         }
                         Event::Mouse(m) => keys::handle_mouse(m, &mut app),
                         Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
+                        #[cfg(target_arch = "wasm32")]
+                        Event::GuestNote { from, id, text } => {
+                            if app.in_flight {
+                                app.guest_queue.push((from, id, text));
+                            } else {
+                                let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+                                crate::keys::start_guest_turn(
+                                    &mut app, &client, &tx, &mut in_flight_task, from, id, text,
+                                );
+                            }
+                        }
                         #[cfg(target_arch = "wasm32")]
                         Event::ReloadConfig => {
                             match crate::boot(None).await {
@@ -158,7 +184,26 @@ where
             Some(stream_ev) = rx.recv() => {
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
+            Some(guest) = guest_rx.recv() => {
+                let (from, id, text) = guest;
+                if app.in_flight {
+                    app.guest_queue.push((from, id, text));
+                } else {
+                    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+                    crate::keys::start_guest_turn(&mut app, &client, &tx, &mut in_flight_task, from, id, text);
+                }
+            }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    tick += 1;
+                    if tick.is_multiple_of(8)
+                        && doorway_thread.is_none()
+                        && let Some(h) = crate::windows::hub::spawn_volunteer()
+                    {
+                        doorway_thread = Some(h);
+                    }
+                }
                 if jobs::has_due() && !app.in_flight {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();
@@ -183,6 +228,9 @@ where
     if let Some(t) = in_flight_task.take() {
         t.abort();
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = doorway_thread;
+    crate::windows::unregister(&window_id);
     Ok(())
 }
 
@@ -269,6 +317,9 @@ fn handle_stream_event(
             if !app.awaiting.is_empty() {
                 let pending = std::mem::take(&mut app.awaiting);
                 crate::keys::start_turn(app, client, tx, in_flight_task, pending);
+            } else if !app.guest_queue.is_empty() {
+                let (from, id, text) = app.guest_queue.remove(0);
+                crate::keys::start_guest_turn(app, client, tx, in_flight_task, from, id, text);
             }
         }
         StreamEvent::Error { message } => {

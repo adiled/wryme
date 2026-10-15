@@ -172,6 +172,7 @@ mod imp {
         static STATIONS: RefCell<Option<String>> = const { RefCell::new(None) };
         static PREFS: RefCell<Option<String>> = const { RefCell::new(None) };
         static CONNECTED: RefCell<bool> = const { RefCell::new(false) };
+        static ROSTER: RefCell<Option<String>> = const { RefCell::new(None) };
     }
 
     fn call_global(name: &str, args: &[JsValue]) {
@@ -198,6 +199,14 @@ mod imp {
 
     pub fn prefs_text() -> Option<String> {
         PREFS.with(|c| c.borrow().clone())
+    }
+
+    pub fn set_roster_text(text: Option<String>) {
+        ROSTER.with(|c| *c.borrow_mut() = text);
+    }
+
+    pub fn roster_text() -> Option<String> {
+        ROSTER.with(|c| c.borrow().clone())
     }
 
     pub fn write_prefs(text: &str) -> Result<()> {
@@ -254,6 +263,16 @@ pub fn write_prefs(text: &str) -> Result<()> {
 #[cfg(target_arch = "wasm32")]
 pub fn set_prefs_text(text: Option<String>) {
     imp::set_prefs_text(text)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn set_roster_text(text: Option<String>) {
+    imp::set_roster_text(text)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn roster_text() -> Option<String> {
+    imp::roster_text()
 }
 
 pub fn can_write() -> bool {
