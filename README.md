@@ -148,7 +148,7 @@ The station dials, all optional:
   (`Tara` at 260wpm when unset), any espeak voice on Linux. Needs `say`/`spd-say`
   on PATH; silently off otherwise.
 
-# Usage preferences
+## Usage preferences
 
 **`view mode`**: Ctrl+T to toggle line-by-line vs pagination based scrolling.
 
@@ -187,6 +187,15 @@ When you're done, press **Ctrl-C** to close it.
 | `PgUp/PgDn`  | Scroll the popup body (also the mouse wheel). |
 | arrow keys   | Move the cursor inside your typing.           |
 | `Backspace`  | Delete the character before the cursor.       |
+
+## What's cooking?
+
+Wryme has both, web and desktop clients, besides TUI. All UX is consistent.
+
+- For desktop, signed OSX releases are planned.
+- For desktop, more multimedia support is planned.
+- For web, memory and shell / machine use capability is planned. (besides through hive)
+- [hum](https://adiled.github.io/hum) hive support is set out to make the web version extremely powerful.
 
 ## Trouble
 
