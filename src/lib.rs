@@ -114,6 +114,9 @@ where
         active_shop,
         active_origin,
     );
+    if let Some(note) = station::unavailable_note(&app.stations, &app.shops) {
+        app.note(note);
+    }
     let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<Task> = None;
@@ -139,6 +142,7 @@ where
                         Event::ReloadConfig => {
                             match crate::boot(None).await {
                                 Ok(b) => {
+                                    let unavailable = station::unavailable_note(&b.stations, &b.shops);
                                     app.reconfigure(
                                         b.shops,
                                         b.stations,
@@ -146,7 +150,10 @@ where
                                         b.active_shop,
                                         b.active_origin,
                                     );
-                                    app.note("config connected");
+                                    app.note(match unavailable {
+                                        Some(n) => format!("config connected · {n}"),
+                                        None => "config connected".to_string(),
+                                    });
                                 }
                                 Err(e) => app.note(format!("config: {e:#}")),
                             }
@@ -459,6 +466,7 @@ mod cli {
 fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
 {
     use crossterm::{
+        cursor::SetCursorStyle,
         event::{EnableBracketedPaste, EnableMouseCapture},
         execute,
         terminal::EnterAlternateScreen,
@@ -469,7 +477,8 @@ fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::Crosst
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        SetCursorStyle::BlinkingUnderScore
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
@@ -482,6 +491,7 @@ fn restore_terminal(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     use crossterm::{
+        cursor::SetCursorStyle,
         event::{DisableBracketedPaste, DisableMouseCapture},
         execute,
         terminal::LeaveAlternateScreen,
@@ -491,7 +501,8 @@ fn restore_terminal(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        SetCursorStyle::DefaultUserShape
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -500,6 +511,7 @@ fn restore_terminal(
 #[cfg(not(target_arch = "wasm32"))]
 fn install_panic_hook() {
     use crossterm::{
+        cursor::SetCursorStyle,
         event::{DisableBracketedPaste, DisableMouseCapture},
         execute,
         terminal::LeaveAlternateScreen,
@@ -511,7 +523,8 @@ fn install_panic_hook() {
             std::io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            SetCursorStyle::DefaultUserShape
         );
         prev(info);
     }));

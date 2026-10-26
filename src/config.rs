@@ -43,8 +43,36 @@ pub const ACCENTS: &[(&str, ratatui::style::Color)] = &[
     ("lightmagenta", ratatui::style::Color::LightMagenta),
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NametagMode {
+    Standout,
+    Inlined,
+}
+
+pub const NAMETAG_MODES: &[(&str, NametagMode)] = &[
+    ("standout", NametagMode::Standout),
+    ("inlined", NametagMode::Inlined),
+];
+
+impl NametagMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            NametagMode::Standout => "standout",
+            NametagMode::Inlined => "inlined",
+        }
+    }
+}
+
+pub fn nametag_mode(value: &str) -> NametagMode {
+    NAMETAG_MODES
+        .iter()
+        .find(|(n, _)| *n == value)
+        .map(|(_, m)| *m)
+        .unwrap_or(NametagMode::Standout)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_PREFS: &str = "{\n  \"accent\": \"cyan\"\n}\n";
+const DEFAULT_PREFS: &str = "{\n  \"accent\": \"cyan\",\n  \"nametags\": \"standout\"\n}\n";
 
 pub fn accent_index(color: ratatui::style::Color) -> usize {
     ACCENTS
@@ -75,13 +103,67 @@ pub fn parse_accent(text: Option<&str>) -> ratatui::style::Color {
 }
 
 pub fn write_accent(color: ratatui::style::Color) -> Result<()> {
-    let name = ACCENTS[accent_index(color)].0;
-    write_prefs(&format!("{{\n  \"accent\": \"{name}\"\n}}\n"))
+    write_pref("accent", ACCENTS[accent_index(color)].0)
+}
+
+fn write_pref(key: &str, value: &str) -> Result<()> {
+    write_prefs(&merged_prefs(prefs_text().as_deref(), key, value))
+}
+
+fn merged_prefs(text: Option<&str>, key: &str, value: &str) -> String {
+    let mut v = text
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v[key] = serde_json::Value::from(value);
+    format!("{v:#}\n")
+}
+
+pub fn nametags_pref() -> NametagMode {
+    let text = prefs_text();
+    let Some(text) = text else {
+        return NametagMode::Standout;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return NametagMode::Standout;
+    };
+    let Some(name) = v.get("nametags").and_then(|s| s.as_str()) else {
+        return NametagMode::Standout;
+    };
+    nametag_mode(name)
+}
+
+pub fn write_nametags(mode: NametagMode) -> Result<()> {
+    write_pref("nametags", mode.name())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_one_pref_keeps_the_others() {
+        let before = r#"{"accent": "red", "nametags": "inlined"}"#;
+        let after: serde_json::Value =
+            serde_json::from_str(&merged_prefs(Some(before), "accent", "cyan")).unwrap();
+        assert_eq!(after["accent"], "cyan");
+        assert_eq!(after["nametags"], "inlined");
+    }
+
+    #[test]
+    fn writing_a_pref_over_junk_starts_fresh() {
+        let after: serde_json::Value =
+            serde_json::from_str(&merged_prefs(Some("not json"), "nametags", "inlined")).unwrap();
+        assert_eq!(after, serde_json::json!({ "nametags": "inlined" }));
+    }
+
+    #[test]
+    fn nametag_names_round_trip() {
+        for (name, mode) in NAMETAG_MODES {
+            assert_eq!(mode.name(), *name);
+            assert_eq!(nametag_mode(name), *mode);
+        }
+    }
 
     #[test]
     fn accent_round_trip() {
