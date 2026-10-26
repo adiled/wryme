@@ -150,6 +150,30 @@ The station dials, all optional:
 
 ## Usage preferences
 
+These are saved in `~/.config/wryme/prefs.json`. Change them from the
+**preferences** rows in the Ctrl-S popup, or edit the file:
+
+```json
+{
+  "accent": "cyan",
+  "nametags": "inlined"
+}
+```
+
+- **`accent`**: the highlight color. `cyan` (default), `azure`, `green`,
+  `lightgreen`, `yellow`, `magenta`, `red`, `blue`, `white`, `gray`,
+  `lightcyan`, `lightyellow`, or `lightmagenta`.
+- **`nametags`**: how messages are labeled. `standout` (default) puts a
+  `you` / `assistant` header above each message. `inlined` drops the header:
+  a small icon sits on the left and the time on the right, with the text
+  wrapped between them. `⏹` marks your messages. The assistant's icon shows
+  what it's doing and blinks while busy: `⬩` writing, `✦` thinking, `‣`
+  using a tool, `಄` reminiscing, `⌃` done. Thinking text is marked `✶`
+  (brain) or `❤︎` (heart). A message you send while a reply is still coming
+  in shows dimmed with `waiting…` until it goes out.
+
+These reset every session:
+
 **`view mode`**: Ctrl+T to toggle line-by-line vs pagination based scrolling.
 
 **`voice toggle`**: Ctrl+V to toggle assistant voiceover whenever needed.
@@ -203,9 +227,15 @@ Wryme has both, web and desktop clients, besides TUI. All UX is consistent.
   the install section above.
 - **The status bar says `station: demo`**: you haven't set up a shop yet.
   See "Set up your first shop" above.
-- **`station 'X' wants model 'Y' but no shop advertises it`**: the station's
-  model name doesn't match any of your shops' `models` lists. Add it to a
-  shop or fix the spelling.
+- **The status bar says `unavailable: X`**: no shop lists station X's model,
+  so wryme started on the first station that works instead. Add the model to
+  a shop's `models` list or fix the spelling. Asking for X by name
+  (`--station X`) fails with `station 'X' wants model 'Y' but no shop
+  advertises it`.
+- **In the browser, a local shop's models are missing**: a page can only
+  read a local server that allows cross-origin requests. The server must
+  send `Access-Control-Allow-Origin` and answer `OPTIONS` preflight
+  requests. Ollama allows local pages by default.
 - **`upstream 401`**: the key for that shop is wrong, missing, or expired.
 - **`upstream 404`**: the model name is wrong, or the shop URL is wrong.
 
