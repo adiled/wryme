@@ -209,11 +209,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             format!("station: {}", station_label),
             Style::default().fg(station_color),
         ),
-        Span::raw(dot),
-        Span::raw(app.active_station.model.clone()),
-        Span::raw(dot),
         Span::styled(
-            format!("via {}", app.active_shop.name),
+            format!(" via {}", app.active_shop.name),
             Style::default().fg(Color::DarkGray),
         ),
     ];
