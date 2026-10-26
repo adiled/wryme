@@ -346,11 +346,13 @@ pub fn pick(
                 format!("no station named '{}'. known: {}", name, known.join(", "))
             });
     }
-    if let Some(st) = stations.iter().find(|s| s.name != DEMO) {
+    if let Some(st) = stations.iter().find(|s| s.name != DEMO && is_available(s, shops)) {
         return Ok((st.clone(), Some(st.name.clone())));
     }
-    if let Some(shop) = shops.iter().find(|s| s.name != DEMO)
-        && let Some(model) = shop.models.first()
+    if let Some(model) = shops
+        .iter()
+        .filter(|s| s.name != DEMO)
+        .find_map(|s| s.models.first())
     {
         return Ok((
             Station {
@@ -363,6 +365,24 @@ pub fn pick(
         ));
     }
     Ok((Station::demo(), None))
+}
+
+fn is_available(station: &Station, shops: &[Shop]) -> bool {
+    crate::shop::find_for_model(shops, &station.model).is_some()
+}
+
+pub fn unavailable_note(stations: &[Station], shops: &[Shop]) -> Option<String> {
+    let missing: Vec<&str> = stations
+        .iter()
+        .filter(|s| s.name != DEMO && !is_available(s, shops))
+        .map(|s| s.name.as_str())
+        .collect();
+    let first = missing.first()?;
+    let more = match missing.len() - 1 {
+        0 => String::new(),
+        n => format!(" +{n}"),
+    };
+    Some(format!("unavailable: {first}{more}, no shop lists the model"))
 }
 
 #[cfg(test)]
@@ -468,6 +488,45 @@ mod tests {
         let (got, origin) = pick(&stations, &shops, None).unwrap();
         assert_eq!(got.name, "demo");
         assert_eq!(origin, None);
+    }
+
+    #[test]
+    fn pick_skips_stations_no_shop_can_serve() {
+        let stations = vec![Station::demo(), station("a", "gone"), station("b", "m1")];
+        let shops = vec![Shop::demo(), shop("s", &["m1"])];
+        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        assert_eq!(got.name, "b");
+        assert_eq!(origin.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn pick_synthesizes_when_no_saved_station_is_available() {
+        let stations = vec![Station::demo(), station("a", "gone")];
+        let shops = vec![Shop::demo(), shop("empty", &[]), shop("s", &["m1"])];
+        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        assert_eq!(got.name, "untitled");
+        assert_eq!(got.model, "m1");
+        assert_eq!(origin, None);
+    }
+
+    #[test]
+    fn pick_still_honors_a_requested_station() {
+        let stations = vec![Station::demo(), station("a", "gone"), station("b", "m1")];
+        let shops = vec![Shop::demo(), shop("s", &["m1"])];
+        let (got, _) = pick(&stations, &shops, Some("a")).unwrap();
+        assert_eq!(got.name, "a");
+    }
+
+    #[test]
+    fn unavailable_note_names_the_first_and_counts_the_rest() {
+        let shops = vec![Shop::demo(), shop("s", &["m1"])];
+        let all_fine = vec![Station::demo(), station("b", "m1")];
+        assert_eq!(unavailable_note(&all_fine, &shops), None);
+        let some_gone = vec![station("a", "gone"), station("b", "m1"), station("c", "gone2")];
+        assert_eq!(
+            unavailable_note(&some_gone, &shops).as_deref(),
+            Some("unavailable: a +1, no shop lists the model")
+        );
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub struct App {
     pub voice_speaker: Option<crate::voice::Speaker>,
     pub voice_buffer: String,
     pub accent: ratatui::style::Color,
+    pub nametags: crate::config::NametagMode,
     pub shops: Vec<Shop>,
     pub stations: Vec<Station>,
     pub active_station: Station,
@@ -160,6 +161,7 @@ impl App {
             voice_speaker: None,
             voice_buffer: String::new(),
             accent: crate::config::accent_pref(),
+            nametags: crate::config::nametags_pref(),
             shops,
             stations,
             active_station,
@@ -205,6 +207,7 @@ impl App {
         self.active_shop = active_shop;
         self.active_origin = active_origin;
         self.accent = crate::config::accent_pref();
+        self.nametags = crate::config::nametags_pref();
         self.last_response_id = None;
     }
 

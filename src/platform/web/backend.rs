@@ -178,6 +178,17 @@ impl WebBackend {
                 continue;
             }
             let w = UnicodeWidthStr::width(cell.sym.as_str()).max(1);
+            if pinned(&cell.sym) {
+                out.push_str(&format!(
+                    "<span class=\"wme-pin\" style=\"width:{}px;height:{}px;{}\">{}</span>",
+                    self.px(w as u16),
+                    self.line_h,
+                    style_attr(cell),
+                    escape(&cell.sym)
+                ));
+                i += w;
+                continue;
+            }
             let mut run = escape(&cell.sym);
             let mut style = style_attr(cell);
             let mut j = i + w;
@@ -187,7 +198,7 @@ impl WebBackend {
                     j += 1;
                     continue;
                 }
-                if style_attr(n) != style {
+                if pinned(&n.sym) || style_attr(n) != style {
                     break;
                 }
                 let nw = UnicodeWidthStr::width(n.sym.as_str()).max(1);
@@ -347,6 +358,12 @@ impl Backend for WebBackend {
         self.apply_cursor();
         Ok(())
     }
+}
+
+fn pinned(sym: &str) -> bool {
+    sym.chars().next().is_some_and(|c| {
+        !c.is_ascii() && !c.is_alphanumeric() && !('\u{2500}'..='\u{259F}').contains(&c)
+    })
 }
 
 fn escape(s: &str) -> String {

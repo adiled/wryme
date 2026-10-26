@@ -48,14 +48,24 @@
       height: 20px;
       white-space: pre;
     }
+    .wme-pin {
+      display: inline-block;
+      vertical-align: top;
+      text-align: center;
+      overflow: visible;
+    }
     .wme-cursor {
       position: absolute;
+      box-sizing: border-box;
       width: 9px;
       height: 20px;
-      background: #c9d1d9;
-      opacity: 0.6;
+      border-bottom: 2px solid #c9d1d9;
       pointer-events: none;
       mix-blend-mode: difference;
+      animation: wme-blink 1s step-end infinite;
+    }
+    @keyframes wme-blink {
+      50% { opacity: 0; }
     }
     /* the ruler: 20 M's, same font as the terminal, used to measure the cell */
     #wryme-measure {

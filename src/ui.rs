@@ -27,23 +27,23 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let (input_chunk, messages_chunk, status_chunk) = (chunks[0], chunks[1], chunks[2]);
 
     let prompt = "› ";
-    let state = if app.in_flight {
+    let (state, esc) = if app.in_flight {
         if app.voice_is_active() {
-            "streaming + speaking… (Esc to quiet)"
+            ("streaming + speaking…", "esc quiet ")
         } else {
-            "streaming… (Esc to interrupt)"
+            ("streaming…", "esc interrupt ")
         }
     } else if app.voice_is_active() {
-        "speaking… (Esc to quiet)"
+        ("speaking…", "esc quiet ")
     } else {
-        ""
+        ("", "")
     };
     let label = if state.is_empty() {
         " wme. ".to_string()
     } else {
         format!(" wme. {state} ")
     };
-    let input_block = Block::default()
+    let mut input_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(if app.in_flight {
@@ -52,7 +52,16 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Style::default().fg(app.accent)
         })
         .title(label)
-        .title(Line::from(" ^S Settings ^C Exit ").right_aligned());
+        .title(Line::from(format!(" {esc}^s settings ^c exit ")).right_aligned());
+    if let Some(tool) = inlined_tool(app) {
+        input_block = input_block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {tool} "),
+                Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
 
     let inner = ratatui::layout::Rect {
         x: input_chunk.x + 1,
@@ -116,11 +125,13 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             turn_id: 0,
             tool_events: Vec::new(),
         };
-        push_message(&mut lines, &phantom, msg_width, app.accent);
+        push_message(&mut lines, &phantom, msg_width, app.accent, app.nametags, false);
         lines.push(Line::from(""));
     }
+    let live = thinking_turn(&app.messages);
     for msg in app.messages.iter().rev() {
-        push_message(&mut lines, msg, msg_width, app.accent);
+        let thinking_live = live == Some(msg.turn_id);
+        push_message(&mut lines, msg, msg_width, app.accent, app.nametags, thinking_live);
         lines.push(Line::from(""));
     }
     if lines.is_empty() {
@@ -198,11 +209,8 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             format!("station: {}", station_label),
             Style::default().fg(station_color),
         ),
-        Span::raw(dot),
-        Span::raw(app.active_station.model.clone()),
-        Span::raw(dot),
         Span::styled(
-            format!("via {}", app.active_shop.name),
+            format!(" via {}", app.active_shop.name),
             Style::default().fg(Color::DarkGray),
         ),
     ];
@@ -217,7 +225,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         let ht =
             (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
         let heart_color = hue_lit(120.0 * (1.0 - ht));
-        pieces.push(Span::styled(" \u{2764}\u{FE0E} ", heart_color));
+        pieces.push(Span::styled(format!(" {HEART_MARK} "), heart_color));
     }
     #[cfg(not(feature = "reservoir"))]
     {
@@ -498,11 +506,22 @@ fn push_message(
     msg: &Message,
     area_width: u16,
     accent: Color,
-) {
-    let (role_color, role_text) = match msg.role {
-        Role::User => (Color::Green, "you"),
-        Role::Assistant => (Color::Magenta, "assistant"),
+    nametags: crate::config::NametagMode,
+    thinking_live: bool,
+) -> usize {
+    let role_color = match msg.role {
+        Role::User => Color::Green,
+        Role::Assistant => Color::Magenta,
     };
+    if nametags == crate::config::NametagMode::Inlined {
+        return push_message_inlined(out, msg, area_width, role_color, thinking_live);
+    }
+
+    let role_text = match msg.role {
+        Role::User => "you",
+        Role::Assistant => "assistant",
+    };
+    let start = out.len();
 
     let mut header: Vec<Span<'static>> = vec![Span::styled(
         role_text.to_string(),
@@ -622,6 +641,8 @@ fn push_message(
         }
     }
 
+    let reply_rows = out.len() - start;
+
     if has_brain {
         thinking_block(out, "brain", &msg.brain, cursor_in_brain, has_reply);
     }
@@ -635,6 +656,231 @@ fn push_message(
             has_reply || has_brain,
         );
     }
+    reply_rows
+}
+
+const INLINE_LEFT: usize = 2;
+const INLINE_RIGHT: usize = 6;
+const BRAIN_MARK: &str = "✶";
+const HEART_MARK: &str = "\u{2764}\u{FE0E}";
+const USER_MARK: &str = "\u{23F9}\u{FE0E}";
+
+fn inline_icon(msg: &Message) -> (&'static str, bool) {
+    if msg.role == Role::User {
+        return (USER_MARK, false);
+    }
+    if !msg.streaming {
+        return ("⌃", false);
+    }
+    let tool = msg.current_tool.as_deref();
+    let hidden = tool.is_some_and(crate::tools::is_hidden_tool);
+    let bookish = tool.is_some_and(crate::tools::is_book_tool);
+    match msg.phase {
+        Phase::Thinking => ("✦", true),
+        Phase::Tinkering if hidden && bookish => ("಄", false),
+        Phase::Tinkering | Phase::Communing => ("‣", true),
+        Phase::Writing | Phase::Streaming => ("⬩", true),
+    }
+}
+
+fn blink_on() -> bool {
+    ((crate::platform::unix_secs() * 2.0) as u64).is_multiple_of(2)
+}
+
+fn inlined_tool(app: &App) -> Option<&str> {
+    if app.nametags != crate::config::NametagMode::Inlined {
+        return None;
+    }
+    app.messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.streaming)?
+        .current_tool
+        .as_deref()
+        .filter(|name| !crate::tools::is_hidden_tool(name))
+}
+
+fn thinking_turn(messages: &[Message]) -> Option<u64> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.streaming && m.phase == Phase::Thinking)
+        .map(|m| m.turn_id)
+}
+
+fn push_message_inlined(
+    out: &mut Vec<Line<'static>>,
+    msg: &Message,
+    area_width: u16,
+    role_color: Color,
+    thinking_live: bool,
+) -> usize {
+    let width = area_width as usize;
+    let right = if msg.waiting { "waiting…" } else { msg.timestamp.as_str() };
+    let right_w = INLINE_RIGHT.max(UnicodeWidthStr::width(right) + 1);
+    let text_w = width.saturating_sub(INLINE_LEFT + right_w).max(1);
+    let dim = Style::default().fg(Color::DarkGray);
+    let cursor = || Span::styled("▌", dim);
+
+    let has_reply = !msg.content.is_empty();
+    let has_brain = !msg.brain.is_empty();
+    let has_heart = !msg.heart.is_empty();
+    let cursor_in_reply = msg.streaming && has_reply;
+    let cursor_in_brain = msg.streaming && !has_reply && has_brain;
+    let cursor_in_heart = msg.streaming && !has_reply && !has_brain && has_heart;
+    let cursor_orphan = msg.streaming && !has_reply && !has_brain && !has_heart;
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    if cursor_orphan {
+        rows.push(Line::from(cursor()));
+    }
+    if has_reply {
+        match msg.role {
+            Role::Assistant => {
+                for line in crate::md::render(&msg.content, cursor_in_reply) {
+                    rows.extend(wrap_line(line, text_w));
+                }
+            }
+            Role::User => {
+                for img in &msg.images {
+                    let line = Line::from(Span::styled(format!("📷 attached: {img}"), dim));
+                    rows.extend(wrap_line(line, text_w));
+                }
+                let last_idx = msg.content.split('\n').count().saturating_sub(1);
+                for (i, raw) in msg.content.split('\n').enumerate() {
+                    let mut spans = vec![Span::raw(raw.to_string())];
+                    if i == last_idx && cursor_in_reply {
+                        spans.push(cursor());
+                    }
+                    rows.extend(wrap_line(Line::from(spans), text_w));
+                }
+            }
+        }
+    }
+    let reply_rows = rows.len().max(1);
+
+    let thinking = dim.add_modifier(Modifier::ITALIC);
+    let mut labels: Vec<(usize, &str)> = Vec::new();
+    for (text, cur, label) in [
+        (&msg.brain, cursor_in_brain, BRAIN_MARK),
+        (&msg.heart, cursor_in_heart, HEART_MARK),
+    ] {
+        if text.is_empty() {
+            continue;
+        }
+        if !rows.is_empty() {
+            rows.push(Line::from(""));
+        }
+        labels.push((rows.len(), label));
+        let last_idx = text.split('\n').count().saturating_sub(1);
+        for (i, raw) in text.split('\n').enumerate() {
+            let mut spans = vec![Span::styled(raw.to_string(), thinking)];
+            if i == last_idx && cur {
+                spans.push(cursor());
+            }
+            rows.extend(wrap_line(Line::from(spans), text_w));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::from(""));
+    }
+
+    let lit = blink_on();
+    let (icon, blinks) = inline_icon(msg);
+    let icon_w = UnicodeWidthStr::width(icon);
+    let icon = if blinks && !lit {
+        " ".repeat(icon_w)
+    } else {
+        icon.to_string()
+    };
+    let marks_lit = lit || !thinking_live;
+    for (i, row) in rows.into_iter().enumerate() {
+        let row_w = row.width();
+        let label = labels.iter().find(|(at, _)| *at == i).map(|(_, l)| *l);
+        let (mark, mark_w, mark_style) = match label {
+            Some(label) => {
+                let label_w = UnicodeWidthStr::width(label);
+                let label = if marks_lit { label.to_string() } else { " ".repeat(label_w) };
+                (label, label_w, thinking.add_modifier(Modifier::BOLD))
+            }
+            None if i == 0 => (
+                icon.clone(),
+                icon_w,
+                Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+            ),
+            None => (String::new(), 0, Style::default()),
+        };
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(row.spans.len() + 4);
+        spans.push(Span::styled(mark, mark_style));
+        spans.push(Span::raw(" ".repeat(INLINE_LEFT.saturating_sub(mark_w).max(1))));
+        spans.extend(row.spans);
+        if i == 0 && !right.is_empty() {
+            let used = INLINE_LEFT + row_w + UnicodeWidthStr::width(right);
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(used).max(1))));
+            spans.push(Span::styled(right.to_string(), dim));
+        }
+        if msg.waiting {
+            for span in &mut spans {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            }
+        }
+        out.push(Line::from(spans));
+    }
+    reply_rows
+}
+
+fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthChar;
+    let cw = |c: char| c.width().unwrap_or(0);
+    let width = width.max(1);
+    let base = line.style;
+    let cells = line.spans.iter().flat_map(|s| {
+        let style = base.patch(s.style);
+        s.content.chars().map(move |c| (c, style))
+    });
+
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut cur: Vec<(char, Style)> = Vec::new();
+    let mut cur_w = 0usize;
+    for (c, style) in cells {
+        if cur_w + cw(c) > width && !cur.is_empty() {
+            if c == ' ' {
+                rows.push(std::mem::take(&mut cur));
+                cur_w = 0;
+                continue;
+            }
+            let brk = cur
+                .iter()
+                .rposition(|(ch, _)| *ch == ' ')
+                .filter(|&i| cur[..i].iter().any(|(ch, _)| *ch != ' '));
+            let rest = match brk {
+                Some(i) => {
+                    let rest = cur.split_off(i + 1);
+                    cur.pop();
+                    rest
+                }
+                None => Vec::new(),
+            };
+            rows.push(std::mem::replace(&mut cur, rest));
+            cur_w = cur.iter().map(|(ch, _)| cw(*ch)).sum();
+        }
+        cur.push((c, style));
+        cur_w += cw(c);
+    }
+    rows.push(cur);
+
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (c, style) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push(c),
+                    _ => spans.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn wrapped_row_count(lines: &[Line<'_>], area_width: u16) -> usize {
@@ -677,16 +923,12 @@ fn assistant_base(app: &App, width: u16, viewport_h: usize) -> usize {
             turn_id: 0,
             tool_events: Vec::new(),
         };
-        push_message(&mut prefix, &phantom, width, app.accent);
+        push_message(&mut prefix, &phantom, width, app.accent, app.nametags, false);
         prefix.push(Line::from(""));
     }
     let mut head: Vec<Line<'static>> = Vec::new();
-    push_message(&mut head, newest, width, app.accent);
-    let Some(header) = head.first() else {
-        return 0;
-    };
-    prefix.push(header.clone());
-    prefix.extend(crate::md::render(&newest.content, newest.streaming));
+    let reply_rows = push_message(&mut head, newest, width, app.accent, app.nametags, false);
+    prefix.extend(head.into_iter().take(reply_rows));
     let end = wrapped_row_count(&prefix, width);
     if end > viewport_h { end } else { 0 }
 }
@@ -765,8 +1007,160 @@ mod tests {
 
     fn rendered(msg: &Message) -> Vec<String> {
         let mut out = Vec::new();
-        push_message(&mut out, msg, 80, Color::Cyan);
+        push_message(&mut out, msg, 80, Color::Cyan, crate::config::NametagMode::Standout, false);
         out.iter().map(|l| l.to_string()).collect()
+    }
+
+    fn inlined(msg: &Message, width: u16) -> (usize, Vec<String>) {
+        let mut out = Vec::new();
+        let reply_rows =
+            push_message(&mut out, msg, width, Color::Cyan, crate::config::NametagMode::Inlined, false);
+        (reply_rows, out.iter().map(|l| l.to_string()).collect())
+    }
+
+    fn user_message(content: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: content.into(),
+            ..thinking_message("", "")
+        }
+    }
+
+    #[test]
+    fn inlined_puts_icon_left_and_time_right_on_first_row() {
+        let (_, rows) = inlined(&thinking_message("", ""), 40);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with("⌃ the answer"), "{:?}", rows[0]);
+        assert!(rows[0].ends_with("00:00"), "{:?}", rows[0]);
+        assert_eq!(UnicodeWidthStr::width(rows[0].as_str()), 40);
+    }
+
+    #[test]
+    fn inlined_wraps_text_between_the_columns() {
+        let text = "the quick brown fox jumps over the lazy dog and keeps on running far away";
+        let (_, rows) = inlined(&user_message(text), 30);
+        assert!(rows.len() > 2);
+        assert!(rows[0].starts_with(&format!("{USER_MARK} ")), "{:?}", rows[0]);
+        assert!(rows[0].ends_with("00:00"), "{:?}", rows[0]);
+        for row in &rows[1..] {
+            assert!(row.starts_with("  "), "{row:?}");
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 30 - INLINE_RIGHT, "{row:?}");
+        }
+        let body: Vec<String> = rows
+            .iter()
+            .map(|r| r.chars().skip(INLINE_LEFT).collect())
+            .collect();
+        let words: Vec<&str> = body
+            .iter()
+            .flat_map(|r| r.trim_end_matches("00:00").split_whitespace())
+            .collect();
+        assert_eq!(words.join(" "), text);
+    }
+
+    #[test]
+    fn inlined_waiting_shows_on_the_right_and_keeps_rows_in_bounds() {
+        let msg = Message {
+            waiting: true,
+            timestamp: String::new(),
+            ..user_message("queued up while the reply was still streaming in")
+        };
+        let (_, rows) = inlined(&msg, 30);
+        assert!(rows.len() > 1);
+        assert!(rows[0].ends_with("waiting…"), "{:?}", rows[0]);
+        for row in &rows {
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 30, "{row:?}");
+        }
+        let mut out = Vec::new();
+        push_message(&mut out, &msg, 30, Color::Cyan, crate::config::NametagMode::Inlined, false);
+        assert!(
+            out.iter()
+                .flat_map(|l| &l.spans)
+                .all(|s| s.style.add_modifier.contains(Modifier::DIM))
+        );
+    }
+
+    #[test]
+    fn inlined_reply_rows_stop_before_thinking() {
+        let (reply_rows, rows) = inlined(&thinking_message("pondering", ""), 40);
+        assert_eq!(reply_rows, 1);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[2].contains("pondering"));
+    }
+
+    #[test]
+    fn inlined_marks_brain_and_heart_blocks() {
+        let (_, rows) = inlined(&thinking_message("pondering", "feeling"), 40);
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        assert_eq!(rows[2], format!("{BRAIN_MARK} pondering"));
+        assert_eq!(rows[4], format!("{HEART_MARK} feeling"));
+        assert_eq!(UnicodeWidthStr::width(HEART_MARK), 1);
+    }
+
+    #[test]
+    fn inlined_thinking_on_the_first_row_shows_its_own_mark() {
+        let msg = Message {
+            content: String::new(),
+            ..thinking_message("pondering", "")
+        };
+        let (_, rows) = inlined(&msg, 40);
+        assert!(rows[0].starts_with(&format!("{BRAIN_MARK} pondering")), "{:?}", rows[0]);
+        assert!(rows[0].ends_with("00:00"));
+    }
+
+    #[test]
+    fn thinking_follows_the_turn_not_the_message() {
+        let holder = || thinking_message("pondering", "feeling");
+        let live = Message {
+            streaming: true,
+            phase: Phase::Thinking,
+            ..thinking_message("", "")
+        };
+        assert_eq!(thinking_turn(&[holder(), live]), Some(holder().turn_id));
+        assert_eq!(thinking_turn(&[holder()]), None);
+    }
+
+    #[test]
+    fn standout_reply_rows_include_header() {
+        let mut out = Vec::new();
+        let reply_rows = push_message(
+            &mut out,
+            &thinking_message("pondering", ""),
+            80,
+            Color::Cyan,
+            crate::config::NametagMode::Standout,
+            false,
+        );
+        assert_eq!(reply_rows, 2);
+    }
+
+    #[test]
+    fn inline_icon_follows_what_the_assistant_is_doing() {
+        let at = |phase, tool: Option<&str>| {
+            inline_icon(&Message {
+                streaming: true,
+                phase,
+                current_tool: tool.map(String::from),
+                ..thinking_message("", "")
+            })
+        };
+        assert_eq!(inline_icon(&thinking_message("", "")), ("⌃", false));
+        assert_eq!(inline_icon(&user_message("hi")), (USER_MARK, false));
+        assert_eq!(UnicodeWidthStr::width(USER_MARK), 1);
+        assert_eq!(at(Phase::Writing, None), ("⬩", true));
+        assert_eq!(at(Phase::Thinking, None), ("✦", true));
+        assert_eq!(at(Phase::Tinkering, Some("shell")), ("‣", true));
+        assert_eq!(at(Phase::Tinkering, Some(crate::tools::BOOK_NAME)), ("಄", false));
+    }
+
+    #[test]
+    fn wrap_line_keeps_styles_across_breaks() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let line = Line::from(vec![Span::raw("plain words "), Span::styled("bold words", bold)]);
+        let rows = wrap_line(line, 11);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].to_string(), "plain words");
+        assert_eq!(rows[1].to_string(), "bold words");
+        assert!(rows[1].spans.iter().all(|s| s.style == bold));
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub enum Row {
     PrefVoice,
     PrefView,
     PrefAccent,
+    PrefNametags,
     Blank,
 }
 
@@ -104,6 +105,7 @@ fn pref_rows() -> Vec<Row> {
         Row::PrefVoice,
         Row::PrefView,
         Row::PrefAccent,
+        Row::PrefNametags,
     ]
 }
 
@@ -197,6 +199,7 @@ pub fn adjust(app: &mut App, delta: i32) {
         Some(Row::PrefVoice) => toggle_voice(app),
         Some(Row::PrefView) => crate::keys::toggle_view_mode(app),
         Some(Row::PrefAccent) => cycle_accent(app, delta),
+        Some(Row::PrefNametags) => cycle_nametags(app, delta),
         _ => {}
     }
 }
@@ -230,6 +233,7 @@ fn activate_row(app: &mut App, row: Row) {
         Row::PrefVoice => toggle_voice(app),
         Row::PrefView => crate::keys::toggle_view_mode(app),
         Row::PrefAccent => cycle_accent(app, 1),
+        Row::PrefNametags => cycle_nametags(app, 1),
         _ => {}
     }
 }
@@ -241,6 +245,20 @@ fn cycle_accent(app: &mut App, delta: i32) {
     app.accent = color;
     let _ = crate::config::write_accent(color);
     app.note(format!("accent: {name}"));
+}
+
+fn cycle_nametags(app: &mut App, delta: i32) {
+    let modes = crate::config::NAMETAG_MODES;
+    let n = modes.len() as i32;
+    let cur = modes
+        .iter()
+        .position(|(_, m)| *m == app.nametags)
+        .unwrap_or(0);
+    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
+    let (name, mode) = modes[next];
+    app.nametags = mode;
+    let _ = crate::config::write_nametags(mode);
+    app.note(format!("nametags: {name}"));
 }
 
 pub fn toggle_voice(app: &mut App) {
