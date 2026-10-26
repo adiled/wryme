@@ -719,7 +719,9 @@ fn push_message_inlined(
     thinking_live: bool,
 ) -> usize {
     let width = area_width as usize;
-    let text_w = width.saturating_sub(INLINE_LEFT + INLINE_RIGHT).max(1);
+    let right = if msg.waiting { "waiting…" } else { msg.timestamp.as_str() };
+    let right_w = INLINE_RIGHT.max(UnicodeWidthStr::width(right) + 1);
+    let text_w = width.saturating_sub(INLINE_LEFT + right_w).max(1);
     let dim = Style::default().fg(Color::DarkGray);
     let cursor = || Span::styled("▌", dim);
 
@@ -795,7 +797,6 @@ fn push_message_inlined(
         icon.to_string()
     };
     let marks_lit = lit || !thinking_live;
-    let ts = msg.timestamp.as_str();
     for (i, row) in rows.into_iter().enumerate() {
         let row_w = row.width();
         let label = labels.iter().find(|(at, _)| *at == i).map(|(_, l)| *l);
@@ -816,10 +817,15 @@ fn push_message_inlined(
         spans.push(Span::styled(mark, mark_style));
         spans.push(Span::raw(" ".repeat(INLINE_LEFT.saturating_sub(mark_w).max(1))));
         spans.extend(row.spans);
-        if i == 0 && !ts.is_empty() {
-            let used = INLINE_LEFT + row_w + UnicodeWidthStr::width(ts);
+        if i == 0 && !right.is_empty() {
+            let used = INLINE_LEFT + row_w + UnicodeWidthStr::width(right);
             spans.push(Span::raw(" ".repeat(width.saturating_sub(used).max(1))));
-            spans.push(Span::styled(ts.to_string(), dim));
+            spans.push(Span::styled(right.to_string(), dim));
+        }
+        if msg.waiting {
+            for span in &mut spans {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            }
         }
         out.push(Line::from(spans));
     }
@@ -1052,6 +1058,28 @@ mod tests {
             .flat_map(|r| r.trim_end_matches("00:00").split_whitespace())
             .collect();
         assert_eq!(words.join(" "), text);
+    }
+
+    #[test]
+    fn inlined_waiting_shows_on_the_right_and_keeps_rows_in_bounds() {
+        let msg = Message {
+            waiting: true,
+            timestamp: String::new(),
+            ..user_message("queued up while the reply was still streaming in")
+        };
+        let (_, rows) = inlined(&msg, 30);
+        assert!(rows.len() > 1);
+        assert!(rows[0].ends_with("waiting…"), "{:?}", rows[0]);
+        for row in &rows {
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 30, "{row:?}");
+        }
+        let mut out = Vec::new();
+        push_message(&mut out, &msg, 30, Color::Cyan, crate::config::NametagMode::Inlined, false);
+        assert!(
+            out.iter()
+                .flat_map(|l| &l.spans)
+                .all(|s| s.style.add_modifier.contains(Modifier::DIM))
+        );
     }
 
     #[test]
