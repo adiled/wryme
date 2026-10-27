@@ -66,6 +66,7 @@ fn supports_multi_agent(model: &str) -> bool {
     num.parse::<f32>().is_ok_and(|v| v >= MULTI_AGENT_MIN)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream(
     client: &Client,
     shop: &Shop,
@@ -74,6 +75,7 @@ pub(crate) async fn stream(
     previous_response_id: Option<String>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
+    due: &[crate::api::DueCall],
 ) -> Result<()> {
     if shop.window == WindowMode::Warm {
         match stream_warm(
@@ -84,6 +86,7 @@ pub(crate) async fn stream(
             previous_response_id,
             engine.clone(),
             tx,
+            due,
         )
         .await
         {
@@ -97,7 +100,7 @@ pub(crate) async fn stream(
                 let _ = tx.send(StreamEvent::Error {
                     message: "tools unsupported by model, retrying without tools".into(),
                 });
-                return stream_warm(client, shop, station, messages, None, engine, tx).await;
+                return stream_warm(client, shop, station, messages, None, engine, tx, due).await;
             }
             Err(e) => {
                 let msg = format!("{e:#}");
@@ -110,13 +113,13 @@ pub(crate) async fn stream(
                     let _ = tx.send(StreamEvent::WindowUnsupported {
                         shop: shop.name.clone(),
                     });
-                    return stream_full(client, shop, station, messages, engine, tx).await;
+                    return stream_full(client, shop, station, messages, engine, tx, due).await;
                 }
                 return Err(e);
             }
         }
     }
-    match stream_full(client, shop, station, messages.clone(), engine.clone(), tx).await {
+    match stream_full(client, shop, station, messages.clone(), engine.clone(), tx, due).await {
         Ok(()) => Ok(()),
         Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
             if crate::api::is_toolless(&shop.name, &station.model) {
@@ -127,12 +130,13 @@ pub(crate) async fn stream(
             let _ = tx.send(StreamEvent::Error {
                 message: "tools unsupported by model, retrying without tools".into(),
             });
-            stream_full(client, shop, station, messages, engine, tx).await
+            stream_full(client, shop, station, messages, engine, tx, due).await
         }
         Err(e) => Err(e),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_warm(
     client: &Client,
     shop: &Shop,
@@ -141,6 +145,7 @@ async fn stream_warm(
     previous_response_id: Option<String>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
+    due: &[crate::api::DueCall],
 ) -> Result<()> {
     let instructions: Option<&str> = messages
         .iter()
@@ -153,6 +158,7 @@ async fn stream_warm(
     let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
         conv_msgs
             .last()
+            .filter(|m| m.role == "user")
             .into_iter()
             .flat_map(|m| json_msg(m))
             .collect()
@@ -161,23 +167,18 @@ async fn stream_warm(
     };
     prepend_preamble_counted(&mut input, &engine, 0);
 
-    let due = crate::jobs::claim_due();
-    if !due.is_empty() {
-        let check = crate::tools::check_name();
-        for (id, output) in due {
-            let call_id = format!("check_{id}");
-            input.push(serde_json::json!({
-                "type": "function_call",
-                "call_id": call_id,
-                "name": check,
-                "arguments": format!("{{\"id\":{id}}}"),
-            }));
-            input.push(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output,
-            }));
-        }
+    for (call_id, name, args, output) in due {
+        input.push(serde_json::json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": args,
+        }));
+        input.push(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        }));
     }
 
     let mut bad_rounds: u32 = 0;
@@ -244,7 +245,10 @@ async fn stream_warm(
             return Ok(());
         }
         depth += 1;
-        if !crate::api::client_runs_tools() {
+        if calls
+            .iter()
+            .any(|c| !c.rendered && !crate::api::client_can_run(&c.name))
+        {
             tracing::info!(shop = %shop.name, "provider runs tools server-side, client does not execute");
             return Ok(());
         }
@@ -285,6 +289,7 @@ async fn stream_full(
     messages: Vec<ApiMessage>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
+    due: &[crate::api::DueCall],
 ) -> Result<()> {
     let instructions: Option<&str> = messages
         .iter()
@@ -296,23 +301,18 @@ async fn stream_full(
     let mut input: Vec<serde_json::Value> = conv_msgs.iter().flat_map(|m| json_msg(m)).collect();
     let _preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
-    let due = crate::jobs::claim_due();
-    if !due.is_empty() {
-        let check = crate::tools::check_name();
-        for (id, output) in due {
-            let call_id = format!("check_{id}");
-            input.push(serde_json::json!({
-                "type": "function_call",
-                "call_id": call_id,
-                "name": check,
-                "arguments": format!("{{\"id\":{id}}}"),
-            }));
-            input.push(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output,
-            }));
-        }
+    for (call_id, name, args, output) in due {
+        input.push(serde_json::json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": args,
+        }));
+        input.push(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        }));
     }
 
     let mut bad_rounds: u32 = 0;
@@ -379,7 +379,10 @@ async fn stream_full(
             return Ok(());
         }
         depth += 1;
-        if !crate::api::client_runs_tools() {
+        if calls
+            .iter()
+            .any(|c| !c.rendered && !crate::api::client_can_run(&c.name))
+        {
             tracing::info!(shop = %shop.name, "provider runs tools server-side, client does not execute");
             return Ok(());
         }
@@ -519,6 +522,14 @@ async fn stream_once(
                     .into_iter()
                     .filter(|d| !crate::api::owns_tool(&shop.name, &station.model, d["name"].as_str().unwrap_or_default())),
             );
+        } else {
+            tools.extend(tools::window_tool_defs().into_iter().filter(|d| {
+                !crate::api::owns_tool(
+                    &shop.name,
+                    &station.model,
+                    d["name"].as_str().unwrap_or_default(),
+                )
+            }));
         }
         tools
     };

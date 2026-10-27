@@ -115,6 +115,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             role: Role::User,
             content: app.awaiting.clone(),
             images: Vec::new(),
+            guest: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -203,7 +204,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         app.accent
     };
     let mut pieces = vec![
-        Span::styled("wryme", Style::default().fg(app.accent)),
+        Span::styled(
+            crate::windows::tag(&app.window_id),
+            Style::default().fg(app.accent),
+        ),
         Span::raw(dot),
         Span::styled(
             format!("station: {}", station_label),
@@ -517,14 +521,15 @@ fn push_message(
         return push_message_inlined(out, msg, area_width, role_color, thinking_live);
     }
 
-    let role_text = match msg.role {
-        Role::User => "you",
-        Role::Assistant => "assistant",
+    let role_text = match (&msg.role, &msg.guest) {
+        (Role::User, Some(from)) => format!("guest@{from}"),
+        (Role::User, None) => "you".to_string(),
+        (Role::Assistant, _) => "assistant".to_string(),
     };
     let start = out.len();
 
     let mut header: Vec<Span<'static>> = vec![Span::styled(
-        role_text.to_string(),
+        role_text,
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     )];
     if msg.streaming {
@@ -749,6 +754,9 @@ fn push_message_inlined(
                 let last_idx = msg.content.split('\n').count().saturating_sub(1);
                 for (i, raw) in msg.content.split('\n').enumerate() {
                     let mut spans = vec![Span::raw(raw.to_string())];
+                    if let (0, Some(from)) = (i, &msg.guest) {
+                        spans.insert(0, Span::styled(format!("@{from} "), Style::default().fg(role_color)));
+                    }
                     if i == last_idx && cursor_in_reply {
                         spans.push(cursor());
                     }
@@ -913,6 +921,7 @@ fn assistant_base(app: &App, width: u16, viewport_h: usize) -> usize {
             role: Role::User,
             content: app.awaiting.clone(),
             images: Vec::new(),
+            guest: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -993,6 +1002,7 @@ mod tests {
             role: Role::Assistant,
             content: "the answer".into(),
             images: Vec::new(),
+            guest: None,
             brain: brain.into(),
             heart: heart.into(),
             streaming: false,

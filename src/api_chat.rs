@@ -24,30 +24,25 @@ pub(crate) async fn stream(
     messages: Vec<ApiMessage>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
+    due: &[crate::api::DueCall],
 ) -> Result<()> {
     let mut conv: Vec<serde_json::Value> = messages.iter().filter_map(json_msg).collect();
 
-    let due = crate::jobs::claim_due();
-    if !due.is_empty() {
-        let check = crate::tools::check_name();
-        for (id, output) in due {
-            let call_id = format!("check_{id}");
-            let args = format!("{{\"id\":{id}}}");
-            conv.push(serde_json::json!({
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "id": call_id,
-                    "type": "function",
-                    "function": { "name": check, "arguments": args },
-                }],
-            }));
-            conv.push(serde_json::json!({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": output,
-            }));
-        }
+    for (call_id, name, args, output) in due {
+        conv.push(serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": { "name": name, "arguments": args },
+            }],
+        }));
+        conv.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": output,
+        }));
     }
 
     let mut bad_rounds: u32 = 0;
@@ -123,7 +118,7 @@ pub(crate) async fn stream(
             return Ok(());
         }
         depth += 1;
-        if !crate::api::client_runs_tools() {
+        if calls.iter().any(|c| !crate::api::client_can_run(&c.name)) {
             tracing::info!(shop = %shop.name, "provider runs tools server-side, client does not execute");
             return Ok(());
         }
@@ -211,6 +206,16 @@ async fn stream_once(
         if crate::api::client_runs_tools() {
             tools.extend(
                 tools::tool_defs_chat().into_iter().filter(|d| {
+                    !crate::api::owns_tool(
+                        &shop.name,
+                        &station.model,
+                        d["function"]["name"].as_str().unwrap_or_default(),
+                    )
+                }),
+            );
+        } else {
+            tools.extend(
+                tools::window_tool_defs_chat().into_iter().filter(|d| {
                     !crate::api::owns_tool(
                         &shop.name,
                         &station.model,

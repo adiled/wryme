@@ -196,6 +196,91 @@
     return ok;
   };
 
+  const DOORWAY = "ws://127.0.0.1:9630/";
+  let meshId = null;
+  let sock = null;
+  let seq = 0;
+  const pending = new Map();
+  let retryMs = 1000;
+
+  window.wrymeSetWindowId = (id) => {
+    meshId = String(id);
+    connect();
+  };
+
+  window.wrymeMeshSend = (json) => new Promise((resolve) => {
+    let note;
+    try {
+      note = JSON.parse(json);
+    } catch {
+      resolve(JSON.stringify({ ok: false, error: "bad note" }));
+      return;
+    }
+    if (!sock || sock.readyState !== WebSocket.OPEN) {
+      resolve(JSON.stringify({ ok: false, error: "no doorway, no live windows" }));
+      return;
+    }
+    const req = ++seq;
+    note.req = req;
+    const timer = setTimeout(() => {
+      pending.delete(req);
+      resolve(JSON.stringify({ ok: false, error: "doorway timed out" }));
+    }, 10000);
+    pending.set(req, (answer) => {
+      clearTimeout(timer);
+      resolve(answer);
+    });
+    sock.send(JSON.stringify(note));
+  });
+
+  function connect() {
+    if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return;
+    let ws;
+    try {
+      ws = new WebSocket(DOORWAY);
+    } catch {
+      schedule();
+      return;
+    }
+    ws.onopen = () => {
+      retryMs = 1000;
+      if (meshId) ws.send(JSON.stringify({ claim: meshId }));
+    };
+    ws.onmessage = (ev) => {
+      let v;
+      try {
+        v = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      if (v.roster && window.wrymeSetRoster) {
+        window.wrymeSetRoster(JSON.stringify(v.roster));
+      }
+      if (v.req && pending.has(v.req)) {
+        pending.get(v.req)(ev.data);
+        pending.delete(v.req);
+        return;
+      }
+      if (v.from && v.text && window.wrymeGuestNote) {
+        window.wrymeGuestNote(String(v.from), String(v.id || ""), String(v.text), String(v.reply_to || ""));
+      }
+    };
+    const down = () => {
+      if (sock === ws) sock = null;
+      if (window.wrymeSetRoster) window.wrymeSetRoster("[]");
+      schedule();
+    };
+    ws.onclose = down;
+    sock = ws;
+  }
+
+  function schedule() {
+    setTimeout(() => {
+      retryMs = Math.min(retryMs * 2, 15000);
+      connect();
+    }, retryMs);
+  }
+
   window.wrymeReady = async () => {
     if (window.__wrymeReady) return;
     window.__wrymeReady = true;

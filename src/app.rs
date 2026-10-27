@@ -41,6 +41,7 @@ pub struct Message {
     pub role: Role,
     pub content: String,
     pub images: Vec<String>,
+    pub guest: Option<String>,
     pub brain: String,
     pub heart: String,
     pub streaming: bool,
@@ -59,6 +60,8 @@ fn now_hhmm() -> String {
 pub struct App {
     pub messages: Vec<Message>,
     pub system: Option<String>,
+    pub window_id: String,
+    pub guest_queue: Vec<crate::windows::Note>,
     pub in_flight: bool,
     pub status: String,
     pub awaiting: String,
@@ -143,6 +146,8 @@ impl App {
         Self {
             messages: Vec::new(),
             system,
+            window_id: crate::windows::mint(),
+            guest_queue: Vec::new(),
             in_flight: false,
             status: String::new(),
             awaiting: String::new(),
@@ -262,6 +267,7 @@ impl App {
             role: Role::User,
             content,
             images,
+            guest: None,
             brain: String::new(),
             heart: String::new(),
             streaming: false,
@@ -280,6 +286,36 @@ impl App {
         }
     }
 
+    pub fn push_guest(&mut self, note: crate::windows::Note) {
+        let crate::windows::Note { from, id, text, reply_to } = note;
+        let stamp = if reply_to.trim().is_empty() {
+            let id = crate::windows::receive(&from, &id);
+            crate::windows::post(&from, &id, &text);
+            format!("[from wryme#{from} #{id}]")
+        } else {
+            crate::windows::answer(&from, &reply_to, &text);
+            format!("[from wryme#{from} re #{reply_to}]")
+        };
+        if let Ok(mut e) = self.engine.lock() {
+            e.record_turn("user", &format!("{stamp} {text}"));
+        }
+        self.messages.push(Message {
+            role: Role::User,
+            content: text,
+            images: Vec::new(),
+            guest: Some(from),
+            brain: String::new(),
+            heart: String::new(),
+            streaming: false,
+            waiting: false,
+            timestamp: now_hhmm(),
+            phase: Phase::Streaming,
+            current_tool: None,
+            turn_id: 0,
+            tool_events: Vec::new(),
+        });
+    }
+
     fn streaming_assistant(&mut self) -> Option<&mut Message> {
         self.messages
             .iter_mut()
@@ -292,6 +328,7 @@ impl App {
             role: Role::Assistant,
             content: String::new(),
             images: Vec::new(),
+            guest: None,
             brain: String::new(),
             heart: String::new(),
             streaming: true,
@@ -381,7 +418,7 @@ impl App {
         if let Some(m) = self.streaming_assistant() {
             let communing = name
                 .as_deref()
-                .is_some_and(crate::tools::is_communing_tool);
+                .is_some_and(|n| crate::tools::is_communing_tool(n) || crate::tools::is_window_tool(n));
             m.phase = if communing {
                 Phase::Communing
             } else {
@@ -501,7 +538,7 @@ impl App {
         }
         let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
-            if m.streaming {
+            if m.streaming || m.guest.is_some() {
                 continue;
             }
             if m.role == Role::Assistant
@@ -605,6 +642,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
         app
+    }
+
+    #[test]
+    fn window_tools_show_communing() {
+        let mut app = test_app();
+        app.begin_assistant();
+        app.record_tool_call(Some(crate::tools::WRYME_MSG_RPLY.into()));
+        assert_eq!(app.messages.last().unwrap().phase, Phase::Communing);
+        app.record_tool_call(Some("zsh".into()));
+        assert_eq!(app.messages.last().unwrap().phase, Phase::Tinkering);
+    }
+
+    #[test]
+    fn guest_note_rides_as_paired_resv_not_user_turn() {
+        let mut app = test_app();
+        app.push_guest(crate::windows::Note {
+            from: "a0cd".into(),
+            id: "m3".into(),
+            text: "radius of the sun?".into(),
+            reply_to: String::new(),
+        });
+        app.push_guest(crate::windows::Note {
+            from: "03a0".into(),
+            id: "m8".into(),
+            text: "about 696,000 km".into(),
+            reply_to: "m2".into(),
+        });
+        let bubbles: Vec<&str> = app
+            .messages
+            .iter()
+            .filter(|m| m.guest.is_some())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(bubbles, ["radius of the sun?", "about 696,000 km"]);
+        app.begin_assistant();
+        app.record_tool_result(
+            "resv_m9".into(),
+            crate::tools::WRYME_MSG_RESV.into(),
+            "{}".into(),
+            "wryme#a0cd sent #m5: radius of the sun?".into(),
+        );
+        app.append_to_last_assistant("answered wryme#a0cd");
+        app.finish_streaming();
+        let msgs = app.api_messages();
+        assert!(!msgs.iter().any(|m| m.role == "user"));
+        let call = msgs
+            .iter()
+            .position(|m| m.tool_calls.iter().any(|c| c.id == "resv_m9"))
+            .unwrap();
+        assert_eq!(msgs[call].role, "assistant");
+        let result = msgs
+            .iter()
+            .position(|m| m.role == "tool" && m.tool_call_id == "resv_m9")
+            .unwrap();
+        assert!(result > call);
+        assert!(msgs[result].tool_result.contains("radius"));
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("wryme_app_{}", std::process::id())),
+        );
     }
 
     #[test]

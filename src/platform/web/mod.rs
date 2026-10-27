@@ -111,6 +111,7 @@ pub enum Event {
     FocusGained,
     FocusLost,
     ReloadConfig,
+    GuestNote(crate::windows::Note),
 }
 
 // ---------------------------------------------------------------------------

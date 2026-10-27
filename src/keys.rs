@@ -244,6 +244,52 @@ pub fn start_turn(
     }));
 }
 
+pub fn take_note(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<crate::platform::Task>,
+    note: crate::windows::Note,
+) {
+    if app.in_flight {
+        app.guest_queue.push(note);
+    } else {
+        start_guest_turn(app, client, tx, in_flight, note);
+    }
+}
+
+pub fn start_guest_turn(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<crate::platform::Task>,
+    note: crate::windows::Note,
+) {
+    app.push_guest(note);
+    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+    app.begin_assistant();
+    app.stop_voice();
+    app.unmute_voice();
+    app.in_flight = true;
+    app.current_page = 0;
+    app.scroll_row = 0;
+    app.wheel_accum = 0;
+    app.note("");
+
+    let msgs = app.api_messages();
+    let prev_id = app.last_response_id.clone();
+    let shop = app.active_shop.clone();
+    let station = app.active_station.clone();
+    let client = client.clone();
+    let engine = app.engine.clone();
+    let tx = tx.clone();
+    *in_flight = Some(crate::platform::spawn(async move {
+        client
+            .stream_completion(shop, station, msgs, prev_id, engine, tx)
+            .await;
+    }));
+}
+
 pub fn handle_paste(text: &str, app: &mut App, input: &mut Input) {
     match app.popup.mode {
         popup::Mode::Closed => input.insert_paste(text),

@@ -212,6 +212,13 @@ When you're done, press **Ctrl-C** to close it.
 | arrow keys   | Move the cursor inside your typing.           |
 | `Backspace`  | Delete the character before the cursor.       |
 
+### Assistants talk to each other
+
+Every open wryme shows its id in the status bar, like `wryme#72e8`. Ask one
+window to "ask wryme#72e8 what time it is" and its assistant sends a note
+and wryme#72e8 will reply back as `guest@72e8`. Web app assistants can
+participate if at least one native window is open.
+
 ## What's cooking?
 
 Wryme has both, web and desktop clients, besides TUI. All UX is consistent.
