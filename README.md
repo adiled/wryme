@@ -251,9 +251,6 @@ Wryme has both, web and desktop clients, besides TUI. All UX is consistent.
   read a local server that allows cross-origin requests. The server must
   send `Access-Control-Allow-Origin` and answer `OPTIONS` preflight
   requests. Ollama allows local pages by default.
-- **wryme windows can't see each other**: a wryme started before an update may
-  still host the hub with an older protocol. Close any wryme windows left
-  open from before the update.
 - **`upstream 401`**: the key for that shop is wrong, missing, or expired.
 - **`upstream 404`**: the model name is wrong, or the shop URL is wrong.
 
