@@ -1,6 +1,3 @@
-//! Speech. Native shells out to `say` / `spd-say`; the browser has no such
-//! privilege yet, so wasm gets a silent Speaker.
-
 pub const DEFAULT_MAC_VOICE: &str = "Tara";
 pub const DEFAULT_MAC_RATE_WPM: &str = "260";
 
@@ -40,7 +37,6 @@ mod imp {
         false
     }
 
-    /// Silent, for now. Web Speech API is the natural follow-up.
     pub struct Speaker {
         pub name: Option<String>,
     }

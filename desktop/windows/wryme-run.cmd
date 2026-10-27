@@ -1,21 +1,9 @@
 @echo off
-rem
-rem wryme desktop runner - Windows
-rem
-rem Opens wryme in a clean, app-like WezTerm window. No terminal chrome.
-rem
-rem The wryme binary is NEVER bundled. It always comes from cargo: this
-rem launcher resolves the cargo-installed wme.exe, installs it from
-rem crates.io if missing, and keeps it current. No fallbacks.
-rem
-rem This script does the actual work; wryme-launcher.vbs invokes it hidden
-rem so double-clicking "wryme" feels like opening an app, not a console.
 
 setlocal enableextensions
 set "HERE=%~dp0"
 set "CFG=%HERE%wezterm.lua"
 
-rem --- Cargo bin dir (CARGO_HOME wins, else ~/.cargo) ----------------------
 if defined CARGO_HOME (
     set "CARGO_BIN=%CARGO_HOME%\bin"
 ) else (
@@ -23,7 +11,6 @@ if defined CARGO_HOME (
 )
 set "WME=%CARGO_BIN%\wme.exe"
 
-rem --- Locate wezterm -------------------------------------------------------
 set "WEZTERM="
 for %%X in (wezterm.exe) do set "WEZTERM=%%~$PATH:X"
 if defined WEZTERM goto :found
@@ -37,7 +24,6 @@ if exist "%ProgramFiles%\WezTerm\wezterm.exe" (
     goto :found
 )
 
-rem --- WezTerm not found: try to install it ---------------------------------
 powershell -NoProfile -Command ^
   "Add-Type -AssemblyName PresentationFramework; [System.Windows.Forms.MessageBox]::Show('wryme needs WezTerm (a small native terminal) to open as its window. Install it now?', 'wryme', 'YesNo', 'Information')" >nul 2>&1
 if errorlevel 1 exit /b 0
@@ -61,7 +47,6 @@ exit /b 1
 
 :found
 
-rem --- Cargo-first wryme: install from crates.io if missing -----------------
 if exist "%WME%" goto :wme_ok
 
 if not exist "%CARGO_BIN%" mkdir "%CARGO_BIN%" >nul 2>&1
@@ -83,16 +68,14 @@ if errorlevel 1 (
 if not exist "%WME%" goto :wme_missing
 :wme_ok
 
-rem --- Silent auto-update (Windows) --------------------------------------
-rem Keeps the cargo-installed wme current: plain `cargo install` upgrades
-rem when a newer version exists and is a no-op when already current.
 set "CACHE_DIR=%LOCALAPPDATA%\wryme"
 set "STAMP=%CACHE_DIR%\last_update_check"
 if not exist "%CACHE_DIR%" mkdir "%CACHE_DIR%" >nul 2>&1
+set "ONE_DAY_SECS=86400"
 set "DO_UPDATE=1"
 if exist "%STAMP%" (
     for /f %%T in ('powershell -NoProfile -Command "(Get-Date) - (Get-Item ''%STAMP%'' -ErrorAction SilentlyContinue).LastWriteTime | %% { $_.TotalSeconds }" 2^>nul') do (
-        if %%T LSS 86400 set "DO_UPDATE=0"
+        if %%T LSS %ONE_DAY_SECS% set "DO_UPDATE=0"
     )
 )
 if "%DO_UPDATE%"=="1" (

@@ -10,7 +10,7 @@ use crate::platform::web::backend::WebBackend;
 pub fn start() {
     console_error_panic_hook::set_once();
     let (tx, events) = platform::web::channel();
-    platform::web::install(&tx);
+    platform::web::install_listeners(&tx);
 
     let cfg_tx = tx.clone();
     let setter = Closure::<dyn Fn(Option<String>, Option<String>, Option<bool>)>::new(

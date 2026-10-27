@@ -215,9 +215,6 @@ impl Engine {
 }
 
 pub fn open_book(dir: &Path) -> Result<Book> {
-    // The browser has no filesystem: an empty book that lives in memory for
-    // the session. Reads and writes still happen through the same API; they
-    // just fail per-call instead of at open.
     #[cfg(target_arch = "wasm32")]
     {
         let _ = dir;

@@ -1,7 +1,3 @@
-# wryme. Streaming LLM chat TUI (pronounced "write me", said quickly).
-#
-# One artifact: the binary. No daemon, no install dir bullshit.
-
 CARGO    ?= cargo
 BIN_NAME ?= wme
 TARGET   ?= release

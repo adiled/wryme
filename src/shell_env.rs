@@ -115,7 +115,6 @@ fn probe_login_path() -> Option<String> {
     }
 }
 
-/// No shell to probe from the browser.
 #[cfg(target_arch = "wasm32")]
 fn probe_login_path() -> Option<String> {
     None

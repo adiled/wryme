@@ -1,11 +1,3 @@
-//! wryme-hive — the TUI's tool surface, commissioned as a hum bee.
-//!
-//! Pure forager: no LLM compute lives here. humd routes `chi:"tool-call"`
-//! tones whose `toolName` matches what we advertise on hello, we run them
-//! through `wryme::tools` (the same code path the terminal uses), and ship
-//! back `chi:"tool-result"`. The other-forager-of-forager pattern, same as
-//! humfs: any nestler's shell/book tool lands on this machine's real shell.
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -31,7 +23,6 @@ async fn main() -> Result<()> {
         hive: "wryme-hive".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         source: Some("https://github.com/adiled/wryme/tree/main/hive".into()),
-        // Owns the shell surface: real login shell, async jobs, the works.
         provides: vec!["shell".into()],
     };
     serve_forager(dispatcher, advert).await
