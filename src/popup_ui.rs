@@ -143,6 +143,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                         ),
                     ]));
                 }
+                popup::Row::PrefNametags => {
+                    let style = focus_style(selected, app.accent);
+                    let name = app.nametags.name();
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", style),
+                        Span::styled("nametags", style),
+                        Span::styled(
+                            format!("  {name}"),
+                            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
             }
         }
 

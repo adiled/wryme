@@ -57,8 +57,8 @@ pub async fn execute(
         explore::execute(name, arguments).await
     } else if name == book_name() {
         Some(book_execute(engine, arguments).await)
-    } else if name == message_name() {
-        Some(message_execute(arguments).await)
+    } else if is_window_tool(name) {
+        Some(window_execute(name, arguments).await)
     } else {
         None
     };
@@ -218,82 +218,126 @@ pub fn book_parameters() -> serde_json::Value {
     })
 }
 
-pub const MESSAGE_NAME: &str = "message";
+pub const WRYME_LIST: &str = "wryme_list";
+pub const WRYME_MSG_SEND: &str = "wryme_msg_send";
+pub const WRYME_MSG_RPLY: &str = "wryme_msg_rply";
+pub const WRYME_MSG_RESV: &str = "wryme_msg_resv";
 
-pub fn message_name() -> &'static str {
-    MESSAGE_NAME
+pub const WRYME_LIST_DESCRIPTION: &str = "\
+List the other live wryme windows by id. Call it before wryme_msg_send \
+when the user names no window.";
+
+pub const WRYME_MSG_SEND_DESCRIPTION: &str = "\
+Send a note to the assistant in another live wryme window. Whenever the \
+user asks you to tell, ask, say, or send anything to a wryme#id, call this \
+instead of writing the note yourself. Write it to that assistant directly, \
+in your own words, with everything it needs to answer. Send once: the \
+answer comes back to you on its own in a later turn, as 'wryme#id \
+answered #mN: ...'. Until then tell your user you've asked and end your \
+turn; never resend, chase, or poll. When the answer comes, pass on what \
+it says without explaining how it arrived.";
+
+pub const WRYME_MSG_RPLY_DESCRIPTION: &str = "\
+REQUIRED for every guest note. A note 'wryme#id sent #mN: ...' comes from \
+the assistant in another wryme window, not from your user, and that window \
+is waiting on you. Calling this with that mN and your answer is the only \
+way to answer it: text in your own reply never leaves this window, so a \
+note you answer in plain text is lost. Use other tools first if you need \
+to find the answer, then always finish by calling this. Answer once and \
+discreetly: just mention in a line to your user what was asked and what \
+you answered. Never reply to an answer ('wryme#id answered #mN') unless it \
+asks you something new.";
+
+fn window_tools() -> [(&'static str, &'static str, serde_json::Value); 3] {
+    [
+        (
+            WRYME_LIST,
+            WRYME_LIST_DESCRIPTION,
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            WRYME_MSG_SEND,
+            WRYME_MSG_SEND_DESCRIPTION,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "window id without the wryme# prefix" },
+                    "text": { "type": "string", "description": "note to deliver" }
+                },
+                "required": ["to", "text"],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            WRYME_MSG_RPLY,
+            WRYME_MSG_RPLY_DESCRIPTION,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the mN from the note 'wryme#id sent #mN'" },
+                    "text": { "type": "string", "description": "your answer" }
+                },
+                "required": ["id", "text"],
+                "additionalProperties": false
+            }),
+        ),
+    ]
 }
 
-pub const MESSAGE_DESCRIPTION: &str = "\
-Deliver notes between live wryme windows. Whenever the user asks you to \
-tell, ask, say, or send anything to a wryme#id, you MUST call this tool \
-with action send instead of writing the note yourself. The note lands \
-there as a guest prompt from your window id, stamped with a msg id like \
-#m12. Actions:\n  list — show live window ids. Call it first when the user \
-names no id.\n  send {to, text, reply_to} — deliver text to wryme#id. Set \
-reply_to to the #id in brackets when answering a guest note, else empty.";
-
-pub fn message_parameters() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["list", "send"],
-                "description": "what to do"
-            },
-            "to": {
-                "type": "string",
-                "description": "window id without the wryme# prefix"
-            },
-            "text": {
-                "type": "string",
-                "description": "note to deliver"
-            },
-            "reply_to": {
-                "type": "string",
-                "description": "msg id being answered, or empty for a new note"
-            }
-        },
-        "required": ["action", "to", "text", "reply_to"],
-        "additionalProperties": false
-    })
+pub fn is_window_tool(name: &str) -> bool {
+    matches!(
+        name,
+        WRYME_LIST | WRYME_MSG_SEND | WRYME_MSG_RPLY | WRYME_MSG_RESV
+    )
 }
 
-async fn message_execute(arguments: &str) -> String {
-    let v: serde_json::Value = match serde_json::from_str(arguments) {
-        Ok(v) => v,
-        Err(_) => return format!("{MESSAGE_NAME}: could not parse arguments"),
-    };
-    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
-    match action {
-        "list" => {
-            let ids = crate::windows::active();
-            if ids.is_empty() {
+fn bare_id(s: &str) -> String {
+    s.trim().trim_start_matches("wryme").trim_start_matches('#').to_string()
+}
+
+async fn window_execute(name: &str, arguments: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let field = |k: &str| v.get(k).and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let me = crate::windows::current();
+    let (to, reply_to) = match name {
+        WRYME_LIST => {
+            let names: Vec<String> = crate::windows::active()
+                .into_iter()
+                .filter(|id| *id != me)
+                .map(|id| format!("wryme#{id}"))
+                .collect();
+            if names.is_empty() {
                 return "no other live windows".to_string();
             }
-            let names: Vec<String> = ids.iter().map(|id| format!("wryme#{id}")).collect();
-            format!("live windows: {}", names.join(", "))
+            return format!("live windows: {}", names.join(", "));
         }
-        "send" => {
-            let to = v.get("to").and_then(|t| t.as_str()).unwrap_or("");
-            let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let reply_to = v.get("reply_to").and_then(|t| t.as_str()).unwrap_or("");
-            if to.is_empty() || text.trim().is_empty() {
-                return format!("{MESSAGE_NAME}: send needs {{\"to\": \"id\", \"text\": \"...\", \"reply_to\": \"\"}}");
-            }
-            let from = crate::windows::current();
-            match crate::windows::send(to, &from, text, reply_to).await {
-                Ok(out) => out,
-                Err(e) => format!("{MESSAGE_NAME}: {e}"),
+        WRYME_MSG_RESV => return crate::windows::resv(),
+        WRYME_MSG_SEND => (bare_id(&field("to")), String::new()),
+        _ => {
+            let id = bare_id(&field("id"));
+            match crate::windows::sender_of(&id) {
+                Some(pair) => pair,
+                None => return format!("{name}: no guest note #{id} in this window"),
             }
         }
-        _ => format!("{MESSAGE_NAME}: unknown action '{action}'"),
+    };
+    let text = field("text");
+    if to.is_empty() || text.trim().is_empty() {
+        return format!("{name}: needs a window and some text");
+    }
+    match crate::windows::send(&to, &text, &reply_to).await {
+        Ok(out) => out,
+        Err(e) => format!("{name}: {e}"),
     }
 }
 
 pub fn is_hidden_tool(name: &str) -> bool {
-    name == BOOK_NAME || name == check_name() || is_communing_tool(name) || name == MESSAGE_NAME
+    name == BOOK_NAME || name == check_name() || is_communing_tool(name) || is_window_tool(name)
 }
 
 pub fn is_communing_tool(name: &str) -> bool {
@@ -472,41 +516,52 @@ pub fn tool_defs_chat() -> Vec<serde_json::Value> {
                 "strict": true,
             },
         }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": message_name(),
-                "description": MESSAGE_DESCRIPTION,
-                "parameters": message_parameters(),
-                "strict": true,
-            },
-        }),
     ]
+    .into_iter()
+    .chain(window_tool_defs_chat())
+    .collect()
 }
 
-pub fn web_tool_defs() -> Vec<serde_json::Value> {
-    vec![serde_json::json!({
-        "type": "function",
-        "name": message_name(),
-        "description": MESSAGE_DESCRIPTION,
-        "parameters": message_parameters(),
-        "strict": true,
-    })]
+pub fn window_tool_defs() -> Vec<serde_json::Value> {
+    if !cfg!(any(unix, target_arch = "wasm32")) {
+        return Vec::new();
+    }
+    window_tools()
+        .into_iter()
+        .map(|(name, description, parameters)| {
+            serde_json::json!({
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+                "strict": true,
+            })
+        })
+        .collect()
 }
 
-pub fn web_tool_defs_chat() -> Vec<serde_json::Value> {
-    vec![serde_json::json!({
-        "type": "function",
-        "function": {
-            "name": message_name(),
-            "description": MESSAGE_DESCRIPTION,
-            "parameters": message_parameters(),
-            "strict": true,
-        },
-    })]
+pub fn window_tool_defs_chat() -> Vec<serde_json::Value> {
+    if !cfg!(any(unix, target_arch = "wasm32")) {
+        return Vec::new();
+    }
+    window_tools()
+        .into_iter()
+        .map(|(name, description, parameters)| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                    "strict": true,
+                },
+            })
+        })
+        .collect()
 }
 
-pub fn tool_defs() -> Vec<serde_json::Value> {    vec![
+pub fn tool_defs() -> Vec<serde_json::Value> {
+    vec![
         serde_json::json!({
             "type": "function",
             "name": shell_name(),
@@ -529,14 +584,10 @@ pub fn tool_defs() -> Vec<serde_json::Value> {    vec![
             "parameters": book_parameters(),
             "strict": true,
         }),
-        serde_json::json!({
-            "type": "function",
-            "name": message_name(),
-            "description": MESSAGE_DESCRIPTION,
-            "parameters": message_parameters(),
-            "strict": true,
-        }),
     ]
+    .into_iter()
+    .chain(window_tool_defs())
+    .collect()
 }
 
 #[cfg(test)]
@@ -580,21 +631,24 @@ mod tests {
     }
 
     #[test]
-    fn tool_defs_advertises_five_tools() {
+    fn tool_defs_advertises_seven_tools() {
         let defs = tool_defs();
-        assert_eq!(defs.len(), 5);
+        assert_eq!(defs.len(), 7);
         let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&explore::tool_name().as_str()));
         assert!(names.contains(&check_name().as_str()));
         assert!(names.contains(&book_name()));
-        assert!(names.contains(&message_name()));
+        for n in [WRYME_LIST, WRYME_MSG_SEND, WRYME_MSG_RPLY] {
+            assert!(names.contains(&n));
+        }
+        assert!(!names.contains(&WRYME_MSG_RESV));
     }
 
     #[test]
     fn tool_defs_chat_uses_nested_function_wrapper() {
         let defs = tool_defs_chat();
-        assert_eq!(defs.len(), 5);
+        assert_eq!(defs.len(), 7);
         for d in &defs {
             assert_eq!(d["type"].as_str().unwrap(), "function");
             let f = &d["function"];
@@ -609,26 +663,37 @@ mod tests {
             .collect();
         assert!(names.contains(&shell_name().as_str()));
         assert!(names.contains(&book_name()));
-        assert!(names.contains(&message_name()));
+        assert!(names.contains(&WRYME_MSG_RPLY));
         for d in &defs {
             assert_eq!(d["function"]["strict"], true);
         }
     }
 
     #[test]
-    fn message_tool_is_hidden_and_lists() {
-        assert!(is_hidden_tool(message_name()));
-        assert!(!is_book_tool(message_name()));
+    fn window_tools_are_hidden_and_clear_of_communing() {
+        for n in [WRYME_LIST, WRYME_MSG_SEND, WRYME_MSG_RPLY, WRYME_MSG_RESV] {
+            assert!(is_hidden_tool(n));
+            assert!(!is_communing_tool(n));
+            assert!(!is_book_tool(n));
+        }
     }
 
     #[test]
-    fn web_defs_offer_message_only() {
-        let defs = web_tool_defs();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0]["name"].as_str().unwrap(), message_name());
-        let chat = web_tool_defs_chat();
-        assert_eq!(chat.len(), 1);
-        assert_eq!(chat[0]["function"]["name"].as_str().unwrap(), message_name());
+    fn window_defs_offer_window_tools_only() {
+        let names: Vec<String> = window_tool_defs()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, [WRYME_LIST, WRYME_MSG_SEND, WRYME_MSG_RPLY]);
+        let chat = window_tool_defs_chat();
+        assert_eq!(chat.len(), 3);
+        assert_eq!(chat[2]["function"]["name"].as_str().unwrap(), WRYME_MSG_RPLY);
+    }
+
+    #[tokio::test]
+    async fn reply_needs_a_known_guest_note() {
+        let out = window_execute(WRYME_MSG_RPLY, r##"{"id":"#m999999","text":"hi"}"##).await;
+        assert!(out.contains("no guest note #m999999"));
     }
 
     #[test]
@@ -638,8 +703,10 @@ mod tests {
             explore::tool_parameters(),
             check_parameters(),
             book_parameters(),
-            message_parameters(),
-        ] {
+        ]
+        .into_iter()
+        .chain(window_tools().into_iter().map(|(_, _, p)| p))
+        {
             assert_eq!(params["additionalProperties"], false);
             let props = params["properties"].as_object().unwrap();
             let req = params["required"].as_array().unwrap();

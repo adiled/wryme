@@ -77,6 +77,37 @@ pub(crate) fn owns_tool(shop: &str, model: &str, name: &str) -> bool {
     tools_for(shop, model).iter().any(|t| t.name == name)
 }
 
+pub(crate) type DueCall = (String, String, String, String);
+
+pub(crate) fn due_calls(tx: &UnboundedSender<StreamEvent>) -> Vec<DueCall> {
+    let check = crate::tools::check_name();
+    let mut out: Vec<DueCall> = crate::jobs::claim_due()
+        .into_iter()
+        .map(|(id, output)| (format!("check_{id}"), check.clone(), format!("{{\"id\":{id}}}"), output))
+        .collect();
+    if let Some(output) = crate::windows::claim_due() {
+        out.push((
+            format!("resv_{}", crate::windows::next_msg_id()),
+            crate::tools::WRYME_MSG_RESV.to_string(),
+            "{}".to_string(),
+            output,
+        ));
+    }
+    for (call_id, name, arguments, output) in &out {
+        let _ = tx.send(StreamEvent::ToolResult {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+            output: output.clone(),
+        });
+    }
+    out
+}
+
+pub(crate) fn client_can_run(name: &str) -> bool {
+    client_runs_tools() || crate::tools::is_window_tool(name)
+}
+
 pub(crate) fn client_runs_tools() -> bool {
     !cfg!(target_arch = "wasm32")
 }
@@ -231,6 +262,7 @@ impl Client {
             response_id = tracing::field::Empty
         );
         let _guard = span.enter();
+        let due = due_calls(&tx);
         let result = match shop.protocol {
             Protocol::Demo => {
                 let prompt = messages
@@ -243,7 +275,7 @@ impl Client {
                 Ok(())
             }
             Protocol::ChatCompletions => {
-                crate::api_chat::stream(self, &shop, &station, messages, engine, &tx).await
+                crate::api_chat::stream(self, &shop, &station, messages, engine, &tx, &due).await
             }
             Protocol::Responses => {
                 crate::api_responses::stream(
@@ -254,6 +286,7 @@ impl Client {
                     previous_response_id,
                     engine,
                     &tx,
+                    &due,
                 )
                 .await
             }

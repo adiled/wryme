@@ -262,15 +262,15 @@
         return;
       }
       if (v.from && v.text && window.wrymeGuestNote) {
-        window.wrymeGuestNote(String(v.from), String(v.id || ""), String(v.text));
+        window.wrymeGuestNote(String(v.from), String(v.id || ""), String(v.text), String(v.reply_to || ""));
       }
     };
     const down = () => {
       if (sock === ws) sock = null;
+      if (window.wrymeSetRoster) window.wrymeSetRoster("[]");
       schedule();
     };
     ws.onclose = down;
-    ws.onerror = down;
     sock = ws;
   }
 

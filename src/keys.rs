@@ -244,16 +244,28 @@ pub fn start_turn(
     }));
 }
 
+pub fn take_note(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<crate::platform::Task>,
+    note: crate::windows::Note,
+) {
+    if app.in_flight {
+        app.guest_queue.push(note);
+    } else {
+        start_guest_turn(app, client, tx, in_flight, note);
+    }
+}
+
 pub fn start_guest_turn(
     app: &mut App,
     client: &Client,
     tx: &mpsc::UnboundedSender<StreamEvent>,
     in_flight: &mut Option<crate::platform::Task>,
-    from: String,
-    id: String,
-    text: String,
+    note: crate::windows::Note,
 ) {
-    app.push_guest(from, id, text);
+    app.push_guest(note);
     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
     app.begin_assistant();
     app.stop_voice();

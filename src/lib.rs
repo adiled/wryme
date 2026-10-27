@@ -115,6 +115,9 @@ where
         active_shop,
         active_origin,
     );
+    if let Some(note) = station::unavailable_note(&app.stations, &app.shops) {
+        app.note(note);
+    }
     let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<Task> = None;
@@ -123,14 +126,14 @@ where
     #[cfg(target_arch = "wasm32")]
     crate::web::announce_window(&window_id);
     let (guest_tx, mut guest_rx) =
-        mpsc::unbounded_channel::<(String, String, String)>();
-    #[cfg(target_arch = "wasm32")]
+        mpsc::unbounded_channel::<crate::windows::Note>();
+    #[cfg(not(unix))]
     let _ = &guest_tx;
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(unix)]
     crate::windows::ensure_reader(&window_id, guest_tx);
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(unix)]
     let mut doorway_thread: Option<std::thread::JoinHandle<()>> = None;
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(unix)]
     let mut tick: u64 = 0;
 
     loop {
@@ -151,20 +154,14 @@ where
                         Event::Mouse(m) => keys::handle_mouse(m, &mut app),
                         Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
                         #[cfg(target_arch = "wasm32")]
-                        Event::GuestNote { from, id, text } => {
-                            if app.in_flight {
-                                app.guest_queue.push((from, id, text));
-                            } else {
-                                let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-                                crate::keys::start_guest_turn(
-                                    &mut app, &client, &tx, &mut in_flight_task, from, id, text,
-                                );
-                            }
+                        Event::GuestNote(note) => {
+                            crate::keys::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
                         }
                         #[cfg(target_arch = "wasm32")]
                         Event::ReloadConfig => {
                             match crate::boot(None).await {
                                 Ok(b) => {
+                                    let unavailable = station::unavailable_note(&b.stations, &b.shops);
                                     app.reconfigure(
                                         b.shops,
                                         b.stations,
@@ -172,7 +169,10 @@ where
                                         b.active_shop,
                                         b.active_origin,
                                     );
-                                    app.note("config connected");
+                                    app.note(match unavailable {
+                                        Some(n) => format!("config connected · {n}"),
+                                        None => "config connected".to_string(),
+                                    });
                                 }
                                 Err(e) => app.note(format!("config: {e:#}")),
                             }
@@ -184,27 +184,21 @@ where
             Some(stream_ev) = rx.recv() => {
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
-            Some(guest) = guest_rx.recv() => {
-                let (from, id, text) = guest;
-                if app.in_flight {
-                    app.guest_queue.push((from, id, text));
-                } else {
-                    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-                    crate::keys::start_guest_turn(&mut app, &client, &tx, &mut in_flight_task, from, id, text);
-                }
+            Some(note) = guest_rx.recv() => {
+                crate::keys::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(unix)]
                 {
                     tick += 1;
                     if tick.is_multiple_of(8)
-                        && doorway_thread.is_none()
+                        && doorway_thread.as_ref().is_none_or(|h| h.is_finished())
                         && let Some(h) = crate::windows::hub::spawn_volunteer()
                     {
                         doorway_thread = Some(h);
                     }
                 }
-                if jobs::has_due() && !app.in_flight {
+                if (jobs::has_due() || crate::windows::has_due()) && !app.in_flight {
                     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
                     app.begin_assistant();
                     app.in_flight = true;
@@ -228,9 +222,6 @@ where
     if let Some(t) = in_flight_task.take() {
         t.abort();
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = doorway_thread;
-    crate::windows::unregister(&window_id);
     Ok(())
 }
 
@@ -318,8 +309,8 @@ fn handle_stream_event(
                 let pending = std::mem::take(&mut app.awaiting);
                 crate::keys::start_turn(app, client, tx, in_flight_task, pending);
             } else if !app.guest_queue.is_empty() {
-                let (from, id, text) = app.guest_queue.remove(0);
-                crate::keys::start_guest_turn(app, client, tx, in_flight_task, from, id, text);
+                let note = app.guest_queue.remove(0);
+                crate::keys::start_guest_turn(app, client, tx, in_flight_task, note);
             }
         }
         StreamEvent::Error { message } => {
@@ -510,6 +501,7 @@ mod cli {
 fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
 {
     use crossterm::{
+        cursor::SetCursorStyle,
         event::{EnableBracketedPaste, EnableMouseCapture},
         execute,
         terminal::EnterAlternateScreen,
@@ -520,7 +512,8 @@ fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::Crosst
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        SetCursorStyle::BlinkingUnderScore
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
@@ -533,6 +526,7 @@ fn restore_terminal(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     use crossterm::{
+        cursor::SetCursorStyle,
         event::{DisableBracketedPaste, DisableMouseCapture},
         execute,
         terminal::LeaveAlternateScreen,
@@ -542,7 +536,8 @@ fn restore_terminal(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        SetCursorStyle::DefaultUserShape
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -551,6 +546,7 @@ fn restore_terminal(
 #[cfg(not(target_arch = "wasm32"))]
 fn install_panic_hook() {
     use crossterm::{
+        cursor::SetCursorStyle,
         event::{DisableBracketedPaste, DisableMouseCapture},
         execute,
         terminal::LeaveAlternateScreen,
@@ -562,7 +558,8 @@ fn install_panic_hook() {
             std::io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            SetCursorStyle::DefaultUserShape
         );
         prev(info);
     }));

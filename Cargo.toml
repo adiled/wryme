@@ -52,7 +52,7 @@ ccft = { version = "1.10.7", default-features = false, features = ["core"], opti
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream", "osc52"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "time", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "time", "process", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
 sentry = { version = "0.42", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
