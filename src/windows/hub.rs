@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::next_msg_id;
 
-const FIXED_DOORWAY_PORT: u16 = 17834;
+const DOORWAY_PORT: u16 = 9630;
 const PAGES_ORIGIN: &str = "https://adiled.github.io";
 
 static VOLUNTEER: AtomicBool = AtomicBool::new(false);
@@ -19,24 +19,16 @@ fn temp_id() -> String {
     format!("w{n}")
 }
 
-fn doorway_port() -> u16 {
-    std::env::var("WRYME_DOORWAY_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(FIXED_DOORWAY_PORT)
-}
-
 pub fn spawn_volunteer() -> Option<std::thread::JoinHandle<()>> {
     if VOLUNTEER.swap(true, Ordering::SeqCst) {
         return None;
     }
-    let port = doorway_port();
     Some(std::thread::spawn(move || {
         if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         {
-            rt.block_on(serve(port));
+            rt.block_on(serve(DOORWAY_PORT));
         }
         VOLUNTEER.store(false, Ordering::SeqCst);
     }))

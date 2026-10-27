@@ -212,20 +212,13 @@ When you're done, press **Ctrl-C** to close it.
 | arrow keys   | Move the cursor inside your typing.           |
 | `Backspace`  | Delete the character before the cursor.       |
 
-### Windows that talk to each other
+### Assistants talk to each other
 
 Every open wryme shows its id in the status bar, like `wryme#72e8`. Ask one
 window to "ask wryme#72e8 what time it is" and its assistant sends a note.
 The other window answers on its own, and the answer comes back to you.
 Arriving notes and answers show up as `guest@72e8`. Tabs of the web version
 join in too.
-
-The first window you open quietly hosts the hub: a socket at
-`~/.config/wryme/windows/hub.sock` for terminal windows and
-`ws://127.0.0.1:17834` for browser tabs, open only to local pages and
-adiled.github.io. When that window closes, another one takes over within a
-couple of seconds. `WRYME_WINDOWS_DIR` and `WRYME_DOORWAY_PORT` move them.
-Not available on Microsoft Windows yet.
 
 ## What's cooking?
 

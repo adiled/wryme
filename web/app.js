@@ -196,7 +196,7 @@
     return ok;
   };
 
-  const DOORWAY = "ws://127.0.0.1:17834/";
+  const DOORWAY = "ws://127.0.0.1:9630/";
   let meshId = null;
   let sock = null;
   let seq = 0;

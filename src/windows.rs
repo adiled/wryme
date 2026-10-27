@@ -124,11 +124,6 @@ pub fn mint() -> String {
 
 #[cfg(unix)]
 pub(crate) fn dir() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("WRYME_WINDOWS_DIR")
-        && !custom.is_empty()
-    {
-        return Some(PathBuf::from(custom));
-    }
     std::env::var("HOME").ok().map(|h| {
         PathBuf::from(h)
             .join(".config")
