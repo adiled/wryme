@@ -217,8 +217,8 @@ When you're done, press **Ctrl-C** to close it.
 Every open wryme shows its id in the status bar, like `wryme#72e8`. Ask one
 window to "ask wryme#72e8 what time it is" and its assistant sends a note.
 The other window answers on its own, and the answer comes back to you.
-Arriving notes and answers show up as `guest@72e8`. Tabs of the web version
-join in too.
+Arriving notes and answers show up as `guest@72e8`. Web app assistants can
+participate if at least one native window is open.
 
 ## What's cooking?
 
