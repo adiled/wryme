@@ -1,10 +1,3 @@
-//! wryme — library root.
-//!
-//! Two front doors: [`run_native`] (the terminal binary) and [`web::start`]
-//! (the browser wasm entry). Everything in between — app state, ui, api — is
-//! platform agnostic; the two seams (events in, pixels out) live in
-//! [`platform`] and [`web`].
-
 pub mod api;
 pub mod api_chat;
 pub mod api_responses;
@@ -48,7 +41,6 @@ use app::App;
 use input::Input;
 use platform::{Event, Task};
 
-/// Everything resolved at launch: a client, a shop, a station.
 pub struct Boot {
     pub client: Client,
     pub shops: Vec<shop::Shop>,
@@ -58,7 +50,6 @@ pub struct Boot {
     pub active_origin: Option<String>,
 }
 
-/// Find shops, load stations, pick the active pair, build the http client.
 pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
     let mut shops = shop::load_all().context("loading shops")?;
     shop::discover_all(&mut shops).await;
@@ -87,10 +78,6 @@ pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
     })
 }
 
-/// The one true loop: draw, wait for an event / a stream delta / the tick.
-///
-/// `events` is whatever the platform feeds us — crossterm's `EventStream` on
-/// native, DOM key/wheel listeners in the browser.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<B, S>(
     terminal: &mut Terminal<B>,
@@ -397,10 +384,6 @@ async fn one_shot(
     print!("{out}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// native front door
-// ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> Result<()> {

@@ -1,23 +1,11 @@
 #!/bin/bash
-#
-# wryme desktop launcher — macOS
-#
-# Opens wryme in a clean, app-like WezTerm window. No terminal chrome.
-#
-# The wryme binary is NEVER bundled. It always comes from cargo: this
-# launcher resolves the cargo-installed `wme`, installs it from crates.io
-# if missing, and keeps it current. No fallbacks.
 
 set -euo pipefail
 
-# Bundle layout:
-#   Wryme.app/Contents/MacOS/wryme-launcher   <- this script
-#   Wryme.app/Contents/Resources/wezterm.lua   <- app-like WezTerm config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESC="$SCRIPT_DIR/../Resources"
 CFG="$RESC/wezterm.lua"
 
-# --- Resolve cargo's bin dir regardless of PATH ----------------------------
 if [[ -n "${CARGO_HOME:-}" ]]; then
     CARGO_BIN="$CARGO_HOME/bin"
 else
@@ -25,9 +13,7 @@ else
 fi
 WME="$CARGO_BIN/wme"
 
-# --- Locate wezterm ---------------------------------------------------------
 find_wezterm() {
-    # 1) Bundled inside wme.app (preferred, no download, no hack)
     for p in \
         "$RESC/WezTerm.app/Contents/MacOS/wezterm" \
         "$SCRIPT_DIR/../Resources/WezTerm.app/Contents/MacOS/wezterm" \
@@ -53,7 +39,6 @@ install_wezterm_direct() {
     tmp="$(mktemp -d)"
     trap "rm -rf \"$tmp\"" RETURN
 
-    # Resolve latest WezTerm zip URL via GitHub API (zip is universal, no arch split).
     url="$(python3 -c '
 import json, urllib.request, sys
 try:
@@ -84,9 +69,7 @@ except Exception as e:
         exit 1
     }
 
-    # Zip contains WezTerm.app at top level
     if [[ ! -d "$tmp/WezTerm.app" ]]; then
-        # Some zips nest one level deep
         local found
         found="$(find "$tmp" -maxdepth 3 -name "WezTerm.app" -type d | head -n1 || true)"
         if [[ -n "$found" ]]; then
@@ -99,7 +82,6 @@ except Exception as e:
         exit 1
     fi
 
-    # Pick install destination: /Applications if writable, else ~/Applications, else ask for admin
     if [[ -w "/Applications" ]]; then
         dest="/Applications/WezTerm.app"
         rm -rf "$dest" 2>/dev/null || true
@@ -110,14 +92,12 @@ except Exception as e:
         ditto "$tmp/WezTerm.app" "$dest" 2>/dev/null || cp -R "$tmp/WezTerm.app" "$dest"
     else
         dest="/Applications/WezTerm.app"
-        # Escalate with admin prompt
         osascript -e "do shell script \"rm -rf \\\"$dest\\\"; ditto \\\"$tmp/WezTerm.app\\\" \\\"$dest\\\"\" with administrator privileges" >/dev/null 2>&1 || {
             osascript -e 'display dialog "Could not install WezTerm (permission denied). Try installing WezTerm from https://wezterm.org/install/macos.html" buttons {"OK"} default button "OK" with icon stop' >/dev/null 2>&1 || true
             exit 1
         }
     fi
 
-    # Clear quarantine so Gatekeeper does not block first run
     xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 
     WEZTERM="$dest/Contents/MacOS/wezterm"
@@ -125,20 +105,15 @@ except Exception as e:
 
 if [[ -z "$WEZTERM" ]]; then
     if command -v brew >/dev/null 2>&1; then
-        # Prefer brew when available (handles updates + cask quarantine)
         if ! brew install --cask wezterm 2>&1; then
-            # brew failed (e.g. no cask tap) — fall back to direct download
             install_wezterm_direct
         fi
-        # Re-resolve after brew
         WEZTERM="$(find_wezterm || true)"
         if [[ -z "$WEZTERM" ]]; then
-            # brew claimed success but binary not in expected spot — try direct paths
             for p in "/Applications/WezTerm.app/Contents/MacOS/wezterm" "$HOME/Applications/WezTerm.app/Contents/MacOS/wezterm"; do
                 [[ -x "$p" ]] && WEZTERM="$p" && break
             done
         fi
-        # Last resort: direct download if still missing
         if [[ -z "$WEZTERM" ]]; then
             install_wezterm_direct
         fi
@@ -147,7 +122,6 @@ if [[ -z "$WEZTERM" ]]; then
     fi
 fi
 
-# Final sanity check — if still not found, give a helpful exit
 if [[ -z "${WEZTERM:-}" ]] || [[ ! -x "$WEZTERM" ]]; then
     WEZTERM="$(find_wezterm || true)"
 fi
@@ -156,23 +130,15 @@ if [[ -z "${WEZTERM:-}" ]]; then
     exit 1
 fi
 
-# --- Use a private branded WezTerm copy for wryme (so wme has its own Dock icon) ----
-# We leave the user's main WezTerm.app untouched. We copy it to
-# ~/Library/Application Support/wryme/WezTerm-Wryme.app, brand its icon with
-# our W, give it a distinct bundle ID, and point WEZTERM there. This makes
-# wme windows group under the W icon, while WezTerm keeps its own icon.
 maybe_brand_wezterm() {
     [[ -f "$RESC/AppIcon.icns" ]] || return 0
     local src_app
-    # Resolve src .app from WEZTERM path (e.g. /Applications/WezTerm.app/Contents/MacOS/wezterm)
     src_app="$(cd "$(dirname "$WEZTERM")/.." && pwd)"
     [[ -d "$src_app" ]] || return 0
-    # Only brand if src is a real .app (not a bare binary)
     [[ "$src_app" == *.app ]] || return 0
     local support="$HOME/Library/Application Support/wryme"
     local branded="$support/WezTerm-Wryme.app"
     mkdir -p "$support" 2>/dev/null || return 0
-    # Rebuild branded copy if missing or src newer, or our icon newer
     local need=0
     if [[ ! -d "$branded" ]]; then need=1
     elif [[ "$src_app/Contents/Info.plist" -nt "$branded/Contents/Info.plist" ]]; then need=1
@@ -192,16 +158,12 @@ maybe_brand_wezterm() {
         codesign --force --deep --sign - "$branded" >/dev/null 2>&1 || true
         touch "$branded" 2>/dev/null || true
     fi
-    # Use branded binary if present
     if [[ -x "$branded/Contents/MacOS/wezterm" ]]; then
         WEZTERM="$branded/Contents/MacOS/wezterm"
     fi
 }
 maybe_brand_wezterm 2>/dev/null || true
 
-# --- Cargo-first wryme ----------------------------------------------------
-# The desktop bundle never carries `wme`. If cargo hasn't installed it yet,
-# install the latest from crates.io now. No bundled fallback.
 ensure_wme() {
     if [[ -x "$WME" ]]; then return 0; fi
     if ! command -v cargo >/dev/null 2>&1; then
@@ -216,24 +178,19 @@ ensure_wme() {
 }
 ensure_wme
 
-# --- Silent auto-update ---------------------------------------------
-# Checks crates.io once per 24h, in background. Fully silent. Keeps the
-# cargo-installed wme current: plain `cargo install` upgrades when a newer
-# version exists and is a no-op when already current.
 maybe_auto_update() {
     local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wryme"
+    local one_day=86400
     local stamp="$cache_dir/last_update_check"
     local lock="$cache_dir/update.lock"
 
     mkdir -p "$cache_dir" 2>/dev/null || return 0
-    # Throttle: 24h
     if [[ -f "$stamp" ]]; then
         local age
         if age=$(($(date +%s) - $(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0) )) 2>/dev/null; then
-            [[ $age -lt 86400 ]] && return 0
+            [[ $age -lt $one_day ]] && return 0
         fi
     fi
-    # Lock (best-effort, no block)
     if ! mkdir "$lock" 2>/dev/null; then return 0; fi
     trap 'rmdir "$lock" 2>/dev/null || true' RETURN
 
@@ -243,7 +200,6 @@ maybe_auto_update() {
     date +%s > "$stamp" 2>/dev/null || true
 }
 
-# Kick off background check (detached, fully silent). Do not block launch.
 ( maybe_auto_update >/dev/null 2>&1 & ) 2>/dev/null
 disown 2>/dev/null || true
 

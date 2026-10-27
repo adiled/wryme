@@ -189,7 +189,6 @@ fn append_partial(id: u64, chunk: &[u8]) {
     }
 }
 
-/// No shell in the browser: the shop runs the shell.
 #[cfg(target_arch = "wasm32")]
 async fn run_command(_command: &str, _id: u64) -> String {
     "(no shell in the browser — this tool runs on the shop)".to_string()

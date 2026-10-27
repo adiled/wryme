@@ -1,6 +1,3 @@
-//! `Backend` over the DOM: one `<div>` per row, spans with inline styles,
-//! a block cursor. Ratatui diffs cells; we turn the diff into row HTML.
-
 use std::io;
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
@@ -13,8 +10,6 @@ use web_sys::{Document, HtmlElement};
 
 use super::TERM_ID;
 
-/// Cells are kept as the value ratatui hands us; `PartialEq` on this is what
-/// lets us skip a row that the diff already proved unchanged.
 #[derive(Clone, PartialEq)]
 struct Painted {
     sym: String,
@@ -32,7 +27,23 @@ impl Painted {
             modifier: Modifier::empty(),
         }
     }
+
+    fn wide_tail(cell: &Cell) -> Self {
+        Self {
+            sym: String::new(),
+            fg: cell.fg,
+            bg: cell.bg,
+            modifier: cell.modifier,
+        }
+    }
+
+    fn is_wide_tail(&self) -> bool {
+        self.sym.is_empty()
+    }
 }
+
+const RULER_CHARS: f64 = 20.0;
+const FALLBACK_CELL: (f64, f64) = (9.0, 18.0);
 
 pub struct WebBackend {
     doc: Document,
@@ -81,17 +92,15 @@ impl WebBackend {
         Ok(backend)
     }
 
-    /// Cell metrics from `#wryme-measure`, a 20-`M` ruler styled like the
-    /// terminal. Cheaper and steadier than per-glyph measurement.
     fn measure(doc: &Document) -> (f64, f64) {
         if let Some(el) = doc.get_element_by_id("wryme-measure")
             && let r = el.get_bounding_client_rect()
             && r.width() > 0.0
             && r.height() > 0.0
         {
-            return (r.width() / 20.0, r.height());
+            return (r.width() / RULER_CHARS, r.height());
         }
-        (9.0, 18.0)
+        FALLBACK_CELL
     }
 
     fn px(&self, cells: u16) -> f64 {
@@ -102,7 +111,6 @@ impl WebBackend {
         cells as f64 * self.line_h
     }
 
-    /// Fresh grid, fresh row divs, fresh cursor div.
     fn rebuild(&mut self, cols: u16, rows: u16) {
         self.cols = cols.max(1);
         self.n_rows = rows.max(1);
@@ -164,8 +172,6 @@ impl WebBackend {
         }
     }
 
-    /// Row HTML: runs of same-styled cells, skipping wide-char continuations
-    /// so the row can never drift out of column.
     fn row_html(&self, y: u16) -> String {
         let cols = self.cols as usize;
         let base = y as usize * cols;
@@ -173,7 +179,7 @@ impl WebBackend {
         let mut i = 0usize;
         while i < cols {
             let cell = &self.grid[base + i];
-            if cell.sym.is_empty() {
+            if cell.is_wide_tail() {
                 i += 1;
                 continue;
             }
@@ -194,7 +200,7 @@ impl WebBackend {
             let mut j = i + w;
             while j < cols {
                 let n = &self.grid[base + j];
-                if n.sym.is_empty() {
+                if n.is_wide_tail() {
                     j += 1;
                     continue;
                 }
@@ -229,8 +235,6 @@ impl Backend for WebBackend {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        // Ratatui resizes its buffers (and thus tells us a new size) before
-        // this runs, so the grid can follow here without a resize listener.
         let size = self.size()?;
         if size.width != self.cols || size.height != self.n_rows {
             self.rebuild(size.width, size.height);
@@ -251,24 +255,17 @@ impl Backend for WebBackend {
                 self.grid[idx] = next;
                 self.dirty[y as usize] = true;
             }
-            // A wide glyph owns the columns after it, whatever the buffer says.
-            let w = UnicodeWidthStr::width(sym.as_str()).max(1);
-            for k in 1..w {
-                let cx = x as usize + k;
+            let glyph_cols = UnicodeWidthStr::width(sym.as_str()).max(1);
+            for tail in 1..glyph_cols {
+                let cx = x as usize + tail;
                 if cx >= self.cols as usize {
                     break;
                 }
                 let ci = y as usize * self.cols as usize + cx;
-                if self.grid[ci].sym.is_empty() {
-                    continue;
+                if !self.grid[ci].is_wide_tail() {
+                    self.grid[ci] = Painted::wide_tail(cell);
+                    self.dirty[y as usize] = true;
                 }
-                self.grid[ci] = Painted {
-                    sym: String::new(),
-                    fg: cell.fg,
-                    bg: cell.bg,
-                    modifier: cell.modifier,
-                };
-                self.dirty[y as usize] = true;
             }
         }
         Ok(())
@@ -379,7 +376,6 @@ fn escape(s: &str) -> String {
     out
 }
 
-/// Inline style for one cell. `Reset` colors inherit from the page theme.
 fn style_attr(c: &Painted) -> String {
     const DEFAULT_FG: Color = Color::Rgb(201, 209, 217);
     const DEFAULT_BG: Color = Color::Rgb(13, 17, 23);

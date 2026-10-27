@@ -1,5 +1,3 @@
-//! Native seam: tokio timers, tokio tasks, std instant.
-
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

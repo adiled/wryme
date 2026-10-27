@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
-#
-# Package the wryme desktop bundle for macOS.
-#
-# Produces: wryme-darwin-<arch>.zip  (contains wme.app)
-#
-# Usage: package-macos.sh <version> [arch]
-#   arch defaults to `uname -m` (arm64 on Apple Silicon runners, x86_64 on Intel)
 
 set -euo pipefail
 
 VERSION="${1:?usage: package-macos.sh <version> [arch]}"
 RAW_ARCH="${2:-$(uname -m)}"
-# Normalize target triples like aarch64-apple-darwin -> arm64, x86_64-apple-darwin -> x86_64
 case "$RAW_ARCH" in
     aarch64*|arm64*) ARCH="arm64" ;;
     x86_64*) ARCH="x86_64" ;;
@@ -20,9 +12,6 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Bundle layout: the wryme binary is NEVER bundled — the launcher always
-# installs `wme` from cargo. The bundle carries only wezterm.lua, the
-# launcher, the icon, and a bundled WezTerm.app.
 STAGE="dist/wryme-desktop/wme.app"
 
 rm -rf dist/wryme-desktop
@@ -35,12 +24,10 @@ if [[ -f desktop/macos/AppIcon.icns ]]; then
     cp desktop/macos/AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
 fi
 
-# --- Bundle WezTerm inside wme.app (fully self-contained, no download) ---
 WEZTERM_BUNDLE="$STAGE/Contents/Resources/WezTerm.app"
 if [[ ! -d "$WEZTERM_BUNDLE" ]]; then
     echo "bundling WezTerm..."
     TMP_WEZ="$(mktemp -d)"
-    # Resolve latest WezTerm zip (universal, ~30MB) via GitHub API
     WEZ_URL="$(python3 -c "
 import json, urllib.request, sys
 try:
@@ -61,15 +48,12 @@ except Exception as e:
             unzip -q "$TMP_WEZ/wezterm.zip" -d "$TMP_WEZ" 2>/dev/null || echo "unzip WezTerm failed" >&2
             FOUND="$(find "$TMP_WEZ" -maxdepth 3 -name "WezTerm.app" -type d | head -1 || true)"
             if [[ -n "$FOUND" ]]; then
-                # Extract entitlements before modifying (needed for re-sign)
-                ent="/tmp/wryme-ent-$$.plist"
-                codesign -d --entitlements "$ent" "$FOUND" 2>/dev/null || codesign -d --entitlements "$ent" "$FOUND/Contents/MacOS/wezterm-gui" 2>/dev/null || rm -f "$ent" 2>/dev/null || true
-                # Fallback to system WezTerm entitlements if zip extraction failed
-                if [[ ! -s "$ent" && -d "/Applications/WezTerm.app" ]]; then
-                    codesign -d --entitlements "$ent" "/Applications/WezTerm.app" 2>/dev/null || true
+                original_entitlements="/tmp/wryme-ent-$$.plist"
+                codesign -d --entitlements "$original_entitlements" "$FOUND" 2>/dev/null || codesign -d --entitlements "$original_entitlements" "$FOUND/Contents/MacOS/wezterm-gui" 2>/dev/null || rm -f "$original_entitlements" 2>/dev/null || true
+                if [[ ! -s "$original_entitlements" && -d "/Applications/WezTerm.app" ]]; then
+                    codesign -d --entitlements "$original_entitlements" "/Applications/WezTerm.app" 2>/dev/null || true
                 fi
                 ditto "$FOUND" "$WEZTERM_BUNDLE" 2>/dev/null || cp -R "$FOUND" "$WEZTERM_BUNDLE"
-                # Brand the bundled WezTerm with our W so Dock groups under W
                 if [[ -f desktop/macos/AppIcon.icns ]]; then
                     cp desktop/macos/AppIcon.icns "$WEZTERM_BUNDLE/Contents/Resources/terminal.icns" 2>/dev/null || true
                     cp desktop/macos/AppIcon.icns "$WEZTERM_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || true
@@ -80,13 +64,12 @@ except Exception as e:
                     /usr/libexec/PlistBuddy -c "Set :CFBundleIconName AppIcon" "$WEZTERM_BUNDLE/Contents/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$WEZTERM_BUNDLE/Contents/Info.plist" 2>/dev/null || true
                 fi
                 xattr -dr com.apple.quarantine "$WEZTERM_BUNDLE" 2>/dev/null || true
-                # Re-sign bundled WezTerm with original entitlements (required, else SIGKILL)
-                if [[ -s "$ent" ]]; then
-                    codesign --force --deep --sign - --entitlements "$ent" "$WEZTERM_BUNDLE" >/dev/null 2>&1 || codesign --force --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || true
+                if [[ -s "$original_entitlements" ]]; then
+                    codesign --force --deep --sign - --entitlements "$original_entitlements" "$WEZTERM_BUNDLE" >/dev/null 2>&1 || codesign --force --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || true
                 else
                     codesign --force --options runtime --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || codesign --force --deep --sign - "$WEZTERM_BUNDLE" >/dev/null 2>&1 || true
                 fi
-                rm -f "$ent" 2>/dev/null || true
+                rm -f "$original_entitlements" 2>/dev/null || true
             else
                 echo "warn: WezTerm.app not found in zip" >&2
             fi
@@ -99,8 +82,6 @@ fi
 
 sed "s/1\.1\.4/$VERSION/g" desktop/macos/Info.plist > "$STAGE/Contents/Info.plist"
 
-# Ad-hoc codesign so the app runs on other Macs without extra prompts where
-# possible (Gatekeeper may still warn on first open of an unsigned download).
 codesign --force --deep --sign - "$STAGE" >/dev/null 2>&1 || echo "codesign skipped"
 
 (cd dist/wryme-desktop && rm -f "../wryme-darwin-$ARCH.zip" && zip -qry "../wryme-darwin-$ARCH.zip" wme.app)

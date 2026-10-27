@@ -1,13 +1,3 @@
-//! The two seams, and nothing else.
-//!
-//! * **pixels out** — [`web::backend`] implements ratatui's `Backend` for the
-//!   browser; native uses ratatui's `CrosstermBackend`.
-//! * **events in** — native replays crossterm's `EventStream`, the browser
-//!   replays DOM key/wheel listeners. Both are fed to `run()` as a stream of
-//!   [`Event`].
-//!
-//! Above this module the code never asks which world it lives in.
-
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 

@@ -1,6 +1,3 @@
-//! Browser seam: DOM events in, ratatui `Backend` out, JS timers and the
-//! single-threaded executor in between.
-
 pub mod backend;
 
 use std::future::Future;
@@ -14,13 +11,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{ClipboardEvent, KeyboardEvent, MouseEvent as WebMouseEvent, WheelEvent};
 
-/// The element the terminal paints into.
 pub const TERM_ID: &str = "wryme-term";
-
-// ---------------------------------------------------------------------------
-// event types — a faithful subset of crossterm's, so `keys.rs` reads the same
-// on both platforms
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyCode {
@@ -114,10 +105,6 @@ pub enum Event {
     GuestNote(crate::windows::Note),
 }
 
-// ---------------------------------------------------------------------------
-// runtime
-// ---------------------------------------------------------------------------
-
 pub fn sleep(d: Duration) -> impl Future<Output = ()> {
     gloo_timers::future::TimeoutFuture::new(d.as_millis() as u32)
 }
@@ -131,8 +118,6 @@ pub async fn timeout<F: Future>(d: Duration, f: F) -> Option<F::Output> {
     }
 }
 
-/// A cancellable task. There is one thread: aborting means dropping the
-/// future at its next await point.
 pub struct Task {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -180,12 +165,6 @@ pub fn unix_secs() -> f64 {
     js_sys::Date::now() / 1000.0
 }
 
-// ---------------------------------------------------------------------------
-// input: DOM listeners -> tokio channel -> the run loop
-// ---------------------------------------------------------------------------
-
-/// Creates the event channel. The sender half goes to the listeners, the
-/// receiver half becomes the `events` stream in `run()`.
 pub fn channel() -> (UnboundedSender<Event>, EventStream) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     (tx, EventStream(rx))
@@ -203,9 +182,7 @@ impl Stream for EventStream {
     }
 }
 
-/// Wires `keydown` on the document and `wheel` on the terminal element.
-/// Listeners live for the life of the page, so they are leaked on purpose.
-pub fn install(tx: &UnboundedSender<Event>) {
+pub fn install_listeners(tx: &UnboundedSender<Event>) {
     let doc = match web_sys::window().and_then(|w| w.document()) {
         Some(d) => d,
         None => return,
@@ -218,7 +195,6 @@ pub fn install(tx: &UnboundedSender<Event>) {
             let _ = key_tx.send(Event::Key(k));
         }
     });
-    // Document is not an Element, but it derefs to EventTarget.
     let _ = doc.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     on_key.forget();
 
@@ -360,10 +336,9 @@ pub fn copy(text: &str) {
     }
 }
 
-/// DOM key -> crossterm-shaped key. Returns `None` for keys we don't model
-/// (IME composition, dead keys, media keys).
 fn map_key(ev: &KeyboardEvent) -> Option<KeyEvent> {
-    if (ev.ctrl_key() || ev.meta_key()) && ev.key().eq_ignore_ascii_case("v") {
+    let cmd_as_ctrl = ev.ctrl_key() || ev.meta_key();
+    if cmd_as_ctrl && ev.key().eq_ignore_ascii_case("v") {
         return None;
     }
     let mut modifiers = KeyModifiers::NONE;
@@ -373,15 +348,11 @@ fn map_key(ev: &KeyboardEvent) -> Option<KeyEvent> {
     if ev.alt_key() {
         modifiers = modifiers.with(KeyModifiers::ALT);
     }
-    // Cmd plays the role of Ctrl so the muscle memory (Ctrl-S popup, Ctrl-T
-    // view, Ctrl-V voice) survives the move to the browser.
-    if ev.ctrl_key() {
+    if cmd_as_ctrl {
         modifiers = modifiers.with(KeyModifiers::CONTROL);
     }
     if ev.meta_key() {
-        modifiers = modifiers
-            .with(KeyModifiers::CONTROL)
-            .with(KeyModifiers::SUPER);
+        modifiers = modifiers.with(KeyModifiers::SUPER);
     }
 
     let code = match ev.key().as_str() {
@@ -412,10 +383,10 @@ fn map_key(ev: &KeyboardEvent) -> Option<KeyEvent> {
         "F11" => KeyCode::F(11),
         "F12" => KeyCode::F(12),
         " " => KeyCode::Char(' '),
-        k if k.chars().count() == 1 && !ev.ctrl_key() => KeyCode::Char(k.chars().next()?),
-        // ctrl/cmd combos report the base char; keep it lowercase the way a
-        // terminal would
-        k if k.chars().count() == 1 => KeyCode::Char(k.chars().next()?.to_ascii_lowercase()),
+        k if k.chars().count() == 1 => {
+            let c = k.chars().next()?;
+            KeyCode::Char(if ev.ctrl_key() { c.to_ascii_lowercase() } else { c })
+        }
         _ => return None,
     };
 

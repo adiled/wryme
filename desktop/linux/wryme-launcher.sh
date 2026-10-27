@@ -1,19 +1,10 @@
 #!/usr/bin/env bash
-#
-# wryme desktop launcher - Linux
-#
-# Opens wryme in a clean, app-like WezTerm window. No terminal chrome.
-#
-# The wryme binary is NEVER bundled. It always comes from cargo: this
-# launcher resolves the cargo-installed `wme`, installs it from crates.io
-# if missing, and keeps it current. No fallbacks.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="$HERE/wezterm.lua"
 
-# --- Resolve cargo's bin dir regardless of PATH ----------------------------
 if [[ -n "${CARGO_HOME:-}" ]]; then
     CARGO_BIN="$CARGO_HOME/bin"
 else
@@ -22,7 +13,6 @@ fi
 WME="$CARGO_BIN/wme"
 CARGO_INSTALL="cargo install wryme --locked"
 
-# --- Locate wezterm ---------------------------------------------------------
 find_wezterm() {
     local bin
     if bin="$(command -v wezterm 2>/dev/null)"; then
@@ -68,9 +58,6 @@ if [[ ! -x "${WEZTERM}" && "$WEZTERM" != "wezterm" ]]; then
     WEZTERM="wezterm"
 fi
 
-# --- Cargo-first wryme ----------------------------------------------------
-# The desktop bundle never carries `wme`. If cargo hasn't installed it yet,
-# install the latest from crates.io now. No bundled fallback.
 ensure_wme() {
     if [[ -x "$WME" ]]; then return 0; fi
     if ! command -v cargo >/dev/null 2>&1; then
@@ -88,18 +75,16 @@ ensure_wme() {
 }
 ensure_wme
 
-# --- Silent auto-update (Linux) -------------------------------------------
-# Keeps the cargo-installed wme current: plain `cargo install` upgrades when
-# a newer version exists and is a no-op when already current.
 maybe_auto_update() {
     local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wryme"
+    local one_day=86400
     local stamp="$cache_dir/last_update_check"
     local lock="$cache_dir/update.lock"
     mkdir -p "$cache_dir" 2>/dev/null || return 0
     if [[ -f "$stamp" ]]; then
         local age
         age=$(($(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0)))
-        [[ $age -lt 86400 ]] && return 0
+        [[ $age -lt $one_day ]] && return 0
     fi
     if ! mkdir "$lock" 2>/dev/null; then return 0; fi
     trap 'rmdir "$lock" 2>/dev/null || true' RETURN

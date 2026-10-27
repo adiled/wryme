@@ -1,10 +1,3 @@
-//! WrymeDispatcher — wryme's tool registry plugged into `serve_forager`.
-//!
-//! Deliberately thin: the tool surface is already modular in the wryme
-//! crate (`tool_defs` for the catalogue, `execute` for the run, `book`
-//! for the engine), so this only does wire-shape conversion. Adding a
-//! tool to the TUI adds it to the hive for free.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -20,16 +13,14 @@ pub(crate) struct WrymeDispatcher {
 
 impl WrymeDispatcher {
     pub(crate) fn new() -> Result<Self> {
-        // The hive gets its own book, separate from the TUI's, so two
-        // processes never write the same stream segments.
-        let engine = book::open_engine(&book_dir())?;
+        let engine = book::open_engine(&hive_book_dir())?;
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
         })
     }
 }
 
-fn book_dir() -> PathBuf {
+fn hive_book_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
@@ -65,14 +56,12 @@ impl ToolDispatcher for WrymeDispatcher {
             .unwrap_or("")
             .to_string();
         let args = tone.get("args").cloned().unwrap_or(Value::Null);
-        // wryme's tools take the raw argument string (JSON or bare, they
-        // parse it themselves) so the wire can hand us either shape.
-        let args_str = match args.as_str() {
+        let raw_args = match args.as_str() {
             Some(s) => s.to_string(),
             None => args.to_string(),
         };
 
-        match wryme::tools::execute(&self.engine, &tool_name, &args_str).await {
+        match wryme::tools::execute(&self.engine, &tool_name, &raw_args).await {
             Some(out) => ToolResult::text(out),
             None => ToolResult::error(format!("wryme: unknown tool {tool_name:?}")),
         }

@@ -292,7 +292,6 @@ async fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// No subprocesses in the browser — the shop runs explore.
 #[cfg(target_arch = "wasm32")]
 async fn run(_cmd: &str, _args: &[&str]) -> Option<String> {
     None

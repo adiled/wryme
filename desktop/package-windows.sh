@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-#
-# Package the wryme desktop bundle for Windows.
-#
-# Produces: wryme-windows-x86_64.zip  (launchers, config, icons — no binary;
-#           wme.exe always comes from cargo install)
-#
-# Usage: package-windows.sh <version>
 
 set -euo pipefail
 

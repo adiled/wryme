@@ -176,8 +176,6 @@ pub struct Client {
 }
 impl Client {
     pub fn new() -> Result<Self> {
-        // No user-agent / proxy knobs in the browser — the platform owns
-        // those. Everything else is the same client.
         #[cfg(not(target_arch = "wasm32"))]
         let builder = {
             let mut builder =

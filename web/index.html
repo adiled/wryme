@@ -16,8 +16,6 @@
       overflow: hidden;
     }
     body {
-      /* padding lives on the body: #wryme-term's box must be exactly the
-         cell grid, since the backend measures columns from its rect */
       padding: 12px;
       box-sizing: border-box;
     }
@@ -33,9 +31,6 @@
       user-select: none;
       -webkit-user-select: none;
       font: 15px/20px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      /* terminal-grade rasterization: grayscale AA, no font ligatures /
-         contextual alternates (terminals never draw those), no auto
-         text-size adjustment on mobile zoom */
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
       text-rendering: optimizeLegibility;
@@ -67,7 +62,6 @@
     @keyframes wme-blink {
       50% { opacity: 0; }
     }
-    /* the ruler: 20 M's, same font as the terminal, used to measure the cell */
     #wryme-measure {
       position: absolute;
       visibility: hidden;
