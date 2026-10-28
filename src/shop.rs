@@ -164,7 +164,17 @@ pub fn find_for_model<'a>(shops: &'a [Shop], model: &str) -> Option<&'a Shop> {
 }
 
 pub async fn discover_all(shops: &mut [Shop]) {
-    let http = match reqwest::Client::builder().build() {
+    let mut http_builder = reqwest::Client::builder();
+    for var in &["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"] {
+        if let Ok(path) = std::env::var(var) {
+            if let Ok(pem) = std::fs::read(&path) {
+                if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+                    http_builder = http_builder.add_root_certificate(cert);
+                }
+            }
+        }
+    }
+    let http = match http_builder.build() {
         Ok(c) => c,
         Err(e) => {
             for shop in shops.iter() {
@@ -185,6 +195,10 @@ pub async fn discover_all(shops: &mut [Shop]) {
     }
 }
 
+pub(crate) fn should_send_auth(key: &str) -> bool {
+    !key.is_empty() && !key.eq_ignore_ascii_case("public")
+}
+
 async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> {
     #[derive(Deserialize)]
     struct ModelsResponse {
@@ -193,8 +207,11 @@ async fn discover_models(shop: &mut Shop, http: &reqwest::Client) -> Result<()> 
 
     let url = format!("{}/models", shop.url.trim_end_matches('/'));
     let mut req = http.get(&url);
-    if !shop.key.is_empty() {
+    if should_send_auth(&shop.key) {
         req = req.bearer_auth(&shop.key);
+    }
+    for (k, v) in &shop.headers {
+        req = req.header(k, v);
     }
     let resp = req
         .send()
@@ -259,6 +276,14 @@ fn tool_name(def: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_or_missing_key_is_anonymous() {
+        assert!(!should_send_auth(""));
+        assert!(!should_send_auth("public"));
+        assert!(!should_send_auth("PUBLIC"));
+        assert!(should_send_auth("sk-abc"));
+    }
 
     #[test]
     fn demo_is_always_there() {

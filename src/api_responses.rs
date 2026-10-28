@@ -606,7 +606,7 @@ async fn stream_once(
         if attempt_multi {
             req = req.header("OpenAI-Beta", "responses_multi_agent=v1");
         }
-        if !shop.key.is_empty() {
+        if crate::shop::should_send_auth(&shop.key) {
             req = req.bearer_auth(&shop.key);
         }
         for (k, v) in &shop.headers {
