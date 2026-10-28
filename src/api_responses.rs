@@ -883,8 +883,9 @@ fn handle_event(
             }
             "response.function_call_arguments.delta" => {
                 let item_id = v
-                    .get("output_item_id")
+                    .get("item_id")
                     .and_then(|i| i.as_str())
+                    .or_else(|| v.get("output_item_id").and_then(|i| i.as_str()))
                     .unwrap_or("");
                 if let Some(d) = v.get("delta").and_then(|d| d.as_str())
                     && let Some(c) = calls.iter_mut().find(|c| c.item_id == item_id)
@@ -906,13 +907,13 @@ fn handle_event(
                 }
             }
             "response.output_item.done" => {
-                let item = v.get("output_item");
+                let item = v.get("item");
                 let item_type = item
                     .and_then(|i| i.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
                 match item_type {
-                    "reasoning" => {
+                    "reasoning" | "message" => {
                         if let Some(item) = item {
                             carry.push(item.clone());
                         }
@@ -1281,11 +1282,44 @@ mod tests {
     }
 
     #[test]
+    fn the_words_said_before_a_call_are_carried_into_the_next_round() {
+        let (tx, _rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"I'll look.\"}]}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert_eq!(turn.carry.len(), 1);
+        assert_eq!(turn.carry[0]["content"][0]["text"], "I'll look.");
+    }
+
+    #[test]
+    fn arguments_stream_in_by_their_item_id() {
+        let (tx, _rx) = channel();
+        let mut turn = Turn::default();
+        handle_event(
+            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"c1\",\"name\":\"zsh\"}}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        handle_event(
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"cmd\\\":1}\"}\n\n",
+            &tx,
+            &mut turn,
+        )
+        .unwrap();
+        assert_eq!(turn.calls[0].arguments, "{\"cmd\":1}");
+    }
+
+    #[test]
     fn reasoning_done_item_is_captured() {
         let (tx, _rx) = channel();
         let mut turn = Turn::default();
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
             &tx,
             &mut turn,
         )
@@ -1331,7 +1365,7 @@ mod tests {
         assert!(turn.calls.is_empty(), "mcp_call is not a local function call");
 
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"server_label\":\"hum\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"status\":\"completed\",\"output\":\"README.md\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"server_label\":\"hum\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"status\":\"completed\",\"output\":\"README.md\"}}\n\n",
             &tx,
             &mut turn,
         )
@@ -1356,7 +1390,7 @@ mod tests {
         assert_eq!(turn.calls.len(), 1);
 
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
             &tx,
             &mut turn,
         )
@@ -1368,7 +1402,7 @@ mod tests {
         assert!(turn.calls[0].rendered, "server-executed call must not run again locally");
 
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
             &tx,
             &mut turn,
         )
@@ -1393,13 +1427,13 @@ mod tests {
         let (tx, _rx) = channel();
         let mut turn = Turn::default();
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"name\":\"web_search\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"name\":\"web_search\"}}\n\n",
             &tx,
             &mut turn,
         )
         .unwrap();
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"type\":\"mcp_list_tools\",\"id\":\"ml_1\",\"server_label\":\"hum\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"mcp_list_tools\",\"id\":\"ml_1\",\"server_label\":\"hum\"}}\n\n",
             &tx,
             &mut turn,
         )
@@ -1422,13 +1456,13 @@ mod tests {
         assert!(matches!(ev, StreamEvent::ToolCall { name } if name.as_deref() == Some("multi_agent")));
         assert!(turn.calls.is_empty());
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
             &tx,
             &mut turn,
         )
         .unwrap();
         handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"output_item\":{\"id\":\"amsg_1\",\"type\":\"agent_message\",\"author\":\"/root/a\",\"recipient\":\"/root\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"amsg_1\",\"type\":\"agent_message\",\"author\":\"/root/a\",\"recipient\":\"/root\"}}\n\n",
             &tx,
             &mut turn,
         )
