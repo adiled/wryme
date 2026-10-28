@@ -42,6 +42,78 @@ fn hosted_tool_name(item_type: &str) -> Option<&'static str> {
     }
 }
 
+fn function_call(call_id: &str, name: &str, arguments: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    })
+}
+
+fn function_call_output(call_id: &str, output: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": output,
+    })
+}
+
+fn delivered(due: &[crate::api::DueCall]) -> impl Iterator<Item = serde_json::Value> + '_ {
+    due.iter().flat_map(|(call_id, name, args, output)| {
+        [
+            function_call(call_id, name, args),
+            function_call_output(call_id, output),
+        ]
+    })
+}
+
+fn system_note(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "system",
+        "content": [{ "type": "input_text", "text": text }],
+    })
+}
+
+fn said_before_a_call(item: &serde_json::Value) -> Option<serde_json::Value> {
+    let words: String = item
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|part| part.get("text").or_else(|| part.get("refusal")))
+        .filter_map(|t| t.as_str())
+        .collect();
+    (!words.is_empty())
+        .then(|| serde_json::json!({ "type": "message", "role": "assistant", "content": words }))
+}
+
+fn trouble(error: &serde_json::Value) -> Option<String> {
+    if let Some(text) = error.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(message) = error.get("message").and_then(|m| m.as_str()) {
+        return Some(message.to_string());
+    }
+    let said: String = error
+        .get("content")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+        .collect();
+    if !said.is_empty() {
+        return Some(said);
+    }
+    (!error.is_null()).then(|| error.to_string())
+}
+
+fn sealed(item: &serde_json::Value) -> bool {
+    item.get("encrypted_content")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| !c.is_empty())
+}
+
 const MAX_TOOL_CALLS: u32 = 10;
 const MULTI_AGENT_MIN: f32 = 5.6;
 
@@ -164,19 +236,7 @@ async fn stream_warm(
         conv_msgs.iter().flat_map(|m| json_msg(m)).collect()
     };
 
-    for (call_id, name, args, output) in due {
-        input.push(serde_json::json!({
-            "type": "function_call",
-            "call_id": call_id,
-            "name": name,
-            "arguments": args,
-        }));
-        input.push(serde_json::json!({
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": output,
-        }));
-    }
+    input.extend(delivered(due));
 
     let mut bad_rounds: u32 = 0;
     let mut depth: u32 = 0;
@@ -186,11 +246,7 @@ async fn stream_warm(
         if cap.is_some_and(|c| depth as usize >= c) && !nudged {
             nudged = true;
             tracing::warn!(depth, "tinker depth reached, forcing final answer");
-            input.push(serde_json::json!({
-                "type": "message",
-                "role": "system",
-                "content": [{ "type": "input_text", "text": crate::api::FINAL_ANSWER_NUDGE }],
-            }));
+            input.push(system_note(crate::api::FINAL_ANSWER_NUDGE));
         }
         let (calls, new_id, _) = stream_once(
             client,
@@ -217,11 +273,7 @@ async fn stream_warm(
                 arguments: c.arguments.clone(),
                 output: output.clone(),
             });
-            next_input.push(serde_json::json!({
-                "type": "message",
-                "role": "system",
-                "content": [{ "type": "input_text", "text": output }],
-            }));
+            next_input.push(system_note(&output));
         }
         if paired.is_empty() {
             if broken.is_empty() {
@@ -268,11 +320,7 @@ async fn stream_warm(
                 arguments: call.arguments.clone(),
                 output: output.clone(),
             });
-            next_input.push(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": output,
-            }));
+            next_input.push(function_call_output(&call.call_id, &output));
         }
         prev_id = Some(new_id);
         input = next_input;
@@ -295,19 +343,7 @@ async fn stream_full(
 
     let mut input: Vec<serde_json::Value> = conv_msgs.iter().flat_map(|m| json_msg(m)).collect();
 
-    for (call_id, name, args, output) in due {
-        input.push(serde_json::json!({
-            "type": "function_call",
-            "call_id": call_id,
-            "name": name,
-            "arguments": args,
-        }));
-        input.push(serde_json::json!({
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": output,
-        }));
-    }
+    input.extend(delivered(due));
 
     let mut bad_rounds: u32 = 0;
     let mut depth: u32 = 0;
@@ -317,11 +353,7 @@ async fn stream_full(
         if cap.is_some_and(|c| depth as usize >= c) && !nudged {
             nudged = true;
             tracing::warn!(depth, "tinker depth reached, forcing final answer");
-            input.push(serde_json::json!({
-                "type": "message",
-                "role": "system",
-                "content": [{ "type": "input_text", "text": crate::api::FINAL_ANSWER_NUDGE }],
-            }));
+            input.push(system_note(crate::api::FINAL_ANSWER_NUDGE));
         }
         let (calls, _new_id, carry) = stream_once(
             client,
@@ -349,11 +381,7 @@ async fn stream_full(
                 arguments: c.arguments.clone(),
                 output: output.clone(),
             });
-            follow.push(serde_json::json!({
-                "type": "message",
-                "role": "system",
-                "content": [{ "type": "input_text", "text": output }],
-            }));
+            follow.push(system_note(&output));
         }
         if paired.is_empty() {
             if broken.is_empty() {
@@ -399,17 +427,8 @@ async fn stream_full(
                 arguments: call.arguments.clone(),
                 output: output.clone(),
             });
-            follow.push(serde_json::json!({
-                "type": "function_call",
-                "call_id": call.call_id.clone(),
-                "name": call.name.clone(),
-                "arguments": call.arguments.clone(),
-            }));
-            follow.push(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": output,
-            }));
+            follow.push(function_call(&call.call_id, &call.name, &call.arguments));
+            follow.push(function_call_output(&call.call_id, &output));
         }
         input.extend(follow);
     }
@@ -424,6 +443,92 @@ fn instructions_of(messages: &[ApiMessage]) -> Option<String> {
     (!said.is_empty()).then(|| said.join("\n\n"))
 }
 
+#[derive(Serialize)]
+struct ResponsesReq<'a> {
+    model: &'a str,
+    input: &'a [serde_json::Value],
+    stream: bool,
+    store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include: Option<Vec<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tool_calls: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    multi_agent: Option<MultiAgent>,
+    truncation: &'a str,
+    tools: &'a [serde_json::Value],
+}
+
+#[derive(Serialize)]
+struct Reasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct MultiAgent {
+    enabled: bool,
+    max_concurrent_subagents: u8,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request<'a>(
+    station: &'a Station,
+    input: &'a [serde_json::Value],
+    previous_response_id: Option<&'a str>,
+    store: bool,
+    instructions: Option<&'a str>,
+    tools: &'a [serde_json::Value],
+    multi: bool,
+    tools_off: bool,
+) -> ResponsesReq<'a> {
+    let reasoning = if multi {
+        station.dials.patience.map(|p| Reasoning {
+            effort: Some(p.as_wire()),
+            summary: None,
+        })
+    } else {
+        (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
+            effort: station.dials.patience.map(|p| p.as_wire()),
+            summary: station.dials.brainy.and_then(|b| b.as_wire()),
+        })
+    };
+    let include = reasoning
+        .as_ref()
+        .map(|_| vec!["reasoning.encrypted_content"]);
+    ResponsesReq {
+        model: &station.model,
+        input,
+        stream: true,
+        store,
+        instructions,
+        previous_response_id,
+        temperature: station.dials.boldness,
+        reasoning,
+        include,
+        max_tool_calls: (!multi && !tools_off).then_some(MAX_TOOL_CALLS),
+        tool_choice: tools_off.then_some("none"),
+        multi_agent: multi.then_some(MultiAgent {
+            enabled: true,
+            max_concurrent_subagents: 3,
+        }),
+        truncation: "auto",
+        tools,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stream_once(
     client: &Client,
@@ -436,44 +541,6 @@ async fn stream_once(
     tx: &UnboundedSender<StreamEvent>,
     tools_off: bool,
 ) -> Result<(Vec<FuncCall>, String, Vec<serde_json::Value>)> {
-    #[derive(Serialize)]
-    struct ResponsesReq<'a> {
-        model: &'a str,
-        input: &'a [serde_json::Value],
-        stream: bool,
-        store: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        instructions: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        previous_response_id: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        temperature: Option<f32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reasoning: Option<Reasoning>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        include: Option<Vec<&'a str>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_tool_calls: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        multi_agent: Option<MultiAgent>,
-        truncation: &'a str,
-        tools: &'a [serde_json::Value],
-    }
-
-    #[derive(Serialize)]
-    struct Reasoning {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        effort: Option<&'static str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<&'static str>,
-    }
-
-    #[derive(Serialize)]
-    struct MultiAgent {
-        enabled: bool,
-        max_concurrent_subagents: u8,
-    }
-
     let toolless = crate::api::is_toolless(&shop.name, &station.model);
     let tools = if toolless {
         Vec::new()
@@ -525,49 +592,16 @@ async fn stream_once(
     let mut attempt_multi =
         supports_multi_agent(&station.model) && !crate::api::is_nomulti(&shop.name, &station.model);
     let resp = loop {
-        let reasoning = if attempt_multi {
-            let effort = station.dials.patience.map(|p| p.as_wire());
-            if effort.is_none() {
-                None
-            } else {
-                Some(Reasoning {
-                    effort,
-                    summary: None,
-                })
-            }
-        } else {
-            (station.dials.patience.is_some() || station.dials.brainy.is_some()).then(|| Reasoning {
-                effort: station.dials.patience.map(|p| p.as_wire()),
-                summary: station.dials.brainy.map(|b| b.as_wire()),
-            })
-        };
-        let include = reasoning
-            .as_ref()
-            .map(|_| vec!["reasoning.encrypted_content"]);
-        let body = ResponsesReq {
-            model: &station.model,
+        let body = request(
+            station,
             input,
-            stream: true,
+            previous_response_id,
             store,
             instructions,
-            previous_response_id,
-            temperature: station.dials.boldness,
-            reasoning,
-            include,
-            max_tool_calls: if attempt_multi {
-                None
-            } else if tools_off {
-                Some(0)
-            } else {
-                Some(MAX_TOOL_CALLS)
-            },
-            multi_agent: attempt_multi.then_some(MultiAgent {
-                enabled: true,
-                max_concurrent_subagents: 3,
-            }),
-            truncation: "auto",
-            tools: &tools,
-        };
+            &tools,
+            attempt_multi,
+            tools_off,
+        );
 
         let mut req = client.http.post(&url).json(&body);
         if attempt_multi {
@@ -633,33 +667,28 @@ fn json_msg(m: &ApiMessage) -> Vec<serde_json::Value> {
         if m.tool_call_id.is_empty() {
             return vec![];
         }
-        return vec![serde_json::json!({
-            "type": "function_call_output",
-            "call_id": m.tool_call_id,
-            "output": m.tool_result,
-        })];
+        return vec![function_call_output(&m.tool_call_id, &m.tool_result)];
     }
     if !m.tool_calls.is_empty() {
         let mut items: Vec<serde_json::Value> = Vec::new();
         if !m.content.is_empty() {
-            items.push(serde_json::json!({ "role": m.role, "content": m.content }));
+            items.push(
+                serde_json::json!({ "type": "message", "role": m.role, "content": m.content }),
+            );
         }
         for c in m
             .tool_calls
             .iter()
             .filter(|c| !c.id.is_empty() && !c.name.is_empty())
         {
-            items.push(serde_json::json!({
-                "type": "function_call",
-                "call_id": c.id,
-                "name": c.name,
-                "arguments": c.arguments,
-            }));
+            items.push(function_call(&c.id, &c.name, &c.arguments));
         }
         return items;
     }
     if m.images.is_empty() {
-        return vec![serde_json::json!({ "role": m.role, "content": m.content })];
+        return vec![
+            serde_json::json!({ "type": "message", "role": m.role, "content": m.content }),
+        ];
     }
     let mut parts: Vec<serde_json::Value> = Vec::new();
     if !m.content.is_empty() {
@@ -820,7 +849,7 @@ fn handle_event(
                     });
                 }
             }
-            "response.reasoning_text.delta" => {
+            "response.reasoning_text.delta" | "response.reasoning.delta" => {
                 if let Some(d) = v.get("delta").and_then(|d| d.as_str())
                     && !d.is_empty()
                 {
@@ -913,9 +942,14 @@ fn handle_event(
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
                 match item_type {
-                    "reasoning" | "message" => {
-                        if let Some(item) = item {
+                    "reasoning" => {
+                        if let Some(item) = item.filter(|i| sealed(i)) {
                             carry.push(item.clone());
+                        }
+                    }
+                    "message" => {
+                        if let Some(words) = item.and_then(said_before_a_call) {
+                            carry.push(words);
                         }
                     }
                     "function_call" => {
@@ -944,7 +978,8 @@ fn handle_event(
                                 .unwrap_or("tool")
                                 .to_string();
                             let call_id = item
-                                .get("id")
+                                .get("call_id")
+                                .or_else(|| item.get("id"))
                                 .and_then(|i| i.as_str())
                                 .unwrap_or("")
                                 .to_string();
@@ -981,8 +1016,12 @@ fn handle_event(
                                 .get("arguments")
                                 .and_then(arg_string)
                                 .unwrap_or_default();
-                            if let Some(output) = item.get("output").and_then(arg_string)
-                                && !output.is_empty()
+                            if let Some(output) = item
+                                .get("output")
+                                .and_then(arg_string)
+                                .filter(|o| !o.is_empty())
+                                .or_else(|| item.get("error").and_then(trouble))
+                                .filter(|o| !o.is_empty())
                             {
                                 let _ = tx.send(StreamEvent::ToolResult {
                                     call_id,
@@ -1013,8 +1052,8 @@ fn handle_event(
             | "response.image_generation_call.partial_image"
             | "response.mcp_list_tools.in_progress"
             | "response.mcp_call.in_progress"
-            | "response.mcp_call.arguments.delta"
-            | "response.mcp_call.arguments.done" => {
+            | "response.mcp_call_arguments.delta"
+            | "response.mcp_call_arguments.done" => {
                 let _ = tx.send(StreamEvent::ToolCall { name: None });
             }
             "response.multi_agent_call.in_progress" | "response.agent_message.in_progress" => {
@@ -1023,13 +1062,8 @@ fn handle_event(
                 });
             }
             "response.mcp_call.failed" => {
-                let msg = v
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("mcp call failed");
                 let _ = tx.send(StreamEvent::Error {
-                    message: msg.to_string(),
+                    message: "mcp call failed".to_string(),
                 });
             }
             _ => {}
@@ -1211,203 +1245,11 @@ mod tests {
     }
 
     #[test]
-    fn completed_event_emits_usage() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":345,\"output_tokens\":69,\"total_tokens\":414}}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(
-            ev,
-            StreamEvent::Usage {
-                input: 345,
-                output: 69
-            }
-        ));
-    }
-
-    #[test]
-    fn failed_and_incomplete_become_errors() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Error { message } if message == "boom"));
-
-        handle_event(
-            b"data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(
-            matches!(ev, StreamEvent::Error { message } if message.contains("max_output_tokens"))
-        );
-    }
-
-    #[test]
-    fn arguments_done_event_fills_empty_args() {
-        let (tx, _rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"\"}}\n\n",
-            &tx, &mut turn,
-        )
-        .unwrap();
-        handle_event(
-            b"data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
-            &tx, &mut turn,
-        )
-        .unwrap();
-        assert_eq!(turn.calls.len(), 1);
-        assert_eq!(turn.calls[0].arguments, "{\"command\":\"ls\"}");
-    }
-
-    #[test]
     fn object_arguments_serialize_instead_of_dropping() {
         assert_eq!(
             arg_string(&serde_json::json!({"command": "ls"})).as_deref(),
             Some("{\"command\":\"ls\"}")
         );
-    }
-
-    #[test]
-    fn the_words_said_before_a_call_are_carried_into_the_next_round() {
-        let (tx, _rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"I'll look.\"}]}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert_eq!(turn.carry.len(), 1);
-        assert_eq!(turn.carry[0]["content"][0]["text"], "I'll look.");
-    }
-
-    #[test]
-    fn arguments_stream_in_by_their_item_id() {
-        let (tx, _rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"c1\",\"name\":\"zsh\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        handle_event(
-            b"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"cmd\\\":1}\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert_eq!(turn.calls[0].arguments, "{\"cmd\":1}");
-    }
-
-    #[test]
-    fn reasoning_done_item_is_captured() {
-        let (tx, _rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert_eq!(turn.carry.len(), 1);
-        assert_eq!(turn.carry[0]["id"], "rs_1");
-    }
-
-    #[test]
-    fn summary_deltas_are_brain_and_raw_reasoning_is_heart() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-
-        handle_event(
-            b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"weighing it\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        handle_event(
-            b"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"so step one\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Brain { text }) if text == "weighing it"));
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Heart { text }) if text == "so step one"));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn mcp_call_surfaces_tool_and_result_and_carries() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"server_label\":\"hum\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"status\":\"in_progress\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::ToolCall { name }) if name.as_deref() == Some("zsh")));
-        assert!(turn.calls.is_empty(), "mcp_call is not a local function call");
-
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"server_label\":\"hum\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"status\":\"completed\",\"output\":\"README.md\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::ToolResult { call_id, name, arguments, output } if call_id == "mcp_1" && name == "zsh" && arguments == "{\"command\":\"ls\"}" && output == "README.md"));
-        assert_eq!(turn.carry.len(), 1, "done mcp_call item is carried for store:false continuity");
-        assert_eq!(turn.carry[0]["type"], "mcp_call");
-    }
-
-    #[test]
-    fn server_executed_function_call_surfaces_result_and_carries_once() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::ToolCall { name }) if name.as_deref() == Some("zsh")));
-        assert_eq!(turn.calls.len(), 1);
-
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::ToolResult { call_id, name, arguments, output } if call_id == "fc_1" && name == "zsh" && arguments == "{\"command\":\"ls\"}" && output == "README.md"));
-        assert_eq!(turn.carry.len(), 1, "server-executed function_call is carried for continuity");
-        assert_eq!(turn.carry[0]["type"], "function_call");
-        assert!(turn.calls[0].rendered, "server-executed call must not run again locally");
-
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\",\"output\":\"README.md\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert!(rx.try_recv().is_err(), "already-rendered result must not surface twice");
     }
 
     #[test]
@@ -1422,88 +1264,588 @@ mod tests {
         assert!(!supports_multi_agent("o1-mini"));
     }
 
-    #[test]
-    fn hosted_call_items_carry_forward_but_never_become_local_calls() {
-        let (tx, _rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"name\":\"web_search\"}}\n\n",
-            &tx,
-            &mut turn,
+    use crate::spec::{self, BOTH, OPEN_RESPONSES, OPENAI, Spec};
+    use serde_json::{Value, json};
+
+    fn event(ty: &str, fields: Value) -> Value {
+        let mut ev = json!({ "type": ty, "sequence_number": 1 });
+        ev.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        ev
+    }
+
+    fn response(fields: Value) -> Value {
+        let mut r = json!({
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "completed_at": null,
+            "status": "completed",
+            "incomplete_details": null,
+            "model": "m",
+            "previous_response_id": null,
+            "instructions": null,
+            "output": [],
+            "error": null,
+            "tools": [],
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "parallel_tool_calls": true,
+            "text": { "format": { "type": "text" } },
+            "top_p": 1,
+            "presence_penalty": 0,
+            "frequency_penalty": 0,
+            "top_logprobs": 0,
+            "temperature": 1,
+            "reasoning": null,
+            "usage": null,
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "store": false,
+            "background": false,
+            "service_tier": "default",
+            "metadata": {},
+            "safety_identifier": null,
+            "prompt_cache_key": null,
+            "access_programs": null,
+        });
+        r.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        r
+    }
+
+    fn usage(input: u64, output: u64) -> Value {
+        json!({
+            "input_tokens": input,
+            "input_tokens_details": { "cached_tokens": 0, "cache_write_tokens": 0 },
+            "output_tokens": output,
+            "output_tokens_details": { "reasoning_tokens": 0 },
+            "total_tokens": input + output,
+        })
+    }
+
+    fn function_call_item(status: &str, arguments: &str) -> Value {
+        json!({ "type": "function_call", "id": "fc_1", "call_id": "c1", "name": "zsh", "arguments": arguments, "status": status })
+    }
+
+    fn message_item(text: &str) -> Value {
+        json!({
+            "type": "message",
+            "id": "msg_1",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": text, "annotations": [], "logprobs": [] }],
+        })
+    }
+
+    fn reasoning_item(sealed: Option<&str>) -> Value {
+        let mut item = json!({ "type": "reasoning", "id": "rs_1", "summary": [] });
+        if let Some(sealed) = sealed {
+            item["encrypted_content"] = json!(sealed);
+        }
+        item
+    }
+
+    fn mcp_call_item(status: &str, output: Option<&str>, error: Option<Value>) -> Value {
+        json!({
+            "type": "mcp_call",
+            "id": "mcp_1",
+            "server_label": "hum",
+            "name": "zsh",
+            "arguments": "{\"command\":\"ls\"}",
+            "status": status,
+            "output": output,
+            "error": error,
+        })
+    }
+
+    fn done(item: Value) -> Value {
+        event(
+            "response.output_item.done",
+            json!({ "output_index": 0, "item": item }),
         )
-        .unwrap();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"mcp_list_tools\",\"id\":\"ml_1\",\"server_label\":\"hum\"}}\n\n",
-            &tx,
-            &mut turn,
+    }
+
+    fn added(item: Value) -> Value {
+        event(
+            "response.output_item.added",
+            json!({ "output_index": 0, "item": item }),
         )
-        .unwrap();
-        assert_eq!(turn.carry.len(), 2);
-        assert!(turn.calls.is_empty());
+    }
+
+    struct Heard {
+        tx: UnboundedSender<StreamEvent>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+        turn: Turn,
+    }
+
+    impl Heard {
+        fn new() -> Self {
+            let (tx, rx) = channel();
+            Self {
+                tx,
+                rx,
+                turn: Turn::default(),
+            }
+        }
+
+        fn hear(&mut self, specs: &[Spec], ev: Value) -> &mut Self {
+            spec::streamed(specs, &ev);
+            self.beyond_spec(ev)
+        }
+
+        fn beyond_spec(&mut self, ev: Value) -> &mut Self {
+            handle_event(
+                format!("data: {ev}\n\n").as_bytes(),
+                &self.tx,
+                &mut self.turn,
+            )
+            .unwrap();
+            self
+        }
+
+        fn next(&mut self) -> Option<StreamEvent> {
+            self.rx.try_recv().ok()
+        }
     }
 
     #[test]
-    fn multi_agent_items_signal_communing_and_carry_silently() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::ToolCall { name } if name.as_deref() == Some("multi_agent")));
-        assert!(turn.calls.is_empty());
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"mac_1\",\"type\":\"multi_agent_call\",\"call_id\":\"c1\",\"action\":\"spawn_agent\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        handle_event(
-            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"amsg_1\",\"type\":\"agent_message\",\"author\":\"/root/a\",\"recipient\":\"/root\"}}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert_eq!(turn.carry.len(), 2);
-        assert!(turn.calls.is_empty());
+    fn completed_event_emits_usage() {
+        let mut h = Heard::new();
+        h.hear(
+            BOTH,
+            event(
+                "response.completed",
+                json!({ "response": response(json!({ "usage": usage(345, 69) })) }),
+            ),
+        );
+        assert!(matches!(
+            h.next(),
+            Some(StreamEvent::Usage {
+                input: 345,
+                output: 69
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_and_incomplete_become_errors() {
+        let mut h = Heard::new();
+        h.hear(
+            BOTH,
+            event(
+                "response.failed",
+                json!({ "response": response(json!({ "status": "failed", "error": { "code": "server_error", "message": "boom" } })) }),
+            ),
+        );
+        assert!(matches!(h.next(), Some(StreamEvent::Error { message }) if message == "boom"));
+        h.hear(
+            BOTH,
+            event(
+                "response.incomplete",
+                json!({ "response": response(json!({ "status": "incomplete", "incomplete_details": { "reason": "max_output_tokens" } })) }),
+            ),
+        );
+        assert!(
+            matches!(h.next(), Some(StreamEvent::Error { message }) if message.contains("max_output_tokens"))
+        );
+    }
+
+    #[test]
+    fn an_error_event_is_read_in_either_specs_shape() {
+        let mut h = Heard::new();
+        h.hear(
+            OPENAI,
+            event(
+                "error",
+                json!({ "code": "server_error", "message": "boom", "param": null }),
+            ),
+        );
+        assert!(matches!(h.next(), Some(StreamEvent::Error { message }) if message == "boom"));
+        h.hear(OPEN_RESPONSES, event("error", json!({ "error": { "type": "server_error", "code": "server_error", "message": "boom too", "param": null } })));
+        assert!(matches!(h.next(), Some(StreamEvent::Error { message }) if message == "boom too"));
+    }
+
+    #[test]
+    fn a_created_response_names_the_turn() {
+        let mut h = Heard::new();
+        h.hear(
+            BOTH,
+            event(
+                "response.created",
+                json!({ "response": response(json!({ "status": "in_progress" })) }),
+            ),
+        );
+        assert_eq!(h.turn.new_id.as_deref(), Some("resp_1"));
+    }
+
+    #[test]
+    fn arguments_done_event_fills_empty_args() {
+        let mut h = Heard::new();
+        h.hear(BOTH, added(function_call_item("in_progress", "")));
+        h.hear(
+            BOTH,
+            event(
+                "response.function_call_arguments.done",
+                json!({ "item_id": "fc_1", "output_index": 0, "name": "zsh", "arguments": "{\"command\":\"ls\"}" }),
+            ),
+        );
+        assert_eq!(h.turn.calls.len(), 1);
+        assert_eq!(h.turn.calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn arguments_stream_in_by_their_item_id() {
+        let mut h = Heard::new();
+        h.hear(BOTH, added(function_call_item("in_progress", "")));
+        for delta in ["{\"cmd\"", ":1}"] {
+            h.hear(
+                BOTH,
+                event(
+                    "response.function_call_arguments.delta",
+                    json!({ "item_id": "fc_1", "output_index": 0, "delta": delta }),
+                ),
+            );
+        }
+        assert_eq!(h.turn.calls[0].arguments, "{\"cmd\":1}");
+    }
+
+    #[test]
+    fn the_words_said_before_a_call_are_carried_into_the_next_round() {
+        let mut h = Heard::new();
+        h.hear(BOTH, done(message_item("I'll look.")));
+        assert_eq!(
+            h.turn.carry,
+            vec![json!({ "type": "message", "role": "assistant", "content": "I'll look." })]
+        );
+        spec::conforms(OPENAI, "InputItem", &h.turn.carry[0]);
+        spec::conforms(OPEN_RESPONSES, "ItemParam", &h.turn.carry[0]);
+    }
+
+    #[test]
+    fn reasoning_is_carried_only_sealed_since_the_full_window_stores_nothing() {
+        let mut h = Heard::new();
+        h.hear(BOTH, done(reasoning_item(None)));
+        assert!(h.turn.carry.is_empty());
+        h.hear(BOTH, done(reasoning_item(Some("gAAAA"))));
+        assert_eq!(h.turn.carry.len(), 1);
+        spec::conforms(OPENAI, "InputItem", &h.turn.carry[0]);
+        spec::conforms(OPEN_RESPONSES, "ItemParam", &h.turn.carry[0]);
+    }
+
+    #[test]
+    fn summary_deltas_are_brain_and_raw_reasoning_is_heart_in_either_specs_name() {
+        let mut h = Heard::new();
+        h.hear(
+            BOTH,
+            event(
+                "response.reasoning_summary_text.delta",
+                json!({ "item_id": "rs_1", "output_index": 0, "summary_index": 0, "delta": "weighing it" }),
+            ),
+        );
+        h.hear(
+            OPENAI,
+            event(
+                "response.reasoning_text.delta",
+                json!({ "item_id": "rs_1", "output_index": 0, "content_index": 0, "delta": "so step one" }),
+            ),
+        );
+        h.hear(
+            OPEN_RESPONSES,
+            event(
+                "response.reasoning.delta",
+                json!({ "item_id": "rs_1", "output_index": 0, "content_index": 0, "delta": "and two" }),
+            ),
+        );
+        assert!(matches!(h.next(), Some(StreamEvent::Brain { text }) if text == "weighing it"));
+        assert!(matches!(h.next(), Some(StreamEvent::Heart { text }) if text == "so step one"));
+        assert!(matches!(h.next(), Some(StreamEvent::Heart { text }) if text == "and two"));
+        assert!(h.next().is_none());
+    }
+
+    #[test]
+    fn mcp_call_surfaces_tool_and_result_and_carries() {
+        let mut h = Heard::new();
+        h.hear(OPENAI, added(mcp_call_item("in_progress", None, None)));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolCall { name }) if name.as_deref() == Some("zsh"))
+        );
+        assert!(
+            h.turn.calls.is_empty(),
+            "mcp_call is not a local function call"
+        );
+        h.hear(
+            OPENAI,
+            event(
+                "response.mcp_call_arguments.delta",
+                json!({ "item_id": "mcp_1", "output_index": 0, "delta": "{" }),
+            ),
+        );
+        assert!(matches!(
+            h.next(),
+            Some(StreamEvent::ToolCall { name: None })
+        ));
+        h.hear(
+            OPENAI,
+            done(mcp_call_item("completed", Some("README.md"), None)),
+        );
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolResult { call_id, name, arguments, output }) if call_id == "mcp_1" && name == "zsh" && arguments == "{\"command\":\"ls\"}" && output == "README.md")
+        );
+        assert_eq!(
+            h.turn.carry.len(),
+            1,
+            "done mcp_call item is carried for store:false continuity"
+        );
+        spec::conforms(OPENAI, "InputItem", &h.turn.carry[0]);
+    }
+
+    #[test]
+    fn a_failed_mcp_call_shows_its_error() {
+        let mut h = Heard::new();
+        h.hear(
+            OPENAI,
+            event(
+                "response.mcp_call.failed",
+                json!({ "item_id": "mcp_1", "output_index": 0 }),
+            ),
+        );
+        assert!(
+            matches!(h.next(), Some(StreamEvent::Error { message }) if message == "mcp call failed")
+        );
+        let protocol =
+            json!({ "type": "mcp_protocol_error", "code": -32000, "message": "no such command" });
+        h.hear(OPENAI, done(mcp_call_item("failed", None, Some(protocol))));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolResult { output, .. }) if output == "no such command")
+        );
+        let ran = json!({ "type": "mcp_tool_execution_error", "content": [{ "type": "text", "text": "exit 127" }] });
+        h.hear(OPENAI, done(mcp_call_item("failed", None, Some(ran))));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolResult { output, .. }) if output == "exit 127")
+        );
+    }
+
+    #[test]
+    fn a_provider_that_runs_a_function_call_itself_shows_its_result_once() {
+        let mut h = Heard::new();
+        h.hear(
+            BOTH,
+            added(function_call_item("in_progress", "{\"command\":\"ls\"}")),
+        );
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolCall { name }) if name.as_deref() == Some("zsh"))
+        );
+        let mut ran = function_call_item("completed", "{\"command\":\"ls\"}");
+        ran["output"] = json!("README.md");
+        h.beyond_spec(done(ran.clone()));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolResult { call_id, name, arguments, output }) if call_id == "c1" && name == "zsh" && arguments == "{\"command\":\"ls\"}" && output == "README.md")
+        );
+        assert_eq!(h.turn.carry.len(), 1);
+        assert!(
+            h.turn.calls[0].rendered,
+            "a call the provider ran is not run again here"
+        );
+        h.beyond_spec(done(ran));
+        assert!(h.next().is_none(), "its result shows once");
+    }
+
+    #[test]
+    fn hosted_call_items_carry_forward_but_never_become_local_calls() {
+        let mut h = Heard::new();
+        h.hear(
+            OPENAI,
+            done(json!({ "type": "web_search_call", "id": "ws_1", "status": "completed", "action": { "type": "search", "query": "bees" } })),
+        );
+        h.hear(OPENAI, done(json!({ "type": "mcp_list_tools", "id": "ml_1", "server_label": "hum", "tools": [] })));
+        assert_eq!(h.turn.carry.len(), 2);
+        assert!(h.turn.calls.is_empty());
+        for carried in &h.turn.carry {
+            spec::conforms(OPENAI, "InputItem", carried);
+        }
+    }
+
+    #[test]
+    fn multi_agent_items_beyond_the_spec_signal_communing_and_carry_silently() {
+        let mut h = Heard::new();
+        h.beyond_spec(added(json!({ "id": "mac_1", "type": "multi_agent_call", "call_id": "c1", "action": "spawn_agent" })));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::ToolCall { name }) if name.as_deref() == Some("multi_agent"))
+        );
+        assert!(h.turn.calls.is_empty());
+        h.beyond_spec(done(json!({ "id": "mac_1", "type": "multi_agent_call", "call_id": "c1", "action": "spawn_agent" })));
+        h.beyond_spec(done(json!({ "id": "amsg_1", "type": "agent_message", "author": "/root/a", "recipient": "/root" })));
+        assert_eq!(h.turn.carry.len(), 2);
+        assert!(h.turn.calls.is_empty());
     }
 
     #[test]
     fn refusal_and_done_without_deltas_surface_as_text() {
-        let (tx, mut rx) = channel();
-        let mut turn = Turn::default();
-        handle_event(
-            b"data: {\"type\":\"response.refusal.delta\",\"delta\":\"i decline\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Delta { text }) if text == "i decline"));
+        let mut h = Heard::new();
+        h.hear(
+            BOTH,
+            event("response.refusal.delta", json!({ "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "i decline" })),
+        );
+        assert!(matches!(h.next(), Some(StreamEvent::Delta { text }) if text == "i decline"));
+        h.hear(
+            BOTH,
+            event(
+                "response.output_text.done",
+                json!({ "item_id": "t_1", "output_index": 0, "content_index": 0, "text": "fallback text", "logprobs": [] }),
+            ),
+        );
+        assert!(matches!(h.next(), Some(StreamEvent::Delta { text }) if text == "fallback text"));
+        h.hear(
+            BOTH,
+            event(
+                "response.output_text.delta",
+                json!({ "item_id": "t_2", "output_index": 0, "content_index": 0, "delta": "streamed", "logprobs": [] }),
+            ),
+        );
+        h.hear(
+            BOTH,
+            event(
+                "response.output_text.done",
+                json!({ "item_id": "t_2", "output_index": 0, "content_index": 0, "text": "streamed", "logprobs": [] }),
+            ),
+        );
+        assert!(matches!(h.next(), Some(StreamEvent::Delta { text }) if text == "streamed"));
+        assert!(
+            h.next().is_none(),
+            "done must not double-emit text after deltas"
+        );
+    }
 
-        handle_event(
-            b"data: {\"type\":\"response.output_text.done\",\"item_id\":\"t_1\",\"text\":\"fallback text\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Delta { text }) if text == "fallback text"));
+    fn station(dials: crate::station::Dials) -> Station {
+        Station {
+            name: "s".into(),
+            model: "gpt-5.4".into(),
+            dials,
+            voice: None,
+        }
+    }
 
-        handle_event(
-            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"streamed\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        handle_event(
-            b"data: {\"type\":\"response.output_text.done\",\"item_id\":\"t_2\",\"text\":\"streamed\"}\n\n",
-            &tx,
-            &mut turn,
-        )
-        .unwrap();
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Delta { text }) if text == "streamed"));
-        assert!(rx.try_recv().is_err(), "done must not double-emit text after deltas");
+    fn dialed() -> crate::station::Dials {
+        crate::station::Dials {
+            boldness: Some(0.7),
+            patience: Some(crate::station::Patience::Steady),
+            brainy: Some(crate::station::Brainy::Gabby),
+            ..Default::default()
+        }
+    }
+
+    fn history() -> Vec<ApiMessage> {
+        let mut user = api_msg("user");
+        user.content = "read the readme".into();
+        let mut asked = api_msg("assistant");
+        asked.content = "I'll look.".into();
+        asked.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "zsh".into(),
+            arguments: "{\"command\":\"cat README.md\"}".into(),
+        });
+        let mut answer = api_msg("tool");
+        answer.tool_call_id = "c1".into();
+        answer.tool_result = "# wryme".into();
+        let mut said = api_msg("assistant");
+        said.content = "It is wryme's readme.".into();
+        let mut again = api_msg("user");
+        again.content = "and now?".into();
+        vec![user, asked, answer, said, again]
+    }
+
+    fn due() -> Vec<crate::api::DueCall> {
+        vec![(
+            "check_17".into(),
+            "zsh_check".into(),
+            "{\"id\":17}".into(),
+            "job 17 finished".into(),
+        )]
+    }
+
+    fn sent(body: &ResponsesReq) -> Value {
+        let body = serde_json::to_value(body).unwrap();
+        spec::conforms(OPENAI, "CreateResponse", &body);
+        spec::conforms(OPEN_RESPONSES, "CreateResponseBody", &body);
+        body
+    }
+
+    #[test]
+    fn a_full_window_round_asks_as_the_spec_says() {
+        let s = station(dialed());
+        let tools = tools::tool_defs();
+        let mut input: Vec<Value> = history().iter().flat_map(json_msg).collect();
+        input.extend(delivered(&due()));
+        input.extend(said_before_a_call(&message_item("Checking.")));
+        input.push(reasoning_item(Some("gAAAA")));
+        input.push(function_call("c2", "zsh", "{\"command\":\"ls\"}"));
+        input.push(function_call_output("c2", "README.md"));
+        input.push(system_note(crate::api::FINAL_ANSWER_NUDGE));
+        let body = sent(&request(
+            &s,
+            &input,
+            None,
+            false,
+            Some("be brief"),
+            &tools,
+            false,
+            true,
+        ));
+        assert_eq!(body["store"], false);
+        assert_eq!(
+            body["tool_choice"], "none",
+            "a nudged round forbids calls the way the spec does"
+        );
+        assert!(body.get("max_tool_calls").is_none());
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    #[test]
+    fn a_warm_window_round_asks_as_the_spec_says() {
+        let s = station(crate::station::Dials::default());
+        let tools = tools::window_tool_defs();
+        let mut input: Vec<Value> = history().last().into_iter().flat_map(json_msg).collect();
+        input.extend(delivered(&due()));
+        input.push(function_call_output("c2", "README.md"));
+        let body = sent(&request(
+            &s,
+            &input,
+            Some("resp_1"),
+            true,
+            None,
+            &tools,
+            false,
+            false,
+        ));
+        assert_eq!(body["previous_response_id"], "resp_1");
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn a_hushed_station_asks_for_no_summary() {
+        let dials = crate::station::Dials {
+            brainy: Some(crate::station::Brainy::Hush),
+            ..Default::default()
+        };
+        let s = station(dials);
+        let body = sent(&request(&s, &[], None, true, None, &[], false, false));
+        assert!(body["reasoning"].get("summary").is_none());
+    }
+
+    #[test]
+    fn every_patience_is_an_effort_openai_takes() {
+        use crate::station::Patience::*;
+        for patience in [Bare, Swift, Quick, Steady, Slow, Deep, Max] {
+            let s = station(crate::station::Dials {
+                patience: Some(patience),
+                ..Default::default()
+            });
+            let body = serde_json::to_value(request(&s, &[], None, true, None, &[], false, false))
+                .unwrap();
+            spec::conforms(OPENAI, "CreateResponse", &body);
+        }
     }
 }

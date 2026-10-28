@@ -139,12 +139,12 @@ pub enum Brainy {
 }
 
 impl Brainy {
-    pub fn as_wire(self) -> &'static str {
+    pub fn as_wire(self) -> Option<&'static str> {
         match self {
-            Brainy::Hush => "none",
-            Brainy::Murmur => "concise",
-            Brainy::Chatty => "auto",
-            Brainy::Gabby => "detailed",
+            Brainy::Hush => None,
+            Brainy::Murmur => Some("concise"),
+            Brainy::Chatty => Some("auto"),
+            Brainy::Gabby => Some("detailed"),
         }
     }
 
@@ -604,11 +604,11 @@ mod tests {
     }
 
     #[test]
-    fn brainy_words_reach_the_wire() {
-        assert_eq!(Brainy::Hush.as_wire(), "none");
-        assert_eq!(Brainy::Murmur.as_wire(), "concise");
-        assert_eq!(Brainy::Chatty.as_wire(), "auto");
-        assert_eq!(Brainy::Gabby.as_wire(), "detailed");
+    fn brainy_words_reach_the_wire_and_hush_asks_for_no_summary() {
+        assert_eq!(Brainy::Hush.as_wire(), None);
+        assert_eq!(Brainy::Murmur.as_wire(), Some("concise"));
+        assert_eq!(Brainy::Chatty.as_wire(), Some("auto"));
+        assert_eq!(Brainy::Gabby.as_wire(), Some("detailed"));
     }
 
     #[test]

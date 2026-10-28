@@ -21,6 +21,8 @@ pub mod reservoir;
 pub mod select;
 pub mod shell_env;
 pub mod shop;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod spec;
 pub mod station;
 pub mod station_save;
 pub mod tools;
