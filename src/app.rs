@@ -511,7 +511,8 @@ impl App {
                     && (!m.content.is_empty()
                         || !m.brain.is_empty()
                         || !m.heart.is_empty()
-                        || m.current_tool.is_some())
+                        || m.current_tool.is_some()
+                        || !m.tool_events.is_empty())
             });
             if !any_nonempty {
                 self.messages
@@ -698,6 +699,40 @@ mod tests {
             .unwrap();
         assert!(result > call);
         assert!(msgs[result].tool_result.contains("radius"));
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("wryme_app_{}", std::process::id())),
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_what_it_delivered() {
+        let mut app = test_app();
+        app.begin_assistant();
+        app.record_tool_result(
+            "check_17".into(),
+            crate::tools::check_name(),
+            "{\"id\":17}".into(),
+            "job 17 finished (exit 0)".into(),
+        );
+        app.finish_streaming();
+        let msgs = app.api_messages();
+        let call = msgs
+            .iter()
+            .position(|m| m.tool_calls.iter().any(|c| c.id == "check_17"))
+            .expect("the delivered call survives a turn with no reply");
+        assert!(
+            msgs[call + 1..]
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_result.contains("job 17 finished"))
+        );
+        app.begin_assistant();
+        app.finish_streaming();
+        assert!(
+            !app.api_messages()
+                .iter()
+                .any(|m| m.role == "assistant" && m.tool_calls.is_empty() && m.content.is_empty()),
+            "a turn with nothing in it is still dropped"
+        );
         let _ = std::fs::remove_dir_all(
             std::env::temp_dir().join(format!("wryme_app_{}", std::process::id())),
         );

@@ -28,22 +28,7 @@ pub(crate) async fn stream(
 ) -> Result<()> {
     let mut conv: Vec<serde_json::Value> = messages.iter().filter_map(json_msg).collect();
 
-    for (call_id, name, args, output) in due {
-        conv.push(serde_json::json!({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
-                "id": call_id,
-                "type": "function",
-                "function": { "name": name, "arguments": args },
-            }],
-        }));
-        conv.push(serde_json::json!({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": output,
-        }));
-    }
+    conv.extend(delivered(due));
 
     let mut bad_rounds: u32 = 0;
     let mut depth: u32 = 0;
@@ -123,19 +108,13 @@ pub(crate) async fn stream(
             return Ok(());
         }
 
-        let mut tcs = Vec::new();
-        for c in &calls {
-            tcs.push(serde_json::json!({
-                "id": c.id,
-                "type": "function",
-                "function": { "name": c.name, "arguments": c.arguments },
-            }));
-        }
-        conv.push(serde_json::json!({
-            "role": "assistant",
-            "content": assistant_content,
-            "tool_calls": tcs,
-        }));
+        conv.push(asked(
+            &assistant_content,
+            calls
+                .iter()
+                .map(|c| tool_call(&c.id, &c.name, &c.arguments))
+                .collect(),
+        ));
 
         for c in &calls {
             if crate::api::owns_tool(&shop.name, &station.model, &c.name) {
@@ -152,19 +131,78 @@ pub(crate) async fn stream(
                 arguments: c.arguments.clone(),
                 output: output.clone(),
             });
-            conv.push(serde_json::json!({
-                "role": "tool",
-                "tool_call_id": c.id,
-                "content": output,
-            }));
+            conv.push(tool_answer(&c.id, &output));
         }
     }
+}
+
+fn tool_call(id: &str, name: &str, arguments: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": { "name": name, "arguments": arguments },
+    })
+}
+
+fn asked(content: &str, calls: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({ "role": "assistant", "content": content, "tool_calls": calls })
+}
+
+fn tool_answer(call_id: &str, output: &str) -> serde_json::Value {
+    serde_json::json!({ "role": "tool", "tool_call_id": call_id, "content": output })
+}
+
+fn delivered(due: &[crate::api::DueCall]) -> impl Iterator<Item = serde_json::Value> + '_ {
+    due.iter().flat_map(|(call_id, name, args, output)| {
+        [
+            asked("", vec![tool_call(call_id, name, args)]),
+            tool_answer(call_id, output),
+        ]
+    })
 }
 
 fn tool_policy(model_toolless: bool, tools_off: bool) -> (bool, bool) {
     let offer_tools = !model_toolless && !tools_off;
     let filter_transcript = model_toolless;
     (offer_tools, filter_transcript)
+}
+
+#[derive(Serialize)]
+struct Req<'a> {
+    model: &'a str,
+    messages: &'a [serde_json::Value],
+    stream: bool,
+    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+    tool_choice: &'a str,
+    tools: &'a [serde_json::Value],
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+fn request<'a>(
+    station: &'a Station,
+    messages: &'a [serde_json::Value],
+    tools: &'a [serde_json::Value],
+) -> Req<'a> {
+    Req {
+        model: &station.model,
+        messages,
+        stream: true,
+        stream_options: StreamOptions {
+            include_usage: true,
+        },
+        temperature: station.dials.boldness,
+        reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
+        tool_choice: if tools.is_empty() { "none" } else { "auto" },
+        tools,
+    }
 }
 
 async fn stream_once(
@@ -175,25 +213,6 @@ async fn stream_once(
     tools_off: bool,
     tx: &UnboundedSender<StreamEvent>,
 ) -> Result<(Vec<ChatToolCall>, String)> {
-    #[derive(Serialize)]
-    struct Req<'a> {
-        model: &'a str,
-        messages: &'a [serde_json::Value],
-        stream: bool,
-        stream_options: StreamOptions,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        temperature: Option<f32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reasoning_effort: Option<&'a str>,
-        tool_choice: &'a str,
-        tools: &'a [serde_json::Value],
-    }
-
-    #[derive(Serialize)]
-    struct StreamOptions {
-        include_usage: bool,
-    }
-
     let model_toolless = crate::api::is_toolless(&shop.name, &station.model);
     let (offer_tools, filter_transcript) = tool_policy(model_toolless, tools_off);
     let mut tools = Vec::new();
@@ -225,7 +244,6 @@ async fn stream_once(
             );
         }
     }
-    let tool_choice = if tools.is_empty() { "none" } else { "auto" };
     let filtered_conv: Vec<serde_json::Value>;
     let conv: &[serde_json::Value] = if filter_transcript {
         filtered_conv = conv
@@ -243,18 +261,7 @@ async fn stream_once(
     };
     let base = shop.url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
-    let body = Req {
-        model: &station.model,
-        messages: conv,
-        stream: true,
-        stream_options: StreamOptions {
-            include_usage: true,
-        },
-        temperature: station.dials.boldness,
-        reasoning_effort: station.dials.patience.map(|p| p.as_wire()),
-        tool_choice,
-        tools: &tools,
-    };
+    let body = request(station, conv, &tools);
 
     let mut req = client.http.post(&url).json(&body);
     if crate::shop::should_send_auth(&shop.key) {
@@ -313,11 +320,7 @@ fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
         if m.tool_call_id.is_empty() {
             return None;
         }
-        return Some(serde_json::json!({
-            "role": "tool",
-            "tool_call_id": m.tool_call_id,
-            "content": m.tool_result,
-        }));
+        return Some(tool_answer(&m.tool_call_id, &m.tool_result));
     }
     let mut base = if m.images.is_empty() {
         serde_json::json!({ "role": m.role, "content": m.content })
@@ -350,13 +353,7 @@ fn json_msg(m: &ApiMessage) -> Option<serde_json::Value> {
             .tool_calls
             .iter()
             .filter(|c| !c.id.is_empty() && !c.name.is_empty())
-            .map(|c| {
-                serde_json::json!({
-                    "id": c.id,
-                    "type": "function",
-                    "function": { "name": c.name, "arguments": c.arguments },
-                })
-            })
+            .map(|c| tool_call(&c.id, &c.name, &c.arguments))
             .collect();
         if tcs.is_empty() {
             base.as_object_mut().map(|o| o.remove("tool_calls"));
@@ -555,64 +552,161 @@ mod tests {
         tokio::sync::mpsc::unbounded_channel()
     }
 
+    use crate::spec::{self, OPENAI};
+    use serde_json::{Value, json};
+
+    fn chunk(choices: Value, usage: Option<Value>) -> Value {
+        let mut c = json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": choices,
+        });
+        if let Some(usage) = usage {
+            c["usage"] = usage;
+        }
+        c
+    }
+
+    fn choice(delta: Value, finish_reason: Option<&str>) -> Value {
+        json!({ "index": 0, "delta": delta, "finish_reason": finish_reason })
+    }
+
+    struct Heard {
+        tx: UnboundedSender<StreamEvent>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+        calls: Vec<ChatToolCall>,
+        content: String,
+    }
+
+    impl Heard {
+        fn new() -> Self {
+            let (tx, rx) = channel();
+            Self {
+                tx,
+                rx,
+                calls: Vec::new(),
+                content: String::new(),
+            }
+        }
+
+        fn hear(&mut self, chunk: Value) -> &mut Self {
+            spec::conforms(OPENAI, "CreateChatCompletionStreamResponse", &chunk);
+            self.beyond_spec(chunk)
+        }
+
+        fn beyond_spec(&mut self, chunk: Value) -> &mut Self {
+            handle_event(
+                format!("data: {chunk}\n\n").as_bytes(),
+                &self.tx,
+                &mut self.calls,
+                &mut self.content,
+            )
+            .unwrap();
+            self
+        }
+
+        fn next(&mut self) -> Option<StreamEvent> {
+            self.rx.try_recv().ok()
+        }
+    }
+
     #[test]
-    fn refusal_delta_surfaces_as_text() {
-        let (tx, mut rx) = channel();
-        let mut calls = Vec::new();
-        let mut content = String::new();
-        handle_event(
-            b"data: {\"choices\":[{\"delta\":{\"refusal\":\"sorry\"}}]}\n\n",
-            &tx,
-            &mut calls,
-            &mut content,
-        )
-        .unwrap();
-        assert!(content.contains("sorry"));
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Delta { text } if text == "sorry"));
+    fn content_and_refusal_deltas_surface_as_text() {
+        let mut h = Heard::new();
+        h.hear(chunk(
+            json!([choice(
+                json!({ "role": "assistant", "content": "hello" }),
+                None
+            )]),
+            None,
+        ));
+        h.hear(chunk(
+            json!([choice(json!({ "refusal": "sorry" }), None)]),
+            None,
+        ));
+        assert_eq!(h.content, "hellosorry");
+        assert!(matches!(h.next(), Some(StreamEvent::Delta { text }) if text == "hello"));
+        assert!(matches!(h.next(), Some(StreamEvent::Delta { text }) if text == "sorry"));
     }
 
     #[test]
     fn finish_reason_length_and_filter_become_errors() {
-        let (tx, mut rx) = channel();
-        let mut calls = Vec::new();
-        let mut content = String::new();
-        handle_event(
-            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
-            &tx,
-            &mut calls,
-            &mut content,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("token limit")));
+        let mut h = Heard::new();
+        h.hear(chunk(json!([choice(json!({}), Some("length"))]), None));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::Error { message }) if message.contains("token limit"))
+        );
+        h.hear(chunk(
+            json!([choice(json!({}), Some("content_filter"))]),
+            None,
+        ));
+        assert!(
+            matches!(h.next(), Some(StreamEvent::Error { message }) if message.contains("content filter"))
+        );
+    }
 
-        handle_event(
-            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n",
-            &tx,
-            &mut calls,
-            &mut content,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, StreamEvent::Error { message } if message.contains("content filter")));
+    #[test]
+    fn tool_calls_stream_in_by_their_index() {
+        let mut h = Heard::new();
+        h.hear(chunk(
+            json!([choice(json!({ "tool_calls": [
+                { "index": 0, "id": "call_a", "type": "function", "function": { "name": "zsh", "arguments": "" } },
+                { "index": 1, "id": "call_b", "type": "function", "function": { "name": "book", "arguments": "" } },
+            ] }), None)]),
+            None,
+        ));
+        for (index, part) in [(0, "{\"command\""), (1, "{}"), (0, ":\"ls\"}")] {
+            h.hear(chunk(
+                json!([choice(json!({ "tool_calls": [{ "index": index, "function": { "arguments": part } }] }), None)]),
+                None,
+            ));
+        }
+        h.hear(chunk(json!([choice(json!({}), Some("tool_calls"))]), None));
+        assert_eq!(h.calls.len(), 2);
+        assert_eq!(
+            (
+                h.calls[0].id.as_str(),
+                h.calls[0].name.as_str(),
+                h.calls[0].arguments.as_str()
+            ),
+            ("call_a", "zsh", "{\"command\":\"ls\"}")
+        );
+        assert_eq!(
+            (h.calls[1].id.as_str(), h.calls[1].arguments.as_str()),
+            ("call_b", "{}")
+        );
     }
 
     #[test]
     fn legacy_function_call_delta_accumulates() {
-        let (tx, _rx) = channel();
-        let mut calls = Vec::new();
-        let mut content = String::new();
-        handle_event(
-            b"data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"zsh\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}}]}\n\n",
-            &tx,
-            &mut calls,
-            &mut content,
-        )
-        .unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "zsh");
-        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+        let mut h = Heard::new();
+        h.hear(chunk(
+            json!([choice(
+                json!({ "function_call": { "name": "zsh", "arguments": "{\"command\":\"ls\"}" } }),
+                None
+            )]),
+            None,
+        ));
+        assert_eq!(h.calls.len(), 1);
+        assert_eq!(h.calls[0].name, "zsh");
+        assert_eq!(h.calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn reasoning_beyond_the_spec_is_heart() {
+        let mut h = Heard::new();
+        h.beyond_spec(chunk(
+            json!([choice(json!({ "reasoning_content": "so step one" }), None)]),
+            None,
+        ));
+        h.beyond_spec(chunk(
+            json!([choice(json!({ "reasoning": "and two" }), None)]),
+            None,
+        ));
+        assert!(matches!(h.next(), Some(StreamEvent::Heart { text }) if text == "so step one"));
+        assert!(matches!(h.next(), Some(StreamEvent::Heart { text }) if text == "and two"));
     }
 
     #[test]
@@ -663,33 +757,32 @@ mod tests {
 
     #[test]
     fn usage_chunk_emits_usage_event() {
-        let (tx, mut rx) = channel();
-        let mut calls = Vec::new();
-        let mut content = String::new();
-        handle_event(
-            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":300,\"total_tokens\":1500}}\n\n",
-            &tx,
-            &mut calls,
-            &mut content,
-        )
-        .unwrap();
-        let ev = rx.try_recv().unwrap();
+        let mut h = Heard::new();
+        h.hear(chunk(
+            json!([]),
+            Some(json!({ "prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500 })),
+        ));
         assert!(matches!(
-            ev,
-            StreamEvent::Usage {
+            h.next(),
+            Some(StreamEvent::Usage {
                 input: 1200,
                 output: 300
-            }
+            })
         ));
     }
 
     #[test]
-    fn usage_chunk_parses_cleanly() {
+    fn the_done_line_ends_the_stream_cleanly() {
         let (tx, _rx) = channel();
         let mut calls = Vec::new();
         let mut content = String::new();
+        let last = chunk(
+            json!([]),
+            Some(json!({ "prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1 })),
+        );
+        spec::conforms(OPENAI, "CreateChatCompletionStreamResponse", &last);
         handle_event(
-            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\ndata: [DONE]\n\n",
+            format!("data: {last}\n\ndata: [DONE]\n\n").as_bytes(),
             &tx,
             &mut calls,
             &mut content,
@@ -734,5 +827,100 @@ mod tests {
     fn nudge_tells_the_model_to_stop_calling_tools() {
         let n = crate::api::FINAL_ANSWER_NUDGE;
         assert!(n.to_lowercase().contains("do not call"));
+    }
+
+    fn station(dials: crate::station::Dials) -> Station {
+        Station {
+            name: "s".into(),
+            model: "gpt-5.4".into(),
+            dials,
+            voice: None,
+        }
+    }
+
+    fn tmp_image() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("wryme-chat-test-{}.png", std::process::id()));
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n").unwrap();
+        p
+    }
+
+    fn sent(body: &Req) -> Value {
+        let body = serde_json::to_value(body).unwrap();
+        spec::conforms(OPENAI, "CreateChatCompletionRequest", &body);
+        body
+    }
+
+    #[test]
+    fn a_round_asks_as_the_spec_says() {
+        use crate::api::{ApiMessage, ApiToolCall};
+        let msg = |role: &str, content: &str| ApiMessage {
+            role: role.into(),
+            content: content.into(),
+            images: vec![],
+            tool_calls: vec![],
+            tool_call_id: String::new(),
+            tool_result: String::new(),
+        };
+        let image = tmp_image();
+        let mut seen = msg("user", "what is this?");
+        seen.images = vec![image.to_string_lossy().into_owned()];
+        let mut asked_before = msg("assistant", "I'll look.");
+        asked_before.tool_calls.push(ApiToolCall {
+            id: "c1".into(),
+            name: "zsh".into(),
+            arguments: "{}".into(),
+        });
+        let mut answered = msg("tool", "");
+        answered.tool_call_id = "c1".into();
+        answered.tool_result = "README.md".into();
+        let history = [
+            msg("system", "be brief"),
+            seen,
+            asked_before,
+            answered,
+            msg("user", "and now?"),
+        ];
+        let mut conv: Vec<Value> = history.iter().filter_map(json_msg).collect();
+        let _ = std::fs::remove_file(&image);
+        let due: Vec<crate::api::DueCall> = vec![(
+            "check_17".into(),
+            "zsh_check".into(),
+            "{\"id\":17}".into(),
+            "job 17 finished".into(),
+        )];
+        conv.extend(delivered(&due));
+        conv.push(asked(
+            "Checking.",
+            vec![tool_call("c2", "zsh", "{\"command\":\"ls\"}")],
+        ));
+        conv.push(tool_answer("c2", "README.md"));
+        conv.push(json!({ "role": "system", "content": crate::api::FINAL_ANSWER_NUDGE }));
+        let dials = crate::station::Dials {
+            boldness: Some(0.7),
+            patience: Some(crate::station::Patience::Steady),
+            ..Default::default()
+        };
+        let s = station(dials);
+        let tools = tools::tool_defs_chat();
+        let body = sent(&request(&s, &conv, &tools));
+        assert_eq!(body["tool_choice"], "auto");
+        let toolless = sent(&request(&s, &conv, &[]));
+        assert_eq!(toolless["tool_choice"], "none");
+    }
+
+    #[test]
+    fn every_patience_is_an_effort_openai_takes() {
+        use crate::station::Patience::*;
+        for patience in [Bare, Swift, Quick, Steady, Slow, Deep, Max] {
+            let s = station(crate::station::Dials {
+                patience: Some(patience),
+                ..Default::default()
+            });
+            sent(&request(
+                &s,
+                &[json!({ "role": "user", "content": "hi" })],
+                &[],
+            ));
+        }
     }
 }
