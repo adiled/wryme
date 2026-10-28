@@ -257,7 +257,7 @@ async fn stream_once(
     };
 
     let mut req = client.http.post(&url).json(&body);
-    if !shop.key.is_empty() {
+    if crate::shop::should_send_auth(&shop.key) {
         req = req.bearer_auth(&shop.key);
     }
     for (k, v) in &shop.headers {
