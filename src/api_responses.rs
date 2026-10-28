@@ -147,10 +147,8 @@ async fn stream_warm(
     tx: &UnboundedSender<StreamEvent>,
     due: &[crate::api::DueCall],
 ) -> Result<()> {
-    let instructions: Option<&str> = messages
-        .iter()
-        .find(|m| m.role == "system")
-        .map(|m| m.content.as_str());
+    let system = instructions_of(&messages);
+    let instructions = system.as_deref();
 
     let conv_msgs: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
@@ -165,7 +163,6 @@ async fn stream_warm(
     } else {
         conv_msgs.iter().flat_map(|m| json_msg(m)).collect()
     };
-    prepend_preamble_counted(&mut input, &engine, 0);
 
     for (call_id, name, args, output) in due {
         input.push(serde_json::json!({
@@ -291,15 +288,12 @@ async fn stream_full(
     tx: &UnboundedSender<StreamEvent>,
     due: &[crate::api::DueCall],
 ) -> Result<()> {
-    let instructions: Option<&str> = messages
-        .iter()
-        .find(|m| m.role == "system")
-        .map(|m| m.content.as_str());
+    let system = instructions_of(&messages);
+    let instructions = system.as_deref();
 
     let conv_msgs: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
     let mut input: Vec<serde_json::Value> = conv_msgs.iter().flat_map(|m| json_msg(m)).collect();
-    let _preamble_len = prepend_preamble_counted(&mut input, &engine, 0);
 
     for (call_id, name, args, output) in due {
         input.push(serde_json::json!({
@@ -421,40 +415,13 @@ async fn stream_full(
     }
 }
 
-fn prepend_preamble_counted(
-    input: &mut Vec<serde_json::Value>,
-    engine: &Arc<Mutex<book::Engine>>,
-    old_len: usize,
-) -> usize {
-    let drain = old_len.min(input.len());
-    input.drain(..drain);
-    let (preambles, prod) = match engine.lock() {
-        Ok(mut e) => (e.preamble(), e.take_prod()),
-        _ => {
-            return 0;
-        }
-    };
-    let mut items: Vec<serde_json::Value> = preambles
-        .into_iter()
-        .map(|p| {
-            serde_json::json!({
-                "type": "message",
-                "role": "system",
-                "content": [{ "type": "input_text", "text": p }],
-            })
-        })
+fn instructions_of(messages: &[ApiMessage]) -> Option<String> {
+    let said: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == "system" && !m.content.is_empty())
+        .map(|m| m.content.as_str())
         .collect();
-    if let Some(prod) = prod {
-        items.push(serde_json::json!({
-            "type": "message",
-            "role": "system",
-            "content": [{ "type": "input_text", "text": prod }],
-        }));
-    }
-    let n = items.len();
-    items.append(input);
-    *input = items;
-    n
+    (!said.is_empty()).then(|| said.join("\n\n"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1101,6 +1068,30 @@ mod tests {
             tool_call_id: String::new(),
             tool_result: String::new(),
         }
+    }
+
+    #[test]
+    fn every_system_message_is_said_once_as_instructions() {
+        let msg = |role: &str, content: &str| ApiMessage {
+            content: content.into(),
+            ..api_msg(role)
+        };
+        assert_eq!(instructions_of(&[msg("user", "hi")]), None);
+        let page = "# garden\nLast inked: 2026-10-28 20:31\n";
+        assert_eq!(
+            instructions_of(&[msg("system", page), msg("user", "hi")]).as_deref(),
+            Some(page),
+            "a page with no station prompt is not doubled"
+        );
+        assert_eq!(
+            instructions_of(&[
+                msg("system", "be brief"),
+                msg("system", page),
+                msg("user", "hi")
+            ])
+            .as_deref(),
+            Some(format!("be brief\n\n{page}").as_str())
+        );
     }
 
     #[test]

@@ -128,7 +128,7 @@ impl Engine {
         self.established
             .iter()
             .filter_map(|topic| compartment(&self.book, topic))
-            .map(render_bookmark)
+            .map(|meta| render_inked(meta, inked_at(meta.last_inked)))
             .collect()
     }
 
@@ -402,10 +402,14 @@ pub fn read_compartment(book: &Book, topic: &str) -> Result<Option<Vec<Message>>
 }
 
 pub fn render_bookmark(meta: &CompartmentMeta) -> String {
+    render_inked(meta, relative_ago(meta.last_inked))
+}
+
+fn render_inked(meta: &CompartmentMeta, inked: String) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n", meta.topic));
     if meta.last_inked > 0 {
-        out.push_str(&format!("Last inked: {}\n", relative_ago(meta.last_inked)));
+        out.push_str(&format!("Last inked: {inked}\n"));
     }
     if !meta.people.is_empty() {
         out.push_str(&format!("People: {}\n", meta.people.join(", ")));
@@ -441,6 +445,16 @@ pub fn set_life_summary(book: &mut Book, summary: &str) -> Result<()> {
     book.life_summary = summary.to_string();
     std::fs::write(book.dir.join("life_summary.txt"), summary)?;
     Ok(())
+}
+
+pub fn inked_at(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 pub fn relative_ago(ms: i64) -> String {
@@ -957,6 +971,34 @@ mod tests {
         assert_eq!(g_thread[0].content, "soil");
         assert_eq!(g_thread[4].content, "mulch");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_open_page_is_said_the_same_until_inked_again() {
+        let dir = tmpdir("preamble");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut engine = open_engine(&dir).unwrap();
+        engine.record_turn("user", "let us plan the garden");
+        engine
+            .deem(&Bookmark {
+                topic: "garden".into(),
+                facts: vec!["roses by the gate".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            engine
+                .open("garden")
+                .unwrap()
+                .unwrap()
+                .contains("Last inked: just now")
+        );
+        let page = engine.preamble();
+        assert_eq!(page.len(), 1);
+        let inked = compartment(&engine.book, "garden").unwrap().last_inked;
+        assert!(page[0].contains(&format!("Last inked: {}\n", inked_at(inked))));
+        assert!(!page[0].contains("just now") && !page[0].contains(" ago"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
