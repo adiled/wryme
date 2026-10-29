@@ -483,11 +483,31 @@ mod cli {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+struct MouseCapture;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl crossterm::Command for MouseCapture {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        crossterm::Command::execute_winapi(&crossterm::event::EnableMouseCapture)
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        crossterm::Command::is_ansi_code_supported(&crossterm::event::EnableMouseCapture)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
 {
     use crossterm::{
         cursor::SetCursorStyle,
-        event::{EnableBracketedPaste, EnableMouseCapture},
+        event::EnableBracketedPaste,
         execute,
         terminal::EnterAlternateScreen,
     };
@@ -496,7 +516,7 @@ fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::Crosst
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
+        MouseCapture,
         EnableBracketedPaste,
         SetCursorStyle::BlinkingUnderScore
     )?;
@@ -573,4 +593,15 @@ fn init_logging() {
         .with_writer(std::sync::Mutex::new(file))
         .with_ansi(false)
         .try_init();
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod mouse_capture_tests {
+    #[test]
+    fn capture_skips_any_event_motion() {
+        let mut out = String::new();
+        crossterm::Command::write_ansi(&super::MouseCapture, &mut out).unwrap();
+        assert!(!out.contains("?1003"));
+        assert_eq!(out, "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h");
+    }
 }
