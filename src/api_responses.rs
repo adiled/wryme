@@ -216,12 +216,29 @@ fn trimmed(
         Some(n) if total > n => outputs[..total - n].iter().cloned().collect(),
         _ => Default::default(),
     };
-    items
+    let kept: Vec<&serde_json::Value> = items
         .iter()
         .filter(|v| {
             let k = kind(v);
             !((k == "function_call" || k == "function_call_output") && gone.contains(&call_id(v)))
         })
+        .collect();
+    // a reasoning item must be followed by what it produced; pruned calls
+    // and turns cut short leave it stranded, and strict providers 400 on it
+    let produced = |v: Option<&&serde_json::Value>| match v {
+        None => false,
+        Some(v) => {
+            let k = kind(v);
+            let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            !(k == "reasoning"
+                || k == "function_call_output"
+                || (k == "message" && role != "assistant"))
+        }
+    };
+    kept.iter()
+        .enumerate()
+        .filter(|(i, v)| kind(v) != "reasoning" || produced(kept.get(i + 1)))
+        .map(|(_, v)| *v)
         .map(|v| {
             if clip != crate::station::TinkerVal::All
                 && kind(v) == "function_call_output"
@@ -2127,5 +2144,34 @@ mod tests {
             .unwrap();
         assert!(clipped["output"].as_str().unwrap().len() < "twotwotwo".len());
         assert_eq!(trimmed(&log, TinkerVal::All, TinkerVal::All), log);
+    }
+
+    #[test]
+    fn reasoning_never_rides_without_what_it_produced() {
+        use crate::station::TinkerVal;
+        let r = |s: &str| reasoning_item(Some(s));
+        let user = json!({ "type": "message", "role": "user", "content": "next" });
+        let log = vec![
+            r("r1"),
+            function_call("c1", "zsh", "{}"),
+            function_call_output("c1", "one"),
+            r("r2"),
+            function_call("c2", "zsh", "{}"),
+            function_call_output("c2", "two"),
+            r("cut"),
+            user.clone(),
+        ];
+        let out = trimmed(&log, TinkerVal::Count(1), TinkerVal::All);
+        let sealed: Vec<&str> = out
+            .iter()
+            .filter_map(|v| v.get("encrypted_content")?.as_str())
+            .collect();
+        assert_eq!(
+            sealed,
+            ["r2"],
+            "pruned call's reasoning and a cut turn's reasoning go"
+        );
+        assert_eq!(out[1]["call_id"], "c2");
+        assert_eq!(out.last(), Some(&user));
     }
 }
