@@ -145,12 +145,7 @@ struct Seed {
     log: Vec<serde_json::Value>,
 }
 
-fn seed(
-    conv: &[&ApiMessage],
-    wire: &crate::api::Wire,
-    station: &Station,
-    due: &[crate::api::DueCall],
-) -> Seed {
+fn seed(conv: &[&ApiMessage], wire: &crate::api::Wire, due: &[crate::api::DueCall]) -> Seed {
     let fresh = conv
         .iter()
         .rev()
@@ -160,7 +155,7 @@ fn seed(
     let split = conv.len() - fresh;
     let tail: Vec<serde_json::Value> = conv[split..].iter().flat_map(|m| json_msg(m)).collect();
     let (mut input, mut log) = match &wire.prior {
-        Some(prior) => (trimmed(prior, station.dials.tinker_keep), prior.clone()),
+        Some(prior) => (replayable(prior), prior.clone()),
         None => {
             let head: Vec<serde_json::Value> =
                 conv[..split].iter().flat_map(|m| json_msg(m)).collect();
@@ -180,50 +175,24 @@ fn seed(
     }
 }
 
-fn trimmed(items: &[serde_json::Value], keep: crate::station::TinkerVal) -> Vec<serde_json::Value> {
-    let kind = |v: &serde_json::Value| {
-        v.get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    let call_id = |v: &serde_json::Value| {
-        v.get("call_id")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    let outputs: Vec<String> = items
-        .iter()
-        .filter(|v| kind(v) == "function_call_output")
-        .map(call_id)
-        .collect();
-    let total = outputs.len();
-    let gone: std::collections::HashSet<String> = match keep.keep_n(total) {
-        Some(n) if total > n => outputs[..total - n].iter().cloned().collect(),
-        _ => Default::default(),
-    };
-    let kept: Vec<&serde_json::Value> = items
-        .iter()
-        .filter(|v| {
-            let k = kind(v);
-            !((k == "function_call" || k == "function_call_output") && gone.contains(&call_id(v)))
-        })
-        .collect();
-    let produced = |v: Option<&&serde_json::Value>| match v {
+fn replayable(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    fn kind(v: &serde_json::Value) -> &str {
+        v.get("type").and_then(|t| t.as_str()).unwrap_or("")
+    }
+    let produced = |v: Option<&serde_json::Value>| match v {
         None => false,
         Some(v) => {
-            let k = kind(v);
             let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            !(k == "reasoning"
-                || k == "function_call_output"
-                || (k == "message" && role != "assistant"))
+            !(kind(v) == "reasoning"
+                || kind(v) == "function_call_output"
+                || (kind(v) == "message" && role != "assistant"))
         }
     };
-    kept.iter()
+    items
+        .iter()
         .enumerate()
-        .filter(|(i, v)| kind(v) != "reasoning" || produced(kept.get(i + 1)))
-        .map(|(_, v)| (*v).clone())
+        .filter(|(i, v)| kind(v) != "reasoning" || produced(items.get(i + 1)))
+        .map(|(_, v)| v.clone())
         .collect()
 }
 
@@ -242,7 +211,7 @@ pub(crate) async fn stream(
     let system = instructions_of(&messages);
     let instructions = system.as_deref();
     let conv: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
-    let seed = seed(&conv, &wire, station, due);
+    let seed = seed(&conv, &wire, due);
     let mut log = Vec::new();
     let r = stream_logged(
         client,
@@ -2004,12 +1973,11 @@ mod tests {
     #[test]
     fn without_a_wire_log_the_seed_is_todays_rebuild() {
         let h = history();
-        let s = station(crate::station::Dials::default());
         let wire = crate::api::Wire {
             prior: None,
             tail_n: 1,
         };
-        let seed = seed(&conv(&h), &wire, &s, &due());
+        let seed = seed(&conv(&h), &wire, &due());
         let mut old: Vec<Value> = h.iter().flat_map(json_msg).collect();
         old.extend(delivered(&due()));
         assert_eq!(
@@ -2038,7 +2006,7 @@ mod tests {
             prior: Some(prior.clone()),
             tail_n: 1,
         };
-        let seed = seed(&conv(&h), &wire, &s, &[]);
+        let seed = seed(&conv(&h), &wire, &[]);
         let mut want = prior.clone();
         want.extend(json_msg(&h[4]));
         assert_eq!(
@@ -2084,12 +2052,11 @@ mod tests {
         let mut stale = api_msg("user");
         stale.content = "an earlier ask whose reply came back empty".into();
         h.insert(4, stale);
-        let s = station(crate::station::Dials::default());
         let wire = crate::api::Wire {
             prior: Some(vec![]),
             tail_n: 1,
         };
-        let seed = seed(&conv(&h), &wire, &s, &[]);
+        let seed = seed(&conv(&h), &wire, &[]);
         assert_eq!(
             seed.tail,
             json_msg(&h[5]),
@@ -2098,60 +2065,24 @@ mod tests {
     }
 
     #[test]
-    fn tinker_dials_trim_the_log_in_pairs_without_touching_it() {
-        use crate::station::TinkerVal;
-        let log = vec![
-            reasoning_item(Some("gAAAA")),
-            function_call("c1", "zsh", "{}"),
-            function_call_output("c1", "one"),
-            function_call("c2", "zsh", "{}"),
-            function_call_output("c2", "twotwotwo"),
-            json!({ "type": "mcp_call", "id": "mcp_1", "output": "kept" }),
-        ];
-        let out = trimmed(&log, TinkerVal::Count(1));
-        let ids: Vec<&str> = out
-            .iter()
-            .filter_map(|v| v.get("call_id")?.as_str())
-            .collect();
-        assert_eq!(ids, ["c2", "c2"], "the oldest call goes with its output");
-        assert_eq!(out[0], log[0]);
-        assert_eq!(out.last(), log.last());
-        assert_eq!(
-            out.iter()
-                .find(|v| v["type"] == "function_call_output")
-                .unwrap()["output"],
-            "twotwotwo",
-            "a recorded output is never rewritten at send time"
-        );
-        assert_eq!(trimmed(&log, TinkerVal::All), log);
-    }
-
-    #[test]
     fn reasoning_never_rides_without_what_it_produced() {
-        use crate::station::TinkerVal;
         let r = |s: &str| reasoning_item(Some(s));
         let user = json!({ "type": "message", "role": "user", "content": "next" });
         let log = vec![
             r("r1"),
             function_call("c1", "zsh", "{}"),
             function_call_output("c1", "one"),
-            r("r2"),
-            function_call("c2", "zsh", "{}"),
-            function_call_output("c2", "two"),
+            r("lost"),
             r("cut"),
             user.clone(),
         ];
-        let out = trimmed(&log, TinkerVal::Count(1));
+        let out = replayable(&log);
         let sealed: Vec<&str> = out
             .iter()
             .filter_map(|v| v.get("encrypted_content")?.as_str())
             .collect();
-        assert_eq!(
-            sealed,
-            ["r2"],
-            "pruned call's reasoning and a cut turn's reasoning go"
-        );
-        assert_eq!(out[1]["call_id"], "c2");
+        assert_eq!(sealed, ["r1"]);
         assert_eq!(out.last(), Some(&user));
+        assert_eq!(replayable(&log[..3]), log[..3]);
     }
 }
