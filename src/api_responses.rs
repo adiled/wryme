@@ -160,10 +160,7 @@ fn seed(
     let split = conv.len() - fresh;
     let tail: Vec<serde_json::Value> = conv[split..].iter().flat_map(|m| json_msg(m)).collect();
     let (mut input, mut log) = match &wire.prior {
-        Some(prior) => (
-            trimmed(prior, station.dials.tinker_keep, station.dials.tinker_clip),
-            prior.clone(),
-        ),
+        Some(prior) => (trimmed(prior, station.dials.tinker_keep), prior.clone()),
         None => {
             let head: Vec<serde_json::Value> =
                 conv[..split].iter().flat_map(|m| json_msg(m)).collect();
@@ -183,11 +180,7 @@ fn seed(
     }
 }
 
-fn trimmed(
-    items: &[serde_json::Value],
-    keep: crate::station::TinkerVal,
-    clip: crate::station::TinkerVal,
-) -> Vec<serde_json::Value> {
+fn trimmed(items: &[serde_json::Value], keep: crate::station::TinkerVal) -> Vec<serde_json::Value> {
     let kind = |v: &serde_json::Value| {
         v.get("type")
             .and_then(|t| t.as_str())
@@ -230,19 +223,7 @@ fn trimmed(
     kept.iter()
         .enumerate()
         .filter(|(i, v)| kind(v) != "reasoning" || produced(kept.get(i + 1)))
-        .map(|(_, v)| *v)
-        .map(|v| {
-            if clip != crate::station::TinkerVal::All
-                && kind(v) == "function_call_output"
-                && let Some(out) = v.get("output").and_then(|o| o.as_str())
-            {
-                let mut v = v.clone();
-                v["output"] = serde_json::Value::String(clip.clip(out));
-                v
-            } else {
-                v.clone()
-            }
-        })
+        .map(|(_, v)| (*v).clone())
         .collect()
 }
 
@@ -480,7 +461,10 @@ async fn stream_warm(
                 output: output.clone(),
             });
             log.push(function_call(&call.call_id, &call.name, &call.arguments));
-            log.push(function_call_output(&call.call_id, &output));
+            log.push(function_call_output(
+                &call.call_id,
+                &station.dials.tinker_clip.clip(&output),
+            ));
             next_input.push(function_call_output(&call.call_id, &output));
         }
         prev_id = Some(new_id);
@@ -585,12 +569,14 @@ async fn stream_full(
                 arguments: call.arguments.clone(),
                 output: output.clone(),
             });
-            let pair = [
-                function_call(&call.call_id, &call.name, &call.arguments),
-                function_call_output(&call.call_id, &output),
-            ];
-            log.extend(pair.iter().cloned());
-            follow.extend(pair);
+            let asked = function_call(&call.call_id, &call.name, &call.arguments);
+            log.push(asked.clone());
+            log.push(function_call_output(
+                &call.call_id,
+                &station.dials.tinker_clip.clip(&output),
+            ));
+            follow.push(asked);
+            follow.push(function_call_output(&call.call_id, &output));
         }
         input.extend(follow);
     }
@@ -2122,7 +2108,7 @@ mod tests {
             function_call_output("c2", "twotwotwo"),
             json!({ "type": "mcp_call", "id": "mcp_1", "output": "kept" }),
         ];
-        let out = trimmed(&log, TinkerVal::Count(1), TinkerVal::Count(3));
+        let out = trimmed(&log, TinkerVal::Count(1));
         let ids: Vec<&str> = out
             .iter()
             .filter_map(|v| v.get("call_id")?.as_str())
@@ -2130,12 +2116,14 @@ mod tests {
         assert_eq!(ids, ["c2", "c2"], "the oldest call goes with its output");
         assert_eq!(out[0], log[0]);
         assert_eq!(out.last(), log.last());
-        let clipped = out
-            .iter()
-            .find(|v| v["type"] == "function_call_output")
-            .unwrap();
-        assert!(clipped["output"].as_str().unwrap().len() < "twotwotwo".len());
-        assert_eq!(trimmed(&log, TinkerVal::All, TinkerVal::All), log);
+        assert_eq!(
+            out.iter()
+                .find(|v| v["type"] == "function_call_output")
+                .unwrap()["output"],
+            "twotwotwo",
+            "a recorded output is never rewritten at send time"
+        );
+        assert_eq!(trimmed(&log, TinkerVal::All), log);
     }
 
     #[test]
@@ -2153,7 +2141,7 @@ mod tests {
             r("cut"),
             user.clone(),
         ];
-        let out = trimmed(&log, TinkerVal::Count(1), TinkerVal::All);
+        let out = trimmed(&log, TinkerVal::Count(1));
         let sealed: Vec<&str> = out
             .iter()
             .filter_map(|v| v.get("encrypted_content")?.as_str())
