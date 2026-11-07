@@ -158,6 +158,9 @@ pub enum StreamEvent {
     ResponseId {
         id: String,
     },
+    Wire {
+        items: Vec<serde_json::Value>,
+    },
     WindowUnsupported {
         shop: String,
     },
@@ -178,6 +181,15 @@ pub enum StreamEvent {
         station: Station,
         origin: Option<String>,
     },
+}
+
+/// The runtime wire log handed to a turn: the verbatim items of every prior
+/// turn (`prior`, `None` when it can't be trusted and history must be rebuilt
+/// from messages), and how many trailing user messages are new since then.
+#[derive(Debug, Clone, Default)]
+pub struct Wire {
+    pub prior: Option<Vec<serde_json::Value>>,
+    pub tail_n: usize,
 }
 
 fn is_answer(ev: &StreamEvent) -> bool {
@@ -243,12 +255,14 @@ impl Client {
         Some(proxy)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn stream_completion(
         &self,
         shops: Vec<Shop>,
         station: Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
+        wire: Wire,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
@@ -257,6 +271,7 @@ impl Client {
             station,
             messages,
             previous_response_id,
+            wire,
             engine,
             tx.clone(),
         ))
@@ -270,12 +285,14 @@ impl Client {
             let _ = tx.send(StreamEvent::Done);
         }
     }
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch(
         &self,
         shops: Vec<Shop>,
         station: Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
+        wire: Wire,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
@@ -291,11 +308,29 @@ impl Client {
         let _guard = span.enter();
         let due = due_calls(&tx);
         let result = if shops.len() > 1 {
-            self.try_shops(&shops, &station, messages, previous_response_id, engine, &tx, &due)
-                .await
+            self.try_shops(
+                &shops,
+                &station,
+                messages,
+                previous_response_id,
+                wire,
+                engine,
+                &tx,
+                &due,
+            )
+            .await
         } else {
-            self.attempt(&lead, &station, messages, previous_response_id, engine, &tx, &due)
-                .await
+            self.attempt(
+                &lead,
+                &station,
+                messages,
+                previous_response_id,
+                wire,
+                engine,
+                &tx,
+                &due,
+            )
+            .await
         };
         if let Err(e) = result {
             let _ = tx.send(StreamEvent::Error {
@@ -312,19 +347,35 @@ impl Client {
         station: &Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
+        wire: Wire,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: &UnboundedSender<StreamEvent>,
         due: &[DueCall],
     ) -> Result<()> {
         let mut failures = Vec::new();
         for (i, shop) in shops.iter().enumerate() {
-            let prev = if i == 0 { previous_response_id.clone() } else { None };
+            let prev = if i == 0 {
+                previous_response_id.clone()
+            } else {
+                None
+            };
+            // another provider can't read this one's items (ids, sealed reasoning)
+            let wire = if i == 0 {
+                wire.clone()
+            } else {
+                Wire {
+                    prior: None,
+                    tail_n: wire.tail_n,
+                }
+            };
             let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel();
             let run = {
                 let messages = messages.clone();
                 let engine = engine.clone();
                 async move {
-                    let r = self.attempt(shop, station, messages, prev, engine, &itx, due).await;
+                    let r = self
+                        .attempt(shop, station, messages, prev, wire, engine, &itx, due)
+                        .await;
                     drop(itx);
                     r
                 }
@@ -388,6 +439,7 @@ impl Client {
         station: &Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
+        wire: Wire,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: &UnboundedSender<StreamEvent>,
         due: &[DueCall],
@@ -413,6 +465,7 @@ impl Client {
                     station,
                     messages,
                     previous_response_id,
+                    wire,
                     engine,
                     tx,
                     due,

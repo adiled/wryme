@@ -138,6 +138,105 @@ fn supports_multi_agent(model: &str) -> bool {
     num.parse::<f32>().is_ok_and(|v| v >= MULTI_AGENT_MIN)
 }
 
+/// What a turn starts from: `input` is what a full replay sends (prior log
+/// trimmed by the tinker dials, then the new tail), `tail` is only the new
+/// user items (what a warm round sends), `log` is the untrimmed record the
+/// turn appends to and hands back as `StreamEvent::Wire`.
+struct Seed {
+    input: Vec<serde_json::Value>,
+    tail: Vec<serde_json::Value>,
+    due: Vec<serde_json::Value>,
+    log: Vec<serde_json::Value>,
+}
+
+fn seed(
+    conv: &[&ApiMessage],
+    wire: &crate::api::Wire,
+    station: &Station,
+    due: &[crate::api::DueCall],
+) -> Seed {
+    let fresh = conv
+        .iter()
+        .rev()
+        .take(wire.tail_n)
+        .take_while(|m| m.role == "user")
+        .count();
+    let split = conv.len() - fresh;
+    let tail: Vec<serde_json::Value> = conv[split..].iter().flat_map(|m| json_msg(m)).collect();
+    let (mut input, mut log) = match &wire.prior {
+        Some(prior) => (
+            trimmed(prior, station.dials.tinker_keep, station.dials.tinker_clip),
+            prior.clone(),
+        ),
+        None => {
+            let head: Vec<serde_json::Value> =
+                conv[..split].iter().flat_map(|m| json_msg(m)).collect();
+            (head.clone(), head)
+        }
+    };
+    let due: Vec<serde_json::Value> = delivered(due).collect();
+    input.extend(tail.iter().cloned());
+    input.extend(due.iter().cloned());
+    log.extend(tail.iter().cloned());
+    log.extend(due.iter().cloned());
+    Seed {
+        input,
+        tail,
+        due,
+        log,
+    }
+}
+
+/// Tinker keep/clip over raw items: drop the oldest call/output pairs
+/// together (matched by `call_id`) and clip what outputs remain.
+fn trimmed(
+    items: &[serde_json::Value],
+    keep: crate::station::TinkerVal,
+    clip: crate::station::TinkerVal,
+) -> Vec<serde_json::Value> {
+    let kind = |v: &serde_json::Value| {
+        v.get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let call_id = |v: &serde_json::Value| {
+        v.get("call_id")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let outputs: Vec<String> = items
+        .iter()
+        .filter(|v| kind(v) == "function_call_output")
+        .map(call_id)
+        .collect();
+    let total = outputs.len();
+    let gone: std::collections::HashSet<String> = match keep.keep_n(total) {
+        Some(n) if total > n => outputs[..total - n].iter().cloned().collect(),
+        _ => Default::default(),
+    };
+    items
+        .iter()
+        .filter(|v| {
+            let k = kind(v);
+            !((k == "function_call" || k == "function_call_output") && gone.contains(&call_id(v)))
+        })
+        .map(|v| {
+            if clip != crate::station::TinkerVal::All
+                && kind(v) == "function_call_output"
+                && let Some(out) = v.get("output").and_then(|o| o.as_str())
+            {
+                let mut v = v.clone();
+                v["output"] = serde_json::Value::String(clip.clip(out));
+                v
+            } else {
+                v.clone()
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream(
     client: &Client,
@@ -145,20 +244,57 @@ pub(crate) async fn stream(
     station: &Station,
     messages: Vec<ApiMessage>,
     previous_response_id: Option<String>,
+    wire: crate::api::Wire,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
     due: &[crate::api::DueCall],
+) -> Result<()> {
+    let system = instructions_of(&messages);
+    let instructions = system.as_deref();
+    let conv: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
+    let seed = seed(&conv, &wire, station, due);
+    let mut log = Vec::new();
+    let r = stream_logged(
+        client,
+        shop,
+        station,
+        &seed,
+        instructions,
+        previous_response_id,
+        engine,
+        tx,
+        &mut log,
+    )
+    .await;
+    if r.is_ok() {
+        let _ = tx.send(StreamEvent::Wire { items: log });
+    }
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_logged(
+    client: &Client,
+    shop: &Shop,
+    station: &Station,
+    seed: &Seed,
+    instructions: Option<&str>,
+    previous_response_id: Option<String>,
+    engine: Arc<Mutex<book::Engine>>,
+    tx: &UnboundedSender<StreamEvent>,
+    log: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     if shop.window == WindowMode::Warm {
         match stream_warm(
             client,
             shop,
             station,
-            messages.clone(),
+            seed,
+            instructions,
             previous_response_id,
             engine.clone(),
             tx,
-            due,
+            log,
         )
         .await
         {
@@ -172,7 +308,18 @@ pub(crate) async fn stream(
                 let _ = tx.send(StreamEvent::Error {
                     message: "tools unsupported by model, retrying without tools".into(),
                 });
-                return stream_warm(client, shop, station, messages, None, engine, tx, due).await;
+                return stream_warm(
+                    client,
+                    shop,
+                    station,
+                    seed,
+                    instructions,
+                    None,
+                    engine,
+                    tx,
+                    log,
+                )
+                .await;
             }
             Err(e) => {
                 let msg = format!("{e:#}");
@@ -185,13 +332,25 @@ pub(crate) async fn stream(
                     let _ = tx.send(StreamEvent::WindowUnsupported {
                         shop: shop.name.clone(),
                     });
-                    return stream_full(client, shop, station, messages, engine, tx, due).await;
+                    return stream_full(client, shop, station, seed, instructions, engine, tx, log)
+                        .await;
                 }
                 return Err(e);
             }
         }
     }
-    match stream_full(client, shop, station, messages.clone(), engine.clone(), tx, due).await {
+    match stream_full(
+        client,
+        shop,
+        station,
+        seed,
+        instructions,
+        engine.clone(),
+        tx,
+        log,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(e) if crate::api::is_tool_unsupported_msg(&format!("{e:#}")) => {
             if crate::api::is_toolless(&shop.name, &station.model) {
@@ -202,7 +361,7 @@ pub(crate) async fn stream(
             let _ = tx.send(StreamEvent::Error {
                 message: "tools unsupported by model, retrying without tools".into(),
             });
-            stream_full(client, shop, station, messages, engine, tx, due).await
+            stream_full(client, shop, station, seed, instructions, engine, tx, log).await
         }
         Err(e) => Err(e),
     }
@@ -213,30 +372,20 @@ async fn stream_warm(
     client: &Client,
     shop: &Shop,
     station: &Station,
-    messages: Vec<ApiMessage>,
+    seed: &Seed,
+    instructions: Option<&str>,
     previous_response_id: Option<String>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
-    due: &[crate::api::DueCall],
+    log: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
-    let system = instructions_of(&messages);
-    let instructions = system.as_deref();
-
-    let conv_msgs: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
-
+    *log = seed.log.clone();
     let mut prev_id = previous_response_id;
     let mut input: Vec<serde_json::Value> = if prev_id.is_some() {
-        conv_msgs
-            .last()
-            .filter(|m| m.role == "user")
-            .into_iter()
-            .flat_map(|m| json_msg(m))
-            .collect()
+        seed.tail.iter().chain(&seed.due).cloned().collect()
     } else {
-        conv_msgs.iter().flat_map(|m| json_msg(m)).collect()
+        seed.input.clone()
     };
-
-    input.extend(delivered(due));
 
     let mut bad_rounds: u32 = 0;
     let mut depth: u32 = 0;
@@ -248,7 +397,7 @@ async fn stream_warm(
             tracing::warn!(depth, "tinker depth reached, forcing final answer");
             input.push(system_note(crate::api::FINAL_ANSWER_NUDGE));
         }
-        let (calls, new_id, _) = stream_once(
+        let (calls, new_id, carry) = stream_once(
             client,
             shop,
             station,
@@ -260,6 +409,7 @@ async fn stream_warm(
             nudged,
         )
         .await?;
+        log.extend(carry);
         let (paired, broken): (Vec<_>, Vec<_>) = calls
             .into_iter()
             .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
@@ -320,6 +470,8 @@ async fn stream_warm(
                 arguments: call.arguments.clone(),
                 output: output.clone(),
             });
+            log.push(function_call(&call.call_id, &call.name, &call.arguments));
+            log.push(function_call_output(&call.call_id, &output));
             next_input.push(function_call_output(&call.call_id, &output));
         }
         prev_id = Some(new_id);
@@ -327,23 +479,19 @@ async fn stream_warm(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_full(
     client: &Client,
     shop: &Shop,
     station: &Station,
-    messages: Vec<ApiMessage>,
+    seed: &Seed,
+    instructions: Option<&str>,
     engine: Arc<Mutex<book::Engine>>,
     tx: &UnboundedSender<StreamEvent>,
-    due: &[crate::api::DueCall],
+    log: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
-    let system = instructions_of(&messages);
-    let instructions = system.as_deref();
-
-    let conv_msgs: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
-
-    let mut input: Vec<serde_json::Value> = conv_msgs.iter().flat_map(|m| json_msg(m)).collect();
-
-    input.extend(delivered(due));
+    *log = seed.log.clone();
+    let mut input = seed.input.clone();
 
     let mut bad_rounds: u32 = 0;
     let mut depth: u32 = 0;
@@ -367,6 +515,7 @@ async fn stream_full(
             nudged,
         )
         .await?;
+        log.extend(carry.iter().cloned());
         let (paired, broken): (Vec<_>, Vec<_>) = calls
             .into_iter()
             .partition(|c| !c.call_id.is_empty() && !c.name.is_empty());
@@ -427,8 +576,12 @@ async fn stream_full(
                 arguments: call.arguments.clone(),
                 output: output.clone(),
             });
-            follow.push(function_call(&call.call_id, &call.name, &call.arguments));
-            follow.push(function_call_output(&call.call_id, &output));
+            let pair = [
+                function_call(&call.call_id, &call.name, &call.arguments),
+                function_call_output(&call.call_id, &output),
+            ];
+            log.extend(pair.iter().cloned());
+            follow.extend(pair);
         }
         input.extend(follow);
     }
@@ -1847,5 +2000,132 @@ mod tests {
                 .unwrap();
             spec::conforms(OPENAI, "CreateResponse", &body);
         }
+    }
+
+    fn conv(h: &[ApiMessage]) -> Vec<&ApiMessage> {
+        h.iter().filter(|m| m.role != "system").collect()
+    }
+
+    #[test]
+    fn without_a_wire_log_the_seed_is_todays_rebuild() {
+        let h = history();
+        let s = station(crate::station::Dials::default());
+        let wire = crate::api::Wire {
+            prior: None,
+            tail_n: 1,
+        };
+        let seed = seed(&conv(&h), &wire, &s, &due());
+        let mut old: Vec<Value> = h.iter().flat_map(json_msg).collect();
+        old.extend(delivered(&due()));
+        assert_eq!(
+            seed.input, old,
+            "no wire log: byte-identical to the flattening path"
+        );
+        assert_eq!(seed.log, old);
+        assert_eq!(seed.tail, json_msg(&h[4]));
+    }
+
+    #[test]
+    fn a_wire_log_replays_what_messages_cannot() {
+        let h = history();
+        let s = station(crate::station::Dials::default());
+        let prior = vec![
+            json!({ "type": "message", "role": "user", "content": "read the readme" }),
+            reasoning_item(Some("gAAAA")),
+            json!({ "type": "web_search_call", "id": "ws_1", "status": "completed", "action": { "type": "search", "query": "wryme" } }),
+            said_before_a_call(&message_item("I'll look.")).unwrap(),
+            function_call("c1", "zsh", "{\"command\":\"cat README.md\"}"),
+            function_call_output("c1", "# wryme"),
+            reasoning_item(Some("gBBBB")),
+            said_before_a_call(&message_item("It is wryme's readme.")).unwrap(),
+        ];
+        let wire = crate::api::Wire {
+            prior: Some(prior.clone()),
+            tail_n: 1,
+        };
+        let seed = seed(&conv(&h), &wire, &s, &[]);
+        let mut want = prior.clone();
+        want.extend(json_msg(&h[4]));
+        assert_eq!(
+            seed.input, want,
+            "prior items ride verbatim, only the new user turn is rebuilt"
+        );
+        assert_eq!(seed.log, want);
+        let body = serde_json::to_value(request(
+            &s,
+            &seed.input,
+            None,
+            false,
+            None,
+            &[],
+            false,
+            false,
+        ))
+        .unwrap();
+        spec::conforms(OPENAI, "CreateResponse", &body);
+        assert_eq!(body["input"][1]["encrypted_content"], "gAAAA");
+        assert_eq!(body["input"][2]["type"], "web_search_call");
+        let portable: Vec<Value> = seed
+            .input
+            .iter()
+            .filter(|v| v["type"] != "web_search_call")
+            .cloned()
+            .collect();
+        sent(&request(
+            &s,
+            &portable,
+            None,
+            false,
+            None,
+            &[],
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn only_user_turns_since_the_log_are_new() {
+        let mut h = history();
+        let mut stale = api_msg("user");
+        stale.content = "an earlier ask whose reply came back empty".into();
+        h.insert(4, stale);
+        let s = station(crate::station::Dials::default());
+        let wire = crate::api::Wire {
+            prior: Some(vec![]),
+            tail_n: 1,
+        };
+        let seed = seed(&conv(&h), &wire, &s, &[]);
+        assert_eq!(
+            seed.tail,
+            json_msg(&h[5]),
+            "a user turn already in the log is not resent"
+        );
+    }
+
+    #[test]
+    fn tinker_dials_trim_the_log_in_pairs_without_touching_it() {
+        use crate::station::TinkerVal;
+        let log = vec![
+            reasoning_item(Some("gAAAA")),
+            function_call("c1", "zsh", "{}"),
+            function_call_output("c1", "one"),
+            function_call("c2", "zsh", "{}"),
+            function_call_output("c2", "twotwotwo"),
+            json!({ "type": "mcp_call", "id": "mcp_1", "output": "kept" }),
+        ];
+        let out = trimmed(&log, TinkerVal::Count(1), TinkerVal::Count(3));
+        let ids: Vec<&str> = out
+            .iter()
+            .filter_map(|v| v.get("call_id")?.as_str())
+            .collect();
+        assert_eq!(ids, ["c2", "c2"], "the oldest call goes with its output");
+        assert_eq!(out[0], log[0]);
+        assert_eq!(out.last(), log.last());
+        let clipped = out
+            .iter()
+            .find(|v| v["type"] == "function_call_output")
+            .unwrap();
+        assert!(clipped["output"].as_str().unwrap().len() < "twotwotwo".len());
+        assert_eq!(trimmed(&log, TinkerVal::All, TinkerVal::All), log);
     }
 }

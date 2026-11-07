@@ -194,6 +194,7 @@ where
                     app.in_flight = true;
                     let msgs = app.api_messages();
                     let prev_id = app.last_response_id.clone();
+                    let wire = app.wire_for_turn();
                     let shops = app.turn_shops();
                     let station = app.active_station.clone();
                     let client = client.clone();
@@ -201,7 +202,7 @@ where
                     let tx = tx.clone();
                     in_flight_task = Some(platform::spawn(async move {
                         client
-                            .stream_completion(shops, station, msgs, prev_id, engine, tx)
+                            .stream_completion(shops, station, msgs, prev_id, wire, engine, tx)
                             .await;
                     }));
                 }
@@ -257,6 +258,7 @@ fn handle_stream_event(
         StreamEvent::ResponseId { id } => {
             app.last_response_id = Some(id);
         }
+        StreamEvent::Wire { items } => app.hold_wire(items),
         StreamEvent::ShopWorked { model, shop } => app.shop_worked(&model, &shop),
         StreamEvent::ShopsChecked {
             shops,
@@ -289,6 +291,7 @@ fn handle_stream_event(
         }
         StreamEvent::Done => {
             app.finish_streaming();
+            app.settle_wire();
             if app.voice_on && !app.voice_muted {
                 let tail = app.voice_buffer.trim().to_string();
                 app.voice_buffer.clear();
@@ -365,7 +368,15 @@ async fn one_shot(
         let client = client.clone();
         async move {
             client
-                .stream_completion(shops, station, messages, None, engine, tx)
+                .stream_completion(
+                    shops,
+                    station,
+                    messages,
+                    None,
+                    Default::default(),
+                    engine,
+                    tx,
+                )
                 .await;
         }
     });
