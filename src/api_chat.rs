@@ -393,13 +393,23 @@ fn handle_event(
                     .get("completion_tokens")
                     .and_then(|n| n.as_u64())
                     .unwrap_or(0);
+                let cached = u
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
                 let total = u.get("total_tokens").and_then(|n| n.as_u64());
                 if input + output > 0 {
-                    let _ = tx.send(StreamEvent::Usage { input, output });
+                    let _ = tx.send(StreamEvent::Usage {
+                        input,
+                        output,
+                        cached,
+                    });
                 } else if let Some(t) = total.filter(|t| *t > 0) {
                     let _ = tx.send(StreamEvent::Usage {
                         input: t,
                         output: 0,
+                        cached,
                     });
                 }
             }
@@ -766,7 +776,8 @@ mod tests {
             h.next(),
             Some(StreamEvent::Usage {
                 input: 1200,
-                output: 300
+                output: 300,
+                cached: 0
             })
         ));
     }

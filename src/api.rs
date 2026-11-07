@@ -167,6 +167,7 @@ pub enum StreamEvent {
     Usage {
         input: u64,
         output: u64,
+        cached: u64,
     },
     Done,
     Error {

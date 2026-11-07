@@ -279,8 +279,13 @@ fn handle_stream_event(
             }
             app.note(format!("{shop}: warm window unsupported, using full"));
         }
-        StreamEvent::Usage { input, output } => {
+        StreamEvent::Usage {
+            input,
+            output,
+            cached,
+        } => {
             app.usage_ctx = input;
+            app.usage_cached = cached;
             app.usage_out += output;
             let station = app.active_station.name.clone();
             let model = app.active_station.model.clone();
