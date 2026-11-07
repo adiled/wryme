@@ -19,7 +19,6 @@ pub struct Dials {
     pub boldness: Option<f32>,
     pub patience: Option<Patience>,
     pub brainy: Option<Brainy>,
-    pub tinker_keep: TinkerKeep,
     pub tinker_clip: TinkerClip,
     pub tinker_depth: TinkerDepth,
 }
@@ -36,7 +35,6 @@ impl Default for Dials {
             boldness: None,
             patience: None,
             brainy: None,
-            tinker_keep: TinkerVal::All,
             tinker_clip: TinkerVal::All,
             tinker_depth: TinkerVal::All,
         }
@@ -50,21 +48,10 @@ pub enum TinkerVal {
     Percent(u8),
 }
 
-pub type TinkerKeep = TinkerVal;
 pub type TinkerClip = TinkerVal;
 pub type TinkerDepth = TinkerVal;
 
 impl TinkerVal {
-    pub fn keep_n(self, total: usize) -> Option<usize> {
-        match self {
-            TinkerVal::All => None,
-            TinkerVal::Count(n) => Some(n.min(total)),
-            TinkerVal::Percent(p) => {
-                let p = (p as usize).min(100);
-                Some(((total * p).div_ceil(100)).min(total))
-            }
-        }
-    }
     pub fn depth_n(self) -> Option<usize> {
         match self {
             TinkerVal::All => None,
@@ -186,8 +173,6 @@ struct StationDef {
     #[serde(default)]
     brainy: Option<BrainyField>,
     #[serde(default)]
-    tinker_keep: Option<TinkerField>,
-    #[serde(default)]
     tinker_clip: Option<TinkerField>,
     #[serde(default)]
     tinker_depth: Option<TinkerField>,
@@ -279,9 +264,6 @@ impl StationDef {
         }
         if self.brainy.is_some() {
             dials.brainy = self.brainy.and_then(|b| b.into_brainy());
-        }
-        if let Some(k) = self.tinker_keep.and_then(|k| k.into_val()) {
-            dials.tinker_keep = k;
         }
         if let Some(c) = self.tinker_clip.and_then(|c| c.into_val()) {
             dials.tinker_clip = c;
