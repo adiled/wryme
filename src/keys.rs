@@ -71,6 +71,7 @@ pub fn handle_key(
 
     if app.popup.mode != popup::Mode::Closed {
         popup_key(k, app);
+        start_shop_check(app, tx);
         return;
     }
 
@@ -208,6 +209,25 @@ pub fn handle_key(
     }
 }
 
+pub fn start_shop_check(app: &mut App, tx: &mpsc::UnboundedSender<StreamEvent>) {
+    let Some((station, origin)) = app.shop_check.take() else {
+        return;
+    };
+    if let Some(t) = app.shop_check_task.take() {
+        t.abort();
+    }
+    let mut shops = app.shops.clone();
+    let tx = tx.clone();
+    app.shop_check_task = Some(crate::platform::spawn(async move {
+        crate::shop::discover_all(&mut shops).await;
+        let _ = tx.send(StreamEvent::ShopsChecked {
+            shops,
+            station,
+            origin,
+        });
+    }));
+}
+
 pub fn start_turn(
     app: &mut App,
     client: &Client,
@@ -232,14 +252,14 @@ pub fn start_turn(
 
     let msgs = app.api_messages();
     let prev_id = app.last_response_id.clone();
-    let shop = app.active_shop.clone();
+    let shops = app.turn_shops();
     let station = app.active_station.clone();
     let client = client.clone();
     let engine = app.engine.clone();
     let tx = tx.clone();
     *in_flight = Some(crate::platform::spawn(async move {
         client
-            .stream_completion(shop, station, msgs, prev_id, engine, tx)
+            .stream_completion(shops, station, msgs, prev_id, engine, tx)
             .await;
     }));
 }
@@ -278,14 +298,14 @@ pub fn start_guest_turn(
 
     let msgs = app.api_messages();
     let prev_id = app.last_response_id.clone();
-    let shop = app.active_shop.clone();
+    let shops = app.turn_shops();
     let station = app.active_station.clone();
     let client = client.clone();
     let engine = app.engine.clone();
     let tx = tx.clone();
     *in_flight = Some(crate::platform::spawn(async move {
         client
-            .stream_completion(shop, station, msgs, prev_id, engine, tx)
+            .stream_completion(shops, station, msgs, prev_id, engine, tx)
             .await;
     }));
 }
