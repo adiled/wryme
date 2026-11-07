@@ -442,7 +442,9 @@ async fn native_main() -> Result<()> {
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
 
-    let events = EventStream::new().filter_map(|r| futures_util::future::ready(r.ok()));
+    let events = crate::platform::tty::rejoin(
+        EventStream::new().filter_map(|r| futures_util::future::ready(r.ok())),
+    );
     let result = run(
         &mut terminal,
         boot.client,
@@ -487,7 +489,7 @@ fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::Crosst
 {
     use crossterm::{
         cursor::SetCursorStyle,
-        event::{EnableBracketedPaste, EnableMouseCapture},
+        event::EnableBracketedPaste,
         execute,
         terminal::EnterAlternateScreen,
     };
@@ -496,7 +498,7 @@ fn setup_terminal() -> anyhow::Result<ratatui::Terminal<ratatui::backend::Crosst
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
+        crate::platform::tty::ButtonMouse,
         EnableBracketedPaste,
         SetCursorStyle::BlinkingUnderScore
     )?;
