@@ -106,6 +106,7 @@ pub fn handle_key(
                 Some(t) => {
                     t.abort();
                     app.finish_streaming();
+                    app.settle_wire();
                     if app.awaiting.is_empty() {
                         app.note("cancelled");
                     } else {
@@ -252,6 +253,7 @@ pub fn start_turn(
 
     let msgs = app.api_messages();
     let prev_id = app.last_response_id.clone();
+    let wire = app.wire_for_turn();
     let shops = app.turn_shops();
     let station = app.active_station.clone();
     let client = client.clone();
@@ -259,7 +261,7 @@ pub fn start_turn(
     let tx = tx.clone();
     *in_flight = Some(crate::platform::spawn(async move {
         client
-            .stream_completion(shops, station, msgs, prev_id, engine, tx)
+            .stream_completion(shops, station, msgs, prev_id, wire, engine, tx)
             .await;
     }));
 }
@@ -298,6 +300,7 @@ pub fn start_guest_turn(
 
     let msgs = app.api_messages();
     let prev_id = app.last_response_id.clone();
+    let wire = app.wire_for_turn();
     let shops = app.turn_shops();
     let station = app.active_station.clone();
     let client = client.clone();
@@ -305,7 +308,7 @@ pub fn start_guest_turn(
     let tx = tx.clone();
     *in_flight = Some(crate::platform::spawn(async move {
         client
-            .stream_completion(shops, station, msgs, prev_id, engine, tx)
+            .stream_completion(shops, station, msgs, prev_id, wire, engine, tx)
             .await;
     }));
 }
