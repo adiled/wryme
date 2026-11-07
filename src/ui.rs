@@ -289,6 +289,19 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             Color::DarkGray
         };
         trailer.push(Span::styled(format_k(used), Style::default().fg(color)));
+        if let Some(pct) = cache_pct(app.usage_cached, app.usage_ctx) {
+            let cache_color = if pct >= 50 {
+                Color::DarkGray
+            } else if pct > 0 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            trailer.push(Span::styled(
+                format!(" ⚡︎{pct}%"),
+                Style::default().fg(cache_color),
+            ));
+        }
     }
     if !trailer.is_empty() {
         let left_w: usize = pieces
@@ -349,6 +362,10 @@ fn paint_selection(f: &mut Frame, app: &mut App) {
             buf[(x, y)].modifier |= Modifier::REVERSED;
         }
     }
+}
+
+fn cache_pct(cached: u64, input: u64) -> Option<u64> {
+    (input > 0 && cached > 0).then(|| (cached * 100 / input).min(100))
 }
 
 fn format_k(n: u64) -> String {

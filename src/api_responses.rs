@@ -875,15 +875,25 @@ fn handle_event(
                     .and_then(|u| u.get("output_tokens"))
                     .and_then(|n| n.as_u64())
                     .unwrap_or(0);
+                let cached = usage
+                    .and_then(|u| u.get("input_tokens_details"))
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
                 let total = usage
                     .and_then(|u| u.get("total_tokens"))
                     .and_then(|n| n.as_u64());
                 if input + output > 0 {
-                    let _ = tx.send(StreamEvent::Usage { input, output });
+                    let _ = tx.send(StreamEvent::Usage {
+                        input,
+                        output,
+                        cached,
+                    });
                 } else if let Some(t) = total.filter(|t| *t > 0) {
                     let _ = tx.send(StreamEvent::Usage {
                         input: t,
                         output: 0,
+                        cached,
                     });
                 }
             }
@@ -1548,7 +1558,8 @@ mod tests {
             h.next(),
             Some(StreamEvent::Usage {
                 input: 345,
-                output: 69
+                output: 69,
+                cached: 0
             })
         ));
     }
