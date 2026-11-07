@@ -49,7 +49,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                             .fg(app.accent)
                             .add_modifier(Modifier::BOLD),
                     )];
-                    if *label == "saved" && !app.popup.search.is_empty() {
+                    if *label == "saved stations" && !app.popup.search.is_empty() {
                         spans.push(Span::styled(
                             format!("  › {}", app.popup.search),
                             Style::default().fg(Color::DarkGray),
@@ -80,16 +80,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                         ]));
                     }
                 }
+                popup::Row::ActiveStation => {
+                    let st = &app.active_station;
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::raw(st.name.clone()),
+                        dim(format!(" ({})", st.model)),
+                        dim(format!(" • {}", popup::active_shop_label(app))),
+                    ]));
+                }
                 popup::Row::SavedStation(idx) => {
                     let st = &app.stations[*idx];
                     let style = focus_style(selected, app.accent);
                     lines.push(Line::from(vec![
                         Span::styled("  ", style),
                         Span::styled(st.name.clone(), style),
-                        Span::styled(
-                            format!("  ({})", st.model),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        dim(format!(" ({})", st.model)),
+                        dim(format!(" • {}", popup::shops_label(app, &st.model))),
+                    ]));
+                }
+                popup::Row::Unstationed(model) => {
+                    let style = focus_style(selected, app.accent);
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", style),
+                        Span::styled(model.clone(), style),
+                        dim(format!(" • {}", popup::shops_label(app, model))),
                     ]));
                 }
                 popup::Row::UpdateAction => {
@@ -314,6 +329,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+fn dim(text: String) -> Span<'static> {
+    Span::styled(text, Style::default().fg(Color::DarkGray))
+}
+
 fn focus_style(selected: bool, accent: Color) -> Style {
     if selected {
         Style::default()
@@ -322,5 +341,80 @@ fn focus_style(selected: bool, accent: Color) -> Style {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shop::{Protocol, Shop, WindowMode};
+    use crate::station::Station;
+
+    fn shop(name: &str, models: &[&str]) -> Shop {
+        Shop {
+            name: name.into(),
+            url: format!("http://{name}"),
+            key: String::new(),
+            protocol: Protocol::ChatCompletions,
+            window: WindowMode::Full,
+            models: models.iter().map(|m| m.to_string()).collect(),
+            limit: Vec::new(),
+            headers: Default::default(),
+        }
+    }
+
+    fn station(name: &str, model: &str) -> Station {
+        Station {
+            name: name.into(),
+            model: model.into(),
+            ..Default::default()
+        }
+    }
+
+    fn screen(app: &mut App) -> Vec<String> {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 40)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn station_tab_shows_active_saved_and_unstationed_with_shops() {
+        let hum = shop("hum", &["deepseek-v4-flash", "claude-sonnet-5-5"]);
+        let opus = station("opus", "claude-opus-5-5");
+        let mut app = App::new(
+            None,
+            vec![Shop::demo(), shop("dwarfstar", &["deepseek-v4-flash", "glm-5.3-flash"]), hum.clone()],
+            vec![Station::demo(), opus.clone(), station("sonnet", "claude-sonnet-5-5")],
+            opus,
+            hum,
+            Some("opus".into()),
+        );
+        app.memory.clear();
+        app.popup.mode = popup::Mode::Browse;
+        let lines = screen(&mut app);
+        let has = |want: &str| lines.iter().any(|l| l.contains(want));
+        for want in [
+            "active station",
+            "opus (claude-opus-5-5) • ?",
+            "saved stations",
+            "sonnet (claude-sonnet-5-5) • hum",
+            "unstationed models",
+            "deepseek-v4-flash • dwarfstar, hum",
+            "glm-5.3-flash • dwarfstar",
+        ] {
+            assert!(has(want), "missing {want:?} in:\n{}", lines.join("\n"));
+        }
+        assert!(!has("claude-sonnet-5-5 • "), "a stationed model is listed as unstationed");
+        app.memory.insert("claude-opus-5-5".into(), "hum".into());
+        assert!(screen(&mut app).iter().any(|l| l.contains("opus (claude-opus-5-5) • hum")));
     }
 }
