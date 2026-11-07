@@ -298,7 +298,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
                 Color::Red
             };
             trailer.push(Span::styled(
-                format!(" ⚡︎{pct}%"),
+                format!(" cache {pct}%"),
                 Style::default().fg(cache_color),
             ));
         }
@@ -372,12 +372,10 @@ fn format_k(n: u64) -> String {
     if n < 1000 {
         return n.to_string();
     }
-    let f = n as f64;
-    if n < 1_000_000 {
-        let k = f / 1000.0;
-        return format!("{:.1}K", (k * 10.0).round() / 10.0);
+    if n < 999_500 {
+        return format!("{}K", (n + 500) / 1000);
     }
-    format!("{:.1}M", ((f / 1_000_000.0) * 10.0).round() / 10.0)
+    format!("{}M", (n + 500_000) / 1_000_000)
 }
 
 fn is_error_status(s: &str) -> bool {
@@ -1006,9 +1004,12 @@ mod tests {
     fn usage_formats_in_k_terms() {
         assert_eq!(format_k(0), "0");
         assert_eq!(format_k(950), "950");
-        assert_eq!(format_k(1000), "1.0K");
-        assert_eq!(format_k(12400), "12.4K");
-        assert_eq!(format_k(2_300_000), "2.3M");
+        assert_eq!(format_k(1000), "1K");
+        assert_eq!(format_k(12400), "12K");
+        assert_eq!(format_k(12500), "13K");
+        assert_eq!(format_k(999_600), "1M");
+        assert_eq!(format_k(2_300_000), "2M");
+        assert_eq!(format_k(2_600_000), "3M");
     }
 
     #[test]
