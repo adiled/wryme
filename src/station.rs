@@ -4,9 +4,9 @@ use serde::Deserialize;
 use crate::shop::Shop;
 
 pub const DEMO: &str = "demo";
-const UNTITLED: &str = "untitled";
+pub const UNTITLED: &str = "untitled";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Station {
     pub name: String,
     pub model: String,
@@ -328,6 +328,7 @@ fn from_env() -> Option<Station> {
 pub fn pick(
     stations: &[Station],
     shops: &[Shop],
+    memory: &crate::shop_memory::Memory,
     requested: Option<&str>,
 ) -> Result<(Station, Option<String>)> {
     if let Some(name) = requested {
@@ -346,7 +347,8 @@ pub fn pick(
                 format!("no station named '{}'. known: {}", name, known.join(", "))
             });
     }
-    if let Some(st) = stations.iter().find(|s| s.name != DEMO && is_available(s, shops)) {
+    let saved = || stations.iter().filter(|s| s.name != DEMO);
+    if let Some(st) = saved().find(|s| crate::shop::known(shops, memory, &s.model).is_some()) {
         return Ok((st.clone(), Some(st.name.clone())));
     }
     if let Some(model) = shops
@@ -358,17 +360,21 @@ pub fn pick(
             Station {
                 name: UNTITLED.into(),
                 model: model.clone(),
-                dials: Dials::default(),
-                voice: None,
+                ..Default::default()
             },
             None,
         ));
+    }
+    if let Some(st) = saved().find(|s| is_available(s, shops)) {
+        return Ok((st.clone(), Some(st.name.clone())));
     }
     Ok((Station::demo(), None))
 }
 
 fn is_available(station: &Station, shops: &[Shop]) -> bool {
-    crate::shop::find_for_model(shops, &station.model).is_some()
+    shops
+        .iter()
+        .any(|s| s.lists(&station.model) || s.may_take(&station.model))
 }
 
 pub fn unavailable_note(stations: &[Station], shops: &[Shop]) -> Option<String> {
@@ -382,13 +388,14 @@ pub fn unavailable_note(stations: &[Station], shops: &[Shop]) -> Option<String> 
         0 => String::new(),
         n => format!(" +{n}"),
     };
-    Some(format!("unavailable: {first}{more}, no shop lists the model"))
+    Some(format!("unavailable: {first}{more}, no shop's models list has it"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shop::{Protocol, Shop};
+    use crate::shop_memory::Memory;
 
     fn shop(name: &str, models: &[&str]) -> Shop {
         Shop {
@@ -398,6 +405,7 @@ mod tests {
             protocol: Protocol::ChatCompletions,
             window: crate::shop::WindowMode::Full,
             models: models.iter().map(|s| s.to_string()).collect(),
+            limit: models.iter().map(|s| s.to_string()).collect(),
             headers: std::collections::HashMap::new(),
         }
     }
@@ -459,7 +467,7 @@ mod tests {
     fn pick_uses_requested_name() {
         let stations = vec![Station::demo(), station("a", "m1"), station("b", "m2")];
         let shops = vec![Shop::demo()];
-        let (got, origin) = pick(&stations, &shops, Some("b")).unwrap();
+        let (got, origin) = pick(&stations, &shops, &Memory::new(), Some("b")).unwrap();
         assert_eq!(got.name, "b");
         assert_eq!(origin.as_deref(), Some("b"));
     }
@@ -468,14 +476,14 @@ mod tests {
     fn pick_errors_on_unknown_name() {
         let stations = vec![Station::demo()];
         let shops = vec![Shop::demo()];
-        assert!(pick(&stations, &shops, Some("nope")).is_err());
+        assert!(pick(&stations, &shops, &Memory::new(), Some("nope")).is_err());
     }
 
     #[test]
     fn pick_synthesizes_from_first_shop_when_no_saved_stations() {
         let stations = vec![Station::demo()];
         let shops = vec![Shop::demo(), shop("grrrr", &["bhow", "quack"])];
-        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        let (got, origin) = pick(&stations, &shops, &Memory::new(), None).unwrap();
         assert_eq!(got.name, "untitled");
         assert_eq!(got.model, "bhow");
         assert_eq!(origin, None);
@@ -485,7 +493,7 @@ mod tests {
     fn pick_falls_back_to_demo_when_nothing_else() {
         let stations = vec![Station::demo()];
         let shops = vec![Shop::demo()];
-        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        let (got, origin) = pick(&stations, &shops, &Memory::new(), None).unwrap();
         assert_eq!(got.name, "demo");
         assert_eq!(origin, None);
     }
@@ -494,7 +502,7 @@ mod tests {
     fn pick_skips_stations_no_shop_can_serve() {
         let stations = vec![Station::demo(), station("a", "gone"), station("b", "m1")];
         let shops = vec![Shop::demo(), shop("s", &["m1"])];
-        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        let (got, origin) = pick(&stations, &shops, &Memory::new(), None).unwrap();
         assert_eq!(got.name, "b");
         assert_eq!(origin.as_deref(), Some("b"));
     }
@@ -503,17 +511,35 @@ mod tests {
     fn pick_synthesizes_when_no_saved_station_is_available() {
         let stations = vec![Station::demo(), station("a", "gone")];
         let shops = vec![Shop::demo(), shop("empty", &[]), shop("s", &["m1"])];
-        let (got, origin) = pick(&stations, &shops, None).unwrap();
+        let (got, origin) = pick(&stations, &shops, &Memory::new(), None).unwrap();
         assert_eq!(got.name, "untitled");
         assert_eq!(got.model, "m1");
         assert_eq!(origin, None);
     }
 
     #[test]
+    fn pick_counts_a_remembered_shop_as_known() {
+        let stations = vec![station("a", "x"), station("b", "m1")];
+        let shops = vec![Shop::demo(), shop("hum", &[]), shop("s", &["m1"])];
+        let memory = Memory::from([("x".to_string(), "hum".to_string())]);
+        let (got, _) = pick(&stations, &shops, &memory, None).unwrap();
+        assert_eq!(got.name, "a");
+    }
+
+    #[test]
+    fn pick_takes_an_undiscovered_station_over_demo() {
+        let stations = vec![Station::demo(), station("a", "gone")];
+        let shops = vec![Shop::demo(), shop("hum", &[])];
+        let (got, origin) = pick(&stations, &shops, &Memory::new(), None).unwrap();
+        assert_eq!(got.name, "a");
+        assert_eq!(origin.as_deref(), Some("a"));
+    }
+
+    #[test]
     fn pick_still_honors_a_requested_station() {
         let stations = vec![Station::demo(), station("a", "gone"), station("b", "m1")];
         let shops = vec![Shop::demo(), shop("s", &["m1"])];
-        let (got, _) = pick(&stations, &shops, Some("a")).unwrap();
+        let (got, _) = pick(&stations, &shops, &Memory::new(), Some("a")).unwrap();
         assert_eq!(got.name, "a");
     }
 
@@ -525,7 +551,7 @@ mod tests {
         let some_gone = vec![station("a", "gone"), station("b", "m1"), station("c", "gone2")];
         assert_eq!(
             unavailable_note(&some_gone, &shops).as_deref(),
-            Some("unavailable: a +1, no shop lists the model")
+            Some("unavailable: a +1, no shop's models list has it")
         );
     }
 

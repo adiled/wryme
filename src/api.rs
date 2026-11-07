@@ -169,6 +169,25 @@ pub enum StreamEvent {
     Error {
         message: String,
     },
+    ShopWorked {
+        model: String,
+        shop: String,
+    },
+    ShopsChecked {
+        shops: Vec<Shop>,
+        station: Station,
+        origin: Option<String>,
+    },
+}
+
+fn is_answer(ev: &StreamEvent) -> bool {
+    matches!(
+        ev,
+        StreamEvent::Delta { .. }
+            | StreamEvent::Brain { .. }
+            | StreamEvent::Heart { .. }
+            | StreamEvent::ToolCall { .. }
+    )
 }
 #[derive(Clone)]
 pub struct Client {
@@ -226,7 +245,7 @@ impl Client {
 
     pub async fn stream_completion(
         &self,
-        shop: Shop,
+        shops: Vec<Shop>,
         station: Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
@@ -234,7 +253,7 @@ impl Client {
         tx: UnboundedSender<StreamEvent>,
     ) {
         let r = AssertUnwindSafe(self.dispatch(
-            shop,
+            shops,
             station,
             messages,
             previous_response_id,
@@ -253,24 +272,127 @@ impl Client {
     }
     async fn dispatch(
         &self,
-        shop: Shop,
+        shops: Vec<Shop>,
         station: Station,
         messages: Vec<ApiMessage>,
         previous_response_id: Option<String>,
         engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
         tx: UnboundedSender<StreamEvent>,
     ) {
+        let lead = shops.first().cloned().unwrap_or_else(Shop::demo);
         let span = tracing::info_span!(
             "turn",
             model = %station.model,
-            shop = %shop.name,
-            protocol = ?shop.protocol,
-            window = ?shop.window,
+            shop = %lead.name,
+            protocol = ?lead.protocol,
+            window = ?lead.window,
             response_id = tracing::field::Empty
         );
         let _guard = span.enter();
         let due = due_calls(&tx);
-        let result = match shop.protocol {
+        let result = if shops.len() > 1 {
+            self.try_shops(&shops, &station, messages, previous_response_id, engine, &tx, &due)
+                .await
+        } else {
+            self.attempt(&lead, &station, messages, previous_response_id, engine, &tx, &due)
+                .await
+        };
+        if let Err(e) = result {
+            let _ = tx.send(StreamEvent::Error {
+                message: format!("{:#}", e),
+            });
+        }
+        let _ = tx.send(StreamEvent::Done);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_shops(
+        &self,
+        shops: &[Shop],
+        station: &Station,
+        messages: Vec<ApiMessage>,
+        previous_response_id: Option<String>,
+        engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
+        tx: &UnboundedSender<StreamEvent>,
+        due: &[DueCall],
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        for (i, shop) in shops.iter().enumerate() {
+            let prev = if i == 0 { previous_response_id.clone() } else { None };
+            let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel();
+            let run = {
+                let messages = messages.clone();
+                let engine = engine.clone();
+                async move {
+                    let r = self.attempt(shop, station, messages, prev, engine, &itx, due).await;
+                    drop(itx);
+                    r
+                }
+            };
+            let relay = async {
+                let mut held = Vec::new();
+                let mut open = false;
+                while let Some(ev) = irx.recv().await {
+                    if !open && is_answer(&ev) {
+                        open = true;
+                        let _ = tx.send(StreamEvent::ShopWorked {
+                            model: station.model.clone(),
+                            shop: shop.name.clone(),
+                        });
+                        for h in held.drain(..) {
+                            let _ = tx.send(h);
+                        }
+                    }
+                    if open {
+                        let _ = tx.send(ev);
+                    } else {
+                        held.push(ev);
+                    }
+                }
+                (open, held)
+            };
+            let (result, (open, held)) = futures_util::future::join(run, relay).await;
+            if open {
+                return result;
+            }
+            let said = held.iter().rev().find_map(|ev| match ev {
+                StreamEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            });
+            match (result, said) {
+                (Ok(()), None) => {
+                    let _ = tx.send(StreamEvent::ShopWorked {
+                        model: station.model.clone(),
+                        shop: shop.name.clone(),
+                    });
+                    for h in held {
+                        let _ = tx.send(h);
+                    }
+                    return Ok(());
+                }
+                (Err(e), _) => failures.push(format!("{}: {e:#}", shop.name)),
+                (Ok(()), Some(m)) => failures.push(format!("{}: {m}", shop.name)),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "no shop answered for {}. {}",
+            station.model,
+            failures.join("; ")
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn attempt(
+        &self,
+        shop: &Shop,
+        station: &Station,
+        messages: Vec<ApiMessage>,
+        previous_response_id: Option<String>,
+        engine: std::sync::Arc<std::sync::Mutex<crate::book::Engine>>,
+        tx: &UnboundedSender<StreamEvent>,
+        due: &[DueCall],
+    ) -> Result<()> {
+        match shop.protocol {
             Protocol::Demo => {
                 let prompt = messages
                     .iter()
@@ -282,28 +404,22 @@ impl Client {
                 Ok(())
             }
             Protocol::ChatCompletions => {
-                crate::api_chat::stream(self, &shop, &station, messages, engine, &tx, &due).await
+                crate::api_chat::stream(self, shop, station, messages, engine, tx, due).await
             }
             Protocol::Responses => {
                 crate::api_responses::stream(
                     self,
-                    &shop,
-                    &station,
+                    shop,
+                    station,
                     messages,
                     previous_response_id,
                     engine,
-                    &tx,
-                    &due,
+                    tx,
+                    due,
                 )
                 .await
             }
-        };
-        if let Err(e) = result {
-            let _ = tx.send(StreamEvent::Error {
-                message: format!("{:#}", e),
-            });
         }
-        let _ = tx.send(StreamEvent::Done);
     }
 }
 pub(crate) struct Boundary {

@@ -38,9 +38,11 @@ pub enum Mode {
 #[derive(Debug, Clone)]
 pub enum Row {
     SectionHeader(&'static str),
+    ActiveStation,
     Model,
     Dial(usize),
     SavedStation(usize),
+    Unstationed(String),
     UpdateAction,
     SaveAsAction,
     PrefVoice,
@@ -111,33 +113,86 @@ fn pref_rows() -> Vec<Row> {
 
 fn station_rows(app: &App) -> Vec<Row> {
     let needle = app.popup.search.to_lowercase();
-    let mut out = vec![Row::SectionHeader("active"), Row::Model];
+    let hit = |s: &str| needle.is_empty() || s.to_lowercase().contains(&needle);
+    let mut out = vec![
+        Row::SectionHeader("active station"),
+        Row::ActiveStation,
+        Row::Model,
+    ];
     for i in 0..dial_metas().len() {
         out.push(Row::Dial(i));
     }
     out.push(Row::Blank);
-    out.push(Row::SectionHeader("saved"));
+    out.push(Row::SectionHeader("saved stations"));
     for (i, st) in app.stations.iter().enumerate() {
-        if st.name == crate::station::DEMO {
-            continue;
+        if st.name != crate::station::DEMO && (hit(&st.name) || hit(&st.model)) {
+            out.push(Row::SavedStation(i));
         }
-        if !needle.is_empty() && !st.name.to_lowercase().contains(&needle) {
-            continue;
-        }
-        out.push(Row::SavedStation(i));
     }
     out.push(Row::Blank);
     if app.active_origin.is_some() && app.is_dirty() {
         out.push(Row::UpdateAction);
     }
     out.push(Row::SaveAsAction);
+    let loose: Vec<Row> = unstationed(app)
+        .into_iter()
+        .filter(|(m, _)| hit(m))
+        .map(|(m, _)| Row::Unstationed(m))
+        .collect();
+    if !loose.is_empty() {
+        out.push(Row::Blank);
+        out.push(Row::SectionHeader("unstationed models"));
+        out.extend(loose);
+    }
     out
+}
+
+pub fn unstationed(app: &App) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for shop in app.shops.iter().filter(|s| s.protocol != Protocol::Demo) {
+        for m in &shop.models {
+            if app
+                .stations
+                .iter()
+                .any(|st| st.name != crate::station::DEMO && &st.model == m)
+            {
+                continue;
+            }
+            match out.iter_mut().find(|(model, _)| model == m) {
+                Some((_, shops)) => shops.push(shop.name.clone()),
+                None => out.push((m.clone(), vec![shop.name.clone()])),
+            }
+        }
+    }
+    out
+}
+
+pub fn shops_label(app: &App, model: &str) -> String {
+    let listing = crate::shop::listing(&app.shops, model);
+    if !listing.is_empty() {
+        return listing
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    crate::shop::remembered(&app.shops, &app.memory, model)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "?".into())
+}
+
+pub fn active_shop_label(app: &App) -> String {
+    if app.active_known() {
+        app.active_shop.name.clone()
+    } else {
+        "?".into()
+    }
 }
 
 pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank))
+        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank | Row::ActiveStation))
         .map(|(i, _)| i)
         .collect()
 }
@@ -145,6 +200,7 @@ pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
 pub fn toggle(app: &mut App) {
     match app.popup.mode {
         Mode::Closed => {
+            app.memory.extend(crate::shop_memory::load());
             app.popup.mode = Mode::Browse;
             app.popup.tab = Tab::Station;
             app.popup.selected = first_selectable(app);
@@ -214,8 +270,18 @@ fn activate_row(app: &mut App, row: Row) {
     match row {
         Row::SavedStation(idx) => {
             if let Some(st) = app.stations.get(idx).cloned() {
-                load_station(app, st);
+                let origin = Some(st.name.clone());
+                load_station(app, st, origin);
             }
+        }
+        Row::Unstationed(model) => {
+            let st = Station {
+                name: crate::station::UNTITLED.into(),
+                model,
+                dials: app.active_station.dials,
+                voice: app.active_station.voice.clone(),
+            };
+            load_station(app, st, None);
         }
         Row::UpdateAction => {
             commit_update(app);
@@ -393,20 +459,48 @@ pub fn commit_update(app: &mut App) {
     app.note(format!("updated station '{}'", origin));
 }
 
-fn load_station(app: &mut App, st: Station) {
-    let shop = crate::shop::find_for_model(&app.shops, &st.model).cloned();
-    if let Some(shop) = shop {
-        let name = st.name.clone();
-        app.active_origin = Some(name.clone());
-        app.active_station = st;
-        app.active_shop = shop;
-        app.last_response_id = None;
-        app.note(format!("loaded station '{}'", name));
+fn load_station(app: &mut App, st: Station, origin: Option<String>) {
+    match crate::shop::known(&app.shops, &app.memory, &st.model).cloned() {
+        Some(shop) => apply_station(app, st, origin, shop),
+        None => {
+            app.note(format!("looking for {} on the shops…", st.model));
+            app.shop_check = Some((st, origin));
+        }
+    }
+}
+
+fn apply_station(app: &mut App, st: Station, origin: Option<String>, shop: Shop) {
+    let label = match &origin {
+        Some(name) => format!("loaded station '{name}'"),
+        None => format!("loaded {}", st.model),
+    };
+    app.active_origin = origin;
+    app.active_station = st;
+    app.active_shop = shop;
+    app.last_response_id = None;
+    if app.active_known() {
+        app.note(label);
     } else {
-        app.note(format!(
-            "can't load '{}': no shop runs '{}'",
+        app.note_undiscovered();
+    }
+}
+
+pub fn finish_shop_check(app: &mut App, shops: Vec<Shop>, st: Station, origin: Option<String>) {
+    for fresh in shops {
+        if app.active_shop.name == fresh.name {
+            app.active_shop.models = fresh.models.clone();
+        }
+        if let Some(s) = app.shops.iter_mut().find(|s| s.name == fresh.name) {
+            s.models = fresh.models;
+        }
+    }
+    let current = app.active_shop.name.clone();
+    match crate::shop::choose(&app.shops, &app.memory, &st.model, &current) {
+        Some(shop) => apply_station(app, st, origin, shop),
+        None => app.note(format!(
+            "can't load '{}': no shop's models list has {}",
             st.name, st.model
-        ));
+        )),
     }
 }
 
@@ -620,7 +714,7 @@ fn retarget_search(app: &mut App) {
         return;
     }
     for (i, row) in station_rows(app).iter().enumerate() {
-        if matches!(row, Row::SavedStation(_)) {
+        if matches!(row, Row::SavedStation(_) | Row::Unstationed(_)) {
             app.popup.selected = i;
             return;
         }
