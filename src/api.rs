@@ -183,6 +183,15 @@ impl Client {
             if let Some(proxy) = Self::read_proxy_settings() {
                 builder = builder.proxy(proxy);
             }
+            for var in &["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"] {
+                if let Ok(path) = std::env::var(var) {
+                    if let Ok(pem) = std::fs::read(&path) {
+                        if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+                            builder = builder.add_root_certificate(cert);
+                        }
+                    }
+                }
+            }
             builder
         };
         #[cfg(target_arch = "wasm32")]

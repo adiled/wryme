@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+import urllib.request
+
+OPENAI_COMMIT = "26a299159673d20d5cf0faf10e691beed3fed52d"
+OPENRESPONSES_COMMIT = "8907bc3b7c4300ff5c21fd647cfde9929243afa1"
+
+OPENAI_URL = f"https://raw.githubusercontent.com/openai/openai-openapi/{OPENAI_COMMIT}/openapi.json"
+OPENRESPONSES_URL = f"https://raw.githubusercontent.com/openresponses/openresponses/{OPENRESPONSES_COMMIT}/public/openapi/openapi.json"
+
+OPENAI_ROOTS = [
+    "CreateResponse",
+    "Response",
+    "ResponseStreamEvent",
+    "CreateChatCompletionRequest",
+    "CreateChatCompletionResponse",
+    "CreateChatCompletionStreamResponse",
+]
+
+HERE = pathlib.Path(__file__).resolve().parent
+
+
+def fetch(url):
+    with urllib.request.urlopen(url) as reply:
+        return json.load(reply)
+
+
+def refs_in(node):
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+            yield ref.rsplit("/", 1)[1]
+        for value in node.values():
+            yield from refs_in(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from refs_in(value)
+
+
+def closure(schemas, roots):
+    kept, waiting = set(), list(roots)
+    while waiting:
+        name = waiting.pop()
+        if name in kept:
+            continue
+        kept.add(name)
+        waiting.extend(refs_in(schemas[name]))
+    return {name: schemas[name] for name in sorted(kept)}
+
+
+def write(name, document):
+    path = HERE / name
+    path.write_text(json.dumps(document, indent=1, sort_keys=True) + "\n")
+    print(f"{path.name}: {len(document['components']['schemas'])} schemas")
+
+
+def main():
+    openai = fetch(OPENAI_URL)
+    write("openai.json", {
+        "x-source": OPENAI_URL,
+        "components": {"schemas": closure(openai["components"]["schemas"], OPENAI_ROOTS)},
+    })
+    openresponses = fetch(OPENRESPONSES_URL)
+    write("openresponses.json", {
+        "x-source": OPENRESPONSES_URL,
+        "components": {"schemas": openresponses["components"]["schemas"]},
+    })
+
+
+if __name__ == "__main__":
+    sys.exit(main())
