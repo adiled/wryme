@@ -21,6 +21,7 @@ pub mod reservoir;
 pub mod select;
 pub mod shell_env;
 pub mod shop;
+pub mod shop_memory;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod spec;
 pub mod station;
@@ -56,17 +57,15 @@ pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
     let mut shops = shop::load_all().context("loading shops")?;
     shop::discover_all(&mut shops).await;
     let stations = station::load_all().context("loading stations")?;
-    let (active, active_origin) = station::pick(&stations, &shops, station_arg)?;
+    let memory = shop_memory::load();
+    let (active, active_origin) = station::pick(&stations, &shops, &memory, station_arg)?;
 
-    let active_shop = shop::find_for_model(&shops, &active.model)
-        .cloned()
-        .with_context(|| {
-            format!(
-                "station '{}' wants model '{}' but no shop advertises it. \
-                 add this model to a shop's `models = [...]` list in shops.toml.",
-                active.name, active.model
-            )
-        })?;
+    let active_shop = shop::choose(&shops, &memory, &active.model, "").with_context(|| {
+        format!(
+            "station '{}' wants model '{}' but every shop's `models = [...]` list in shops.toml leaves it out.",
+            active.name, active.model
+        )
+    })?;
 
     let client = Client::new().context("building api client")?;
 
@@ -104,7 +103,9 @@ where
         active_shop,
         active_origin,
     );
-    if let Some(note) = station::unavailable_note(&app.stations, &app.shops) {
+    if !app.active_known() {
+        app.note_undiscovered();
+    } else if let Some(note) = station::unavailable_note(&app.stations, &app.shops) {
         app.note(note);
     }
     let mut input = Input::new();
@@ -193,14 +194,14 @@ where
                     app.in_flight = true;
                     let msgs = app.api_messages();
                     let prev_id = app.last_response_id.clone();
-                    let shop = app.active_shop.clone();
+                    let shops = app.turn_shops();
                     let station = app.active_station.clone();
                     let client = client.clone();
                     let engine = app.engine.clone();
                     let tx = tx.clone();
                     in_flight_task = Some(platform::spawn(async move {
                         client
-                            .stream_completion(shop, station, msgs, prev_id, engine, tx)
+                            .stream_completion(shops, station, msgs, prev_id, engine, tx)
                             .await;
                     }));
                 }
@@ -255,6 +256,15 @@ fn handle_stream_event(
         }
         StreamEvent::ResponseId { id } => {
             app.last_response_id = Some(id);
+        }
+        StreamEvent::ShopWorked { model, shop } => app.shop_worked(&model, &shop),
+        StreamEvent::ShopsChecked {
+            shops,
+            station,
+            origin,
+        } => {
+            app.shop_check_task = None;
+            crate::popup::finish_shop_check(app, shops, station, origin);
         }
         StreamEvent::WindowUnsupported { shop } => {
             for s in app.shops.iter_mut() {
@@ -322,7 +332,7 @@ fn handle_stream_event(
 async fn one_shot(
     client: &Client,
     station: &station::Station,
-    shop: &shop::Shop,
+    shops: Vec<shop::Shop>,
     system: Option<&str>,
     prompt: &str,
 ) -> Result<()> {
@@ -351,12 +361,11 @@ async fn one_shot(
     ));
     let (tx, mut rx) = mpsc::unbounded_channel::<api::StreamEvent>();
     let task = platform::spawn({
-        let shop = shop.clone();
         let station = station.clone();
         let client = client.clone();
         async move {
             client
-                .stream_completion(shop, station, messages, None, engine, tx)
+                .stream_completion(shops, station, messages, None, engine, tx)
                 .await;
         }
     });
@@ -367,6 +376,7 @@ async fn one_shot(
     while let Some(ev) = rx.recv().await {
         match ev {
             api::StreamEvent::Delta { text } => out.push_str(&text),
+            api::StreamEvent::ShopWorked { model, shop } => shop_memory::remember(&model, &shop),
             api::StreamEvent::Error { message } => err = Some(message),
             api::StreamEvent::Done => {
                 done = true;
@@ -425,7 +435,7 @@ async fn native_main() -> Result<()> {
         return one_shot(
             &boot.client,
             &boot.active_station,
-            &boot.active_shop,
+            shop::turn_shops(&boot.shops, &boot.active_shop, &boot.active_station.model),
             args.system.as_deref(),
             prompt,
         )

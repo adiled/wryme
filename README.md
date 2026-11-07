@@ -108,6 +108,8 @@ With just one shop and station configured, you can simply `wme` in, and ask the 
 💡 **For agents:** The `models` list works as a filter: if shop auto discovery doesn't work, this list is used; And if the discovery does work, it limits down to configured list. List them newest-first; if you launch wryme without picking a station, it will use
 the first model in the first shop.
 
+A shop without a `models` list takes any model. If no shop lists a station's model, wryme checks every shop again; if still nobody lists it, the station loads anyway with a note, and the next turn tries each shop that may take it until one answers. The one that answered is remembered in `$XDG_STATE_HOME/wryme/shop-memory.json` (default `~/.local/state/wryme/`).
+
 ## Make your stations
 
 Make the file `~/.config/wryme/stations.toml`. Each station is a model

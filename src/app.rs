@@ -86,6 +86,9 @@ pub struct App {
     pub active_station: Station,
     pub active_shop: Shop,
     pub active_origin: Option<String>,
+    pub memory: crate::shop_memory::Memory,
+    pub shop_check: Option<(Station, Option<String>)>,
+    pub shop_check_task: Option<crate::platform::Task>,
     pub popup: Popup,
     pub engine: Arc<Mutex<book::Engine>>,
     pub reservoir: Arc<Mutex<Reservoir>>,
@@ -172,6 +175,9 @@ impl App {
             active_station,
             active_shop,
             active_origin,
+            memory: crate::shop_memory::load(),
+            shop_check: None,
+            shop_check_task: None,
             popup: Popup::default(),
             engine: Arc::new(Mutex::new(
                 book::open_engine(&book_dir()).expect("open book"),
@@ -218,6 +224,41 @@ impl App {
 
     pub fn note(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+    }
+
+    pub fn turn_shops(&self) -> Vec<Shop> {
+        crate::shop::turn_shops(&self.shops, &self.active_shop, &self.active_station.model)
+    }
+
+    pub fn active_known(&self) -> bool {
+        let model = &self.active_station.model;
+        self.active_shop.protocol == crate::shop::Protocol::Demo
+            || self.active_shop.lists(model)
+            || self.memory.get(model) == Some(&self.active_shop.name)
+    }
+
+    pub fn note_undiscovered(&mut self) {
+        let model = self.active_station.model.clone();
+        self.note(format!(
+            "{model} couldn't be discovered on any shop, you may get an error"
+        ));
+    }
+
+    pub fn shop_worked(&mut self, model: &str, shop: &str) {
+        if self.active_station.model == model
+            && self.active_shop.name != shop
+            && let Some(s) = self.shops.iter().find(|s| s.name == shop)
+        {
+            self.active_shop = s.clone();
+            self.last_response_id = None;
+        }
+        if self.active_shop.lists(model) {
+            return;
+        }
+        if self.memory.get(model).map(String::as_str) != Some(shop) {
+            self.memory.insert(model.to_string(), shop.to_string());
+            crate::shop_memory::remember(model, shop);
+        }
     }
 
     pub fn stop_voice(&mut self) {
