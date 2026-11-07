@@ -146,13 +146,18 @@ struct Seed {
 }
 
 fn seed(conv: &[&ApiMessage], wire: &crate::api::Wire, due: &[crate::api::DueCall]) -> Seed {
-    let fresh = conv
-        .iter()
-        .rev()
-        .take(wire.tail_n)
-        .take_while(|m| m.role == "user")
-        .count();
-    let split = conv.len() - fresh;
+    let mut users = 0;
+    let mut split = conv.len();
+    for (i, m) in conv.iter().enumerate().rev() {
+        match m.role.as_str() {
+            "system" => split = i,
+            "user" if users < wire.tail_n => {
+                users += 1;
+                split = i;
+            }
+            _ => break,
+        }
+    }
     let tail: Vec<serde_json::Value> = conv[split..].iter().flat_map(|m| json_msg(m)).collect();
     let (mut input, mut log) = match &wire.prior {
         Some(prior) => (replayable(prior), prior.clone()),
@@ -210,7 +215,7 @@ pub(crate) async fn stream(
 ) -> Result<()> {
     let system = instructions_of(&messages);
     let instructions = system.as_deref();
-    let conv: Vec<&ApiMessage> = messages.iter().filter(|m| m.role != "system").collect();
+    let conv: Vec<&ApiMessage> = messages.iter().skip_while(|m| m.role == "system").collect();
     let seed = seed(&conv, &wire, due);
     let mut log = Vec::new();
     let r = stream_logged(
@@ -554,7 +559,8 @@ async fn stream_full(
 fn instructions_of(messages: &[ApiMessage]) -> Option<String> {
     let said: Vec<&str> = messages
         .iter()
-        .filter(|m| m.role == "system" && !m.content.is_empty())
+        .take_while(|m| m.role == "system")
+        .filter(|m| !m.content.is_empty())
         .map(|m| m.content.as_str())
         .collect();
     (!said.is_empty()).then(|| said.join("\n\n"))
@@ -2084,5 +2090,36 @@ mod tests {
         assert_eq!(sealed, ["r1"]);
         assert_eq!(out.last(), Some(&user));
         assert_eq!(replayable(&log[..3]), log[..3]);
+    }
+
+    #[test]
+    fn a_prod_rides_at_the_tail_not_in_instructions() {
+        let msg = |role: &str, content: &str| ApiMessage {
+            content: content.into(),
+            ..api_msg(role)
+        };
+        let messages = vec![
+            msg("system", "be brief"),
+            msg("user", "hi"),
+            msg("assistant", "hello"),
+            msg("user", "again"),
+            msg("system", "[bookkeeping] deem it"),
+        ];
+        assert_eq!(instructions_of(&messages).as_deref(), Some("be brief"));
+        let conv: Vec<&ApiMessage> = messages.iter().skip_while(|m| m.role == "system").collect();
+        let prior = vec![json!({ "type": "message", "role": "user", "content": "hi" })];
+        let wire = crate::api::Wire {
+            prior: Some(prior.clone()),
+            tail_n: 1,
+        };
+        let seed = seed(&conv, &wire, &[]);
+        let roles: Vec<&str> = seed
+            .tail
+            .iter()
+            .map(|v| v["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "system"]);
+        assert_eq!(seed.input[..1], prior[..]);
+        assert_eq!(seed.log.last().unwrap()["content"], "[bookkeeping] deem it");
     }
 }
