@@ -73,10 +73,6 @@ pub struct App {
     pub view_mode: ViewMode,
     pub last_viewport_h: usize,
     pub last_response_id: Option<String>,
-    /// Verbatim wire items of every finished turn, for the protocol of the
-    /// active shop. `None` = not trustworthy (other protocol, failed turn,
-    /// switch); the next turn rebuilds history from `messages` instead.
-    /// `messages` is presentation only and can't reproduce this.
     pub wire: Option<Vec<serde_json::Value>>,
     wire_upto: usize,
     wire_pending: Option<Vec<serde_json::Value>>,
@@ -577,19 +573,15 @@ impl App {
         }
     }
 
-    /// Drop the wire log; the next turn rebuilds from `messages`.
     pub fn forget_wire(&mut self) {
         self.wire = None;
         self.wire_pending = None;
     }
 
-    /// A turn handed back its full wire log; it's adopted when the turn ends.
     pub fn hold_wire(&mut self, items: Vec<serde_json::Value>) {
         self.wire_pending = Some(items);
     }
 
-    /// Turn ended: adopt its log, or forget ours if it sent none
-    /// (other protocol, error, abort).
     pub fn settle_wire(&mut self) {
         match self.wire_pending.take() {
             Some(items) => {
@@ -600,7 +592,6 @@ impl App {
         }
     }
 
-    /// The wire log for the next turn, and how many user messages are new.
     pub fn wire_for_turn(&self) -> crate::api::Wire {
         let fresh = |m: &&Message| m.role == Role::User && m.guest.is_none() && !m.streaming;
         let tail_n = match &self.wire {

@@ -138,10 +138,6 @@ fn supports_multi_agent(model: &str) -> bool {
     num.parse::<f32>().is_ok_and(|v| v >= MULTI_AGENT_MIN)
 }
 
-/// What a turn starts from: `input` is what a full replay sends (prior log
-/// trimmed by the tinker dials, then the new tail), `tail` is only the new
-/// user items (what a warm round sends), `log` is the untrimmed record the
-/// turn appends to and hands back as `StreamEvent::Wire`.
 struct Seed {
     input: Vec<serde_json::Value>,
     tail: Vec<serde_json::Value>,
@@ -187,8 +183,6 @@ fn seed(
     }
 }
 
-/// Tinker keep/clip over raw items: drop the oldest call/output pairs
-/// together (matched by `call_id`) and clip what outputs remain.
 fn trimmed(
     items: &[serde_json::Value],
     keep: crate::station::TinkerVal,
@@ -223,8 +217,6 @@ fn trimmed(
             !((k == "function_call" || k == "function_call_output") && gone.contains(&call_id(v)))
         })
         .collect();
-    // a reasoning item must be followed by what it produced; pruned calls
-    // and turns cut short leave it stranded, and strict providers 400 on it
     let produced = |v: Option<&&serde_json::Value>| match v {
         None => false,
         Some(v) => {

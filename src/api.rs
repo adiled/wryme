@@ -183,9 +183,6 @@ pub enum StreamEvent {
     },
 }
 
-/// The runtime wire log handed to a turn: the verbatim items of every prior
-/// turn (`prior`, `None` when it can't be trusted and history must be rebuilt
-/// from messages), and how many trailing user messages are new since then.
 #[derive(Debug, Clone, Default)]
 pub struct Wire {
     pub prior: Option<Vec<serde_json::Value>>,
@@ -359,7 +356,6 @@ impl Client {
             } else {
                 None
             };
-            // another provider can't read this one's items (ids, sealed reasoning)
             let wire = if i == 0 {
                 wire.clone()
             } else {
