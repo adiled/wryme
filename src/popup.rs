@@ -478,6 +478,7 @@ fn apply_station(app: &mut App, st: Station, origin: Option<String>, shop: Shop)
     app.active_station = st;
     app.active_shop = shop;
     app.last_response_id = None;
+    app.forget_wire();
     if app.active_known() {
         app.note(label);
     } else {
@@ -520,6 +521,7 @@ fn cycle_model(app: &mut App, delta: i32) {
         app.active_station.model = next_model;
         app.active_shop = shop;
         app.last_response_id = None;
+        app.forget_wire();
     }
 }
 

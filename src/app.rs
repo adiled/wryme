@@ -73,6 +73,9 @@ pub struct App {
     pub view_mode: ViewMode,
     pub last_viewport_h: usize,
     pub last_response_id: Option<String>,
+    pub wire: Option<Vec<serde_json::Value>>,
+    wire_upto: usize,
+    wire_pending: Option<Vec<serde_json::Value>>,
     pub usage_ctx: u64,
     pub usage_out: u64,
     pub voice_on: bool,
@@ -162,6 +165,9 @@ impl App {
             view_mode: ViewMode::Page,
             last_viewport_h: 0,
             last_response_id: None,
+            wire: Some(Vec::new()),
+            wire_upto: 0,
+            wire_pending: None,
             usage_ctx: 0,
             usage_out: 0,
             voice_on: false,
@@ -220,6 +226,7 @@ impl App {
         self.accent = crate::config::accent_pref();
         self.nametags = crate::config::nametags_pref();
         self.last_response_id = None;
+        self.forget_wire();
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
@@ -251,6 +258,7 @@ impl App {
         {
             self.active_shop = s.clone();
             self.last_response_id = None;
+            self.forget_wire();
         }
         if self.active_shop.lists(model) {
             return;
@@ -565,6 +573,48 @@ impl App {
         }
     }
 
+    pub fn forget_wire(&mut self) {
+        self.wire = None;
+        self.wire_pending = None;
+    }
+
+    pub fn hold_wire(&mut self, items: Vec<serde_json::Value>) {
+        self.wire_pending = Some(items);
+    }
+
+    pub fn settle_wire(&mut self) {
+        match self.wire_pending.take() {
+            Some(items) => {
+                self.wire = Some(items);
+                self.wire_upto = self.messages.len();
+            }
+            None => self.wire = None,
+        }
+    }
+
+    pub fn wire_for_turn(&self) -> crate::api::Wire {
+        let fresh = |m: &&Message| m.role == Role::User && m.guest.is_none() && !m.streaming;
+        let tail_n = match &self.wire {
+            Some(_) => self
+                .messages
+                .iter()
+                .skip(self.wire_upto)
+                .filter(fresh)
+                .count(),
+            None => self
+                .messages
+                .iter()
+                .rev()
+                .filter(|m| !m.streaming && m.guest.is_none())
+                .take_while(|m| m.role == Role::User)
+                .count(),
+        };
+        crate::api::Wire {
+            prior: self.wire.clone(),
+            tail_n,
+        }
+    }
+
     pub fn api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if let Some(sys) = &self.system {
@@ -680,10 +730,51 @@ mod tests {
             Shop::demo(),
             None,
         );
-        let dir = std::env::temp_dir().join(format!("wryme_app_{}", std::process::id()));
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("wryme_app_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
         app
+    }
+
+    #[test]
+    fn a_turns_wire_log_is_kept_and_only_new_user_turns_are_tail() {
+        let mut app = test_app();
+        app.push_user("hi".into(), vec![]);
+        assert_eq!(app.wire_for_turn().tail_n, 1);
+        app.begin_assistant();
+        app.hold_wire(vec![
+            serde_json::json!({ "type": "reasoning", "encrypted_content": "gAAAA" }),
+        ]);
+        app.settle_wire();
+        assert_eq!(app.wire.as_ref().map(Vec::len), Some(1));
+        assert_eq!(app.wire_for_turn().tail_n, 0);
+        app.push_user("again".into(), vec![]);
+        let wire = app.wire_for_turn();
+        assert_eq!(wire.tail_n, 1);
+        assert_eq!(wire.prior.unwrap()[0]["encrypted_content"], "gAAAA");
+    }
+
+    #[test]
+    fn a_turn_without_a_wire_log_or_a_switch_falls_back_to_messages() {
+        let mut app = test_app();
+        app.push_user("hi".into(), vec![]);
+        app.begin_assistant();
+        app.settle_wire();
+        assert!(
+            app.wire.is_none(),
+            "chat/demo/error turns leave no trustworthy log"
+        );
+        app.push_user("again".into(), vec![]);
+        assert!(app.wire_for_turn().prior.is_none());
+        app.hold_wire(vec![]);
+        app.settle_wire();
+        assert!(app.wire.is_some(), "a rebuilt turn re-seeds the log");
+        app.hold_wire(vec![serde_json::json!({})]);
+        app.forget_wire();
+        app.settle_wire();
+        assert!(app.wire.is_none(), "a switch drops even a pending log");
     }
 
     #[test]
