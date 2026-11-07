@@ -21,7 +21,6 @@ model = "canned replies"
 # boldness = 0.7
 patience = "steady"
 # brainy = "murmur"
-tinker_keep = "all"
 tinker_clip = "all"
 tinker_depth = "all"
 # voice = "Tara"

@@ -76,11 +76,6 @@ pub fn dial_metas() -> Vec<DialMeta> {
             cycle: |d, delta| cycle_brainy_dials(d, delta),
         },
         DialMeta {
-            name: "tinker_keep",
-            label: |d| d.tinker_keep.label(),
-            cycle: |d, delta| cycle_tinker_keep_dials(d, delta),
-        },
-        DialMeta {
             name: "tinker_clip",
             label: |d| d.tinker_clip.label(),
             cycle: |d, delta| cycle_tinker_clip_dials(d, delta),
@@ -370,7 +365,6 @@ pub fn commit_dial_edit(app: &mut App) {
     };
     if let Some(meta) = dial_metas().get(idx) {
         match meta.name {
-            "tinker_keep" => app.active_station.dials.tinker_keep = val,
             "tinker_clip" => app.active_station.dials.tinker_clip = val,
             "tinker_depth" => app.active_station.dials.tinker_depth = val,
             _ => {}
@@ -573,16 +567,6 @@ pub fn brainy_label(v: Option<Brainy>) -> &'static str {
     }
 }
 
-const TINKER_KEEP_PRESETS: &[crate::station::TinkerVal] = &[
-    crate::station::TinkerVal::All,
-    crate::station::TinkerVal::Count(0),
-    crate::station::TinkerVal::Count(1),
-    crate::station::TinkerVal::Count(3),
-    crate::station::TinkerVal::Count(8),
-    crate::station::TinkerVal::Count(16),
-    crate::station::TinkerVal::Percent(50),
-];
-
 const TINKER_CLIP_PRESETS: &[crate::station::TinkerVal] = &[
     crate::station::TinkerVal::All,
     crate::station::TinkerVal::Count(0),
@@ -649,16 +633,6 @@ pub fn cycle_brainy_dials(dials: &mut Dials, delta: i32) {
     let n = states.len() as i32;
     let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
     dials.brainy = states[next];
-}
-
-pub fn cycle_tinker_keep_dials(dials: &mut Dials, delta: i32) {
-    let cur = TINKER_KEEP_PRESETS
-        .iter()
-        .position(|s| *s == dials.tinker_keep)
-        .unwrap_or(0);
-    let n = TINKER_KEEP_PRESETS.len() as i32;
-    let next = ((cur as i32 + delta).rem_euclid(n)) as usize;
-    dials.tinker_keep = TINKER_KEEP_PRESETS[next];
 }
 
 pub fn cycle_tinker_clip_dials(dials: &mut Dials, delta: i32) {

@@ -679,37 +679,12 @@ impl App {
             out.append(&mut results);
         }
         let clip = self.active_station.dials.tinker_clip;
-        let total_pairs = out.iter().filter(|m| m.role == "tool").count();
-        let keep_n = self.active_station.dials.tinker_keep.keep_n(total_pairs);
-        if keep_n.is_some() || clip != crate::station::TinkerVal::All {
-            if let Some(n) = keep_n
-                && total_pairs > n
-            {
-                let mut to_drop = total_pairs - n;
-                let mut pruned: Vec<ApiMessage> = Vec::with_capacity(out.len());
-                for msg in out {
-                    if msg.role == "tool" && to_drop > 0 {
-                        to_drop -= 1;
-                        if let Some(last) = pruned.last_mut()
-                            && last.role == "assistant"
-                            && !last.tool_calls.is_empty()
-                        {
-                            let id = &msg.tool_call_id;
-                            last.tool_calls.retain(|c| c.id != *id);
-                        }
-                        continue;
-                    }
-                    pruned.push(msg);
-                }
-                out = pruned;
-            }
-            if clip != crate::station::TinkerVal::All {
-                for m in &mut out {
-                    if m.role == "tool" {
-                        let clipped = clip.clip(&m.content);
-                        m.content = clipped.clone();
-                        m.tool_result = clipped;
-                    }
+        if clip != crate::station::TinkerVal::All {
+            for m in &mut out {
+                if m.role == "tool" {
+                    let clipped = clip.clip(&m.content);
+                    m.content = clipped.clone();
+                    m.tool_result = clipped;
                 }
             }
         }
