@@ -226,8 +226,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             .ok()
             .map(|r| r.static_figure())
             .unwrap_or(0);
-        let ht =
-            (heart_score as f64 / crate::reservoir::STATIC_BOT_SCORE as f64).clamp(0.0, 1.0);
+        let ht = heart_tilt(heart_score);
         let heart_color = hue_lit(120.0 * (1.0 - ht));
         pieces.push(Span::styled(format!(" {HEART_MARK} "), heart_color));
     }
@@ -370,6 +369,13 @@ fn is_error_status(s: &str) -> bool {
         || s.starts_with("stopped:")
         || s.starts_with("save failed")
         || s.starts_with("update failed")
+}
+
+#[cfg(feature = "reservoir")]
+fn heart_tilt(score: u32) -> f64 {
+    const NEUTRAL: f64 = 50.0;
+    let top = crate::reservoir::STATIC_BOT_SCORE as f64;
+    ((score as f64 - NEUTRAL) / (top - NEUTRAL)).clamp(0.0, 1.0)
 }
 
 #[cfg(feature = "reservoir")]
