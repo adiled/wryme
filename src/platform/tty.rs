@@ -4,19 +4,6 @@ use std::time::Duration;
 
 const GAP: Duration = Duration::from_millis(50);
 
-pub struct ButtonMouse;
-
-impl crossterm::Command for ButtonMouse {
-    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
-        f.write_str("\x1B[?1000h\x1B[?1002h\x1B[?1006h")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        crossterm::Command::execute_winapi(&crossterm::event::EnableMouseCapture)
-    }
-}
-
 pub fn rejoin<S>(events: S) -> impl Stream<Item = Event> + Unpin
 where
     S: Stream<Item = Event> + Unpin,
