@@ -620,12 +620,9 @@ impl App {
         if let Some(sys) = &self.system {
             out.push(system_message(sys.clone()));
         }
-        if let Ok(mut engine) = self.engine.lock() {
+        if let Ok(engine) = self.engine.lock() {
             for preamble in engine.preamble() {
                 out.push(system_message(preamble));
-            }
-            if let Some(prod) = engine.take_prod() {
-                out.push(system_message(prod));
             }
         }
         let mut last_asst_turn: Option<u64> = None;
@@ -687,6 +684,11 @@ impl App {
                     m.tool_result = clipped;
                 }
             }
+        }
+        if let Ok(mut engine) = self.engine.lock()
+            && let Some(prod) = engine.take_prod()
+        {
+            out.push(system_message(prod));
         }
         out
     }
