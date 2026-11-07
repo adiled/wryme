@@ -8,7 +8,7 @@ repository = "https://github.com/adiled/wryme"
 homepage = "https://github.com/adiled/wryme"
 documentation = "https://github.com/adiled/wryme#readme"
 readme = "README.md"
-exclude = ["dist/", "desktop/", "target/", "web/", "hive/"]
+exclude = ["dist/", "desktop/", "target/", "web/", "hive/", "spec/"]
 keywords = ["tui", "terminal", "chat", "ai", "agent"]
 categories = ["command-line-interface"]
 
@@ -63,6 +63,9 @@ parquet = "53"
 # ---------------------------------------------------------------------------
 # wasm: the browser build (own ratatui backend, DOM input, fetch transport)
 # ---------------------------------------------------------------------------
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+jsonschema = { version = "0.60", default-features = false }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratatui = { version = "0.30", default-features = false, features = ["all-widgets", "macros", "layout-cache", "underline-color"] }
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }

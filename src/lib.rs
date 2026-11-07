@@ -21,6 +21,8 @@ pub mod reservoir;
 pub mod select;
 pub mod shell_env;
 pub mod shop;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod spec;
 pub mod station;
 pub mod station_save;
 pub mod tools;
@@ -440,7 +442,9 @@ async fn native_main() -> Result<()> {
     let mut terminal = setup_terminal().context("entering tui")?;
     install_panic_hook();
 
-    let events = EventStream::new().filter_map(|r| futures_util::future::ready(r.ok()));
+    let events = crate::platform::tty::rejoin(
+        EventStream::new().filter_map(|r| futures_util::future::ready(r.ok())),
+    );
     let result = run(
         &mut terminal,
         boot.client,
