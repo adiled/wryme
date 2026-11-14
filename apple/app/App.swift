@@ -3,7 +3,12 @@ import SwiftUI
 @main
 struct WrymeApp: App {
     init() {
+        #if os(macOS)
+        Keys.install()
         Core.shared.start()
+        #else
+        Folder.boot()
+        #endif
     }
 
     var body: some Scene {
@@ -13,12 +18,7 @@ struct WrymeApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 640)
-        .commands {
-            CommandGroup(replacing: .appSettings) {
-                Button("Settings…") { Core.shared.key("s", ctrl: true) }
-                    .keyboardShortcut(",")
-            }
-        }
+        .commands { Menus(core: Core.shared) }
         #else
         WindowGroup {
             Root()

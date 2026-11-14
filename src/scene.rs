@@ -1,16 +1,111 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use serde_json::{Value, json};
+use serde::{Serialize, Serializer};
 
+use crate::action::Scope;
 use crate::app::{App, Message, Phase, Role, ViewMode};
+use crate::config::{NametagMode, Typeface};
 use crate::popup::{self, Tab};
 use crate::shop::Protocol;
 
+pub const BRAIN_MARK: &str = "✶";
 pub const HEART_MARK: &str = "\u{2764}\u{FE0E}";
+pub const USER_MARK: &str = "\u{23F9}\u{FE0E}";
 pub const DOT: &str = " • ";
+pub const AWAITING: &str = "awaiting";
+
+#[derive(Serialize)]
+pub struct Scene {
+    #[serde(serialize_with = "ink")]
+    pub accent: Color,
+    pub nametags: NametagMode,
+    pub font: Typeface,
+    pub view: ViewMode,
+    pub scope: Scope,
+    pub turn: u64,
+    pub marks: Marks,
+    pub bar: Bar,
+    pub bubbles: Vec<Bubble>,
+    pub status: Status,
+    pub error: Option<String>,
+    pub sheet: Option<Sheet>,
+}
+
+#[derive(Serialize)]
+pub struct Marks {
+    pub brain: &'static str,
+    pub heart: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct Bar {
+    pub state: &'static str,
+    pub esc: &'static str,
+    pub busy: bool,
+    pub tool: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Bubble {
+    pub id: String,
+    pub user: bool,
+    pub name: String,
+    pub guest: Option<String>,
+    #[serde(serialize_with = "ink")]
+    pub ink: Color,
+    pub doing: Option<&'static str>,
+    pub mark: &'static str,
+    pub blinks: bool,
+    pub thinking_live: bool,
+    pub tool: Option<String>,
+    pub waiting: bool,
+    pub live: bool,
+    pub time: String,
+    pub images: Vec<String>,
+    pub orphan: bool,
+    #[serde(serialize_with = "rows")]
+    pub reply: Vec<Line<'static>>,
+    #[serde(serialize_with = "rows")]
+    pub brain: Vec<Line<'static>>,
+    #[serde(serialize_with = "rows")]
+    pub heart: Vec<Line<'static>>,
+}
+
+#[derive(Serialize)]
+pub struct Status {
+    #[serde(serialize_with = "runs")]
+    pub left: Vec<Span<'static>>,
+    #[serde(serialize_with = "run")]
+    pub note: Span<'static>,
+    #[serde(serialize_with = "runs")]
+    pub right: Vec<Span<'static>>,
+}
+
+#[derive(Serialize)]
+pub struct Sheet {
+    pub tabs: Vec<Pill>,
+    #[serde(serialize_with = "rows")]
+    pub lines: Vec<Line<'static>>,
+    pub picks: Vec<usize>,
+    pub selected: Option<usize>,
+    pub hint: &'static str,
+    pub field: Option<Field>,
+}
+
+#[derive(Serialize)]
+pub struct Pill {
+    pub label: &'static str,
+    pub on: bool,
+}
+
+#[derive(Serialize)]
+pub struct Field {
+    pub label: String,
+    pub text: String,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Activity {
+enum Activity {
     Idle,
     Streaming,
     Writing,
@@ -22,7 +117,7 @@ pub enum Activity {
 }
 
 impl Activity {
-    pub fn of(msg: &Message) -> Self {
+    fn of(msg: &Message) -> Self {
         if !msg.streaming {
             return Self::Idle;
         }
@@ -40,7 +135,7 @@ impl Activity {
         }
     }
 
-    pub fn label(self) -> Option<&'static str> {
+    fn doing(self) -> Option<&'static str> {
         match self {
             Self::Writing => Some("writing…"),
             Self::Thinking => Some("thinking…"),
@@ -52,16 +147,17 @@ impl Activity {
     }
 }
 
-pub struct Bubble {
-    pub name: String,
-    pub activity: Activity,
-    pub tool: Option<String>,
-    pub images: Vec<String>,
-    pub reply: Vec<Line<'static>>,
-    pub replied: bool,
-    pub orphan: bool,
-    pub brain: Vec<Line<'static>>,
-    pub heart: Vec<Line<'static>>,
+fn mark(msg: &Message) -> (&'static str, bool) {
+    if msg.role == Role::User {
+        return (USER_MARK, false);
+    }
+    match Activity::of(msg) {
+        Activity::Idle => ("⌃", false),
+        Activity::Thinking => ("✦", true),
+        Activity::Reminiscing => ("಄", false),
+        Activity::Tinkering | Activity::Hidden | Activity::Communing => ("‣", true),
+        Activity::Writing | Activity::Streaming => ("⬩", true),
+    }
 }
 
 pub fn dim() -> Style {
@@ -93,37 +189,54 @@ fn thought(text: &str, live: bool) -> Vec<Line<'static>> {
     plain(text, dim().add_modifier(Modifier::ITALIC), live)
 }
 
-pub fn bubble(msg: &Message) -> Bubble {
+pub fn bubble(id: String, msg: &Message, thinking_live: bool) -> Bubble {
     let replied = !msg.content.is_empty();
     let brained = !msg.brain.is_empty();
     let hearted = !msg.heart.is_empty();
     let live = msg.streaming;
-    let (reply, images) = match (replied, msg.role) {
-        (false, _) => (Vec::new(), Vec::new()),
-        (true, Role::Assistant) => (crate::md::render(&msg.content, live), Vec::new()),
-        (true, Role::User) => (plain(&msg.content, Style::default(), live), msg.images.clone()),
+    let reply = match (replied, msg.role) {
+        (false, _) => Vec::new(),
+        (true, Role::Assistant) => crate::md::render(&msg.content, live),
+        (true, Role::User) => plain(&msg.content, Style::default(), live),
     };
+    let (mark, blinks) = mark(msg);
     Bubble {
+        id,
+        user: msg.role == Role::User,
         name: match (&msg.role, &msg.guest) {
             (Role::User, Some(from)) => format!("guest@{from}"),
             (Role::User, None) => "you".to_string(),
             (Role::Assistant, _) => "assistant".to_string(),
         },
-        activity: Activity::of(msg),
+        guest: msg.guest.clone(),
+        ink: match msg.role {
+            Role::User => Color::Green,
+            Role::Assistant => Color::Magenta,
+        },
+        doing: Activity::of(msg).doing(),
+        mark,
+        blinks,
+        thinking_live,
         tool: msg
             .current_tool
             .clone()
             .filter(|name| live && !crate::tools::is_hidden_tool(name)),
-        images,
-        reply,
-        replied,
+        waiting: msg.waiting,
+        live,
+        time: msg.timestamp.clone(),
+        images: if msg.role == Role::User {
+            msg.images.clone()
+        } else {
+            Vec::new()
+        },
         orphan: live && !replied && !brained && !hearted,
+        reply,
         brain: thought(&msg.brain, live && !replied),
         heart: thought(&msg.heart, live && !replied && !brained),
     }
 }
 
-pub fn awaiting(app: &App) -> Option<Message> {
+fn awaiting(app: &App) -> Option<Message> {
     (!app.awaiting.is_empty()).then(|| Message {
         role: Role::User,
         content: app.awaiting.clone(),
@@ -141,33 +254,81 @@ pub fn awaiting(app: &App) -> Option<Message> {
     })
 }
 
-pub struct Bar {
-    pub state: &'static str,
-    pub esc: &'static str,
-    pub busy: bool,
+fn thinking_turn(messages: &[Message]) -> Option<u64> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.streaming && m.phase == Phase::Thinking)
+        .map(|m| m.turn_id)
 }
 
-pub fn bar(app: &App) -> Bar {
+pub fn scope(app: &App) -> Scope {
+    match app.popup.mode {
+        popup::Mode::Closed => Scope::Chat,
+        popup::Mode::Browse => Scope::Sheet,
+        popup::Mode::SaveAs | popup::Mode::DialEdit => Scope::Field,
+    }
+}
+
+pub fn build(app: &App) -> Scene {
+    let live = thinking_turn(&app.messages);
+    let bubbles = awaiting(app)
+        .map(|m| bubble(AWAITING.to_string(), &m, false))
+        .into_iter()
+        .chain(
+            app.messages
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(i, m)| bubble(i.to_string(), m, live == Some(m.turn_id))),
+        )
+        .collect();
+    Scene {
+        accent: app.accent,
+        nametags: app.nametags,
+        font: app.typeface,
+        view: app.view_mode,
+        scope: scope(app),
+        turn: app.turn(),
+        marks: Marks {
+            brain: BRAIN_MARK,
+            heart: HEART_MARK,
+        },
+        bar: bar(app),
+        bubbles,
+        status: status(app),
+        error: is_error_status(&app.status).then(|| app.status.clone()),
+        sheet: (app.popup.mode != popup::Mode::Closed).then(|| sheet(app)),
+    }
+}
+
+fn bar(app: &App) -> Bar {
     let (state, esc) = match (app.in_flight, app.voice_is_active()) {
         (true, true) => ("streaming + speaking…", "esc quiet"),
         (true, false) => ("streaming…", "esc interrupt"),
         (false, true) => ("speaking…", "esc quiet"),
         (false, false) => ("", ""),
     };
+    let tool = (app.nametags == NametagMode::Inlined)
+        .then(|| {
+            app.messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::Assistant && m.streaming)?
+                .current_tool
+                .clone()
+                .filter(|name| !crate::tools::is_hidden_tool(name))
+        })
+        .flatten();
     Bar {
         state,
         esc,
         busy: app.in_flight,
+        tool,
     }
 }
 
-pub struct Status {
-    pub left: Vec<Span<'static>>,
-    pub note: Span<'static>,
-    pub right: Vec<Span<'static>>,
-}
-
-pub fn status(app: &App) -> Status {
+fn status(app: &App) -> Status {
     let is_demo = app.active_shop.protocol == Protocol::Demo;
     let dirty = app.is_dirty();
     let station_label = match (&app.active_origin, dirty) {
@@ -310,13 +471,6 @@ fn hue_lit(hue: f64) -> Color {
     )
 }
 
-pub struct Sheet {
-    pub tabs: Vec<(&'static str, bool)>,
-    pub lines: Vec<Line<'static>>,
-    pub hint: &'static str,
-    pub prompt: Option<String>,
-}
-
 fn focus(selected: bool, accent: Color) -> Style {
     if selected {
         Style::default()
@@ -336,66 +490,67 @@ fn pair(style: Style, name: &str, value: Span<'static>) -> Line<'static> {
     ])
 }
 
-pub fn sheet(app: &App) -> Sheet {
+fn sheet(app: &App) -> Sheet {
     let accent = app.accent;
-    let tabs = [
-        (Tab::Station, "Station"),
-        (Tab::Shops, "Shops"),
-        (Tab::Pref, "Pref"),
-        (Tab::Help, "Help"),
-    ]
-    .iter()
-    .map(|(tab, label)| (*label, app.popup.tab == *tab))
-    .collect();
+    let tabs = popup::TABS
+        .iter()
+        .map(|tab| Pill {
+            label: tab.label(),
+            on: app.popup.tab == *tab,
+        })
+        .collect();
+    let browsing = app.popup.mode == popup::Mode::Browse;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut prompt = None;
-    let hint = match (app.popup.tab, &app.popup.mode) {
-        (Tab::Shops, _) => {
+    let mut picks = Vec::new();
+    let mut selected = None;
+    let mut field = None;
+    let hint = match app.popup.tab {
+        Tab::Shops => {
             lines = popup::shops_lines(app);
             " read-only · edit ~/.config/wryme/shops.toml · Esc / Ctrl-S close "
         }
-        (Tab::Help, _) => {
-            for (key, what) in popup::help_rows() {
-                if key.is_empty() {
-                    lines.push(Line::from(""));
+        Tab::Help => {
+            for (key, what) in crate::action::help() {
+                if what.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {key}"),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    )));
                 } else {
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {:<22}", key), Style::default().fg(accent)),
-                        Span::styled(what, Style::default()),
+                        Span::raw(what),
                     ]));
                 }
             }
-            " Esc close  ·  Ctrl-S close "
+            " Esc close  ·  Tab next tab "
         }
-        (_, mode) => {
-            for (i, row) in popup::rows(app).iter().enumerate() {
-                let style = focus(
-                    i == app.popup.selected && *mode == popup::Mode::Browse,
-                    accent,
-                );
+        Tab::Station | Tab::Pref => {
+            let rows = popup::rows(app);
+            picks = popup::selectable_indices(&rows);
+            if browsing {
+                selected = Some(app.popup.selected);
+            }
+            for (i, row) in rows.iter().enumerate() {
+                let style = focus(browsing && i == app.popup.selected, accent);
                 lines.push(sheet_row(app, row, style));
             }
-            let field = match mode {
-                popup::Mode::SaveAs => Some(("name".to_string(), &app.popup.name_input)),
-                popup::Mode::DialEdit => Some((
-                    app.popup
-                        .dial_idx
-                        .and_then(|idx| popup::dial_metas().get(idx).map(|m| m.name.to_string()))
-                        .unwrap_or_else(|| "value".to_string()),
-                    &app.popup.dial_input,
-                )),
+            field = match app.popup.mode {
+                popup::Mode::SaveAs => Some(Field {
+                    label: "name".into(),
+                    text: String::new(),
+                }),
+                popup::Mode::DialEdit => app
+                    .popup
+                    .dial_idx
+                    .and_then(|idx| popup::dial_metas().into_iter().nth(idx))
+                    .map(|meta| Field {
+                        label: meta.name.to_string(),
+                        text: (meta.label)(&app.active_station.dials),
+                    }),
                 _ => None,
             };
-            if let Some((name, input)) = field {
-                let label = format!("  {name}: ");
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(label.clone(), Style::default().fg(accent)),
-                    Span::raw(input.text.clone()),
-                ]));
-                prompt = Some(label);
-            }
-            match mode {
+            match app.popup.mode {
                 popup::Mode::SaveAs => " Enter save  ·  Esc cancel ",
                 popup::Mode::DialEdit => " Enter save  ·  Esc cancel  ·  all | 0 | 12 | 50% ",
                 _ => " ↑↓ select  ·  ←→ / Enter toggle or adjust  ·  Esc / Ctrl-S close ",
@@ -405,8 +560,10 @@ pub fn sheet(app: &App) -> Sheet {
     Sheet {
         tabs,
         lines,
+        picks,
+        selected,
         hint,
-        prompt,
+        field,
     }
 }
 
@@ -500,102 +657,97 @@ fn sheet_row(app: &App, row: &popup::Row, style: Style) -> Line<'static> {
             "nametags",
             strong(format!("  {}", app.nametags.name()), accent),
         ),
+        popup::Row::PrefFont => pair(
+            style,
+            "font",
+            strong(format!("  {}", app.typeface.name()), accent),
+        ),
     }
 }
 
-fn tint(color: Option<Color>) -> Value {
+fn tint(color: Option<Color>) -> Option<String> {
     match color {
-        None | Some(Color::Reset) => Value::Null,
-        Some(c) => Value::String(c.to_string()),
+        None | Some(Color::Reset) => None,
+        Some(c) => Some(c.to_string()),
     }
 }
 
-fn run(span: &Span<'_>, base: Style) -> Value {
-    let style = base.patch(span.style);
-    json!({
-        "t": span.content,
-        "fg": tint(style.fg),
-        "bg": tint(style.bg),
-        "b": style.add_modifier.contains(Modifier::BOLD),
-        "i": style.add_modifier.contains(Modifier::ITALIC),
-        "d": style.add_modifier.contains(Modifier::DIM),
-    })
+fn ink<S: Serializer>(color: &Color, s: S) -> Result<S::Ok, S::Error> {
+    tint(Some(*color)).serialize(s)
 }
 
-fn runs(spans: &[Span<'_>]) -> Vec<Value> {
-    spans.iter().map(|s| run(s, Style::default())).collect()
+#[derive(Serialize)]
+struct Run<'a> {
+    t: &'a str,
+    fg: Option<String>,
+    bg: Option<String>,
+    b: bool,
+    i: bool,
+    d: bool,
+    u: bool,
+    x: bool,
 }
 
-fn rows(lines: &[Line<'_>]) -> Vec<Value> {
-    lines
-        .iter()
-        .map(|line| {
-            json!({
-                "mono": crate::md::fenced(line),
-                "runs": line.spans.iter().map(|s| run(s, line.style)).collect::<Vec<_>>(),
-            })
-        })
-        .collect()
+impl<'a> Run<'a> {
+    fn of(span: &'a Span<'_>, base: Style) -> Self {
+        let style = base.patch(span.style);
+        let has = |m: Modifier| style.add_modifier.contains(m);
+        Run {
+            t: span.content.as_ref(),
+            fg: tint(style.fg),
+            bg: tint(style.bg),
+            b: has(Modifier::BOLD),
+            i: has(Modifier::ITALIC),
+            d: has(Modifier::DIM),
+            u: has(Modifier::UNDERLINED),
+            x: has(Modifier::CROSSED_OUT),
+        }
+    }
 }
 
-pub fn wire(app: &App) -> String {
-    let bar = bar(app);
-    let status = status(app);
-    let waiting = awaiting(app);
-    let bubbles: Vec<Value> = waiting
-        .iter()
-        .map(|m| ("awaiting".to_string(), m))
-        .chain(
-            app.messages
-                .iter()
-                .enumerate()
-                .rev()
-                .map(|(i, m)| (i.to_string(), m)),
-        )
-        .map(|(id, msg)| {
-            let b = bubble(msg);
-            json!({
-                "id": id,
-                "user": msg.role == Role::User,
-                "name": b.name,
-                "activity": b.activity.label(),
-                "tool": b.tool,
-                "waiting": msg.waiting,
-                "live": msg.streaming,
-                "time": msg.timestamp,
-                "images": b.images,
-                "reply": rows(&b.reply),
-                "brain": rows(&b.brain),
-                "heart": rows(&b.heart),
-            })
-        })
-        .collect();
-    let sheet = (app.popup.mode != popup::Mode::Closed).then(|| {
-        let s = sheet(app);
-        json!({
-            "tabs": s.tabs.iter().map(|(label, on)| json!({"label": label, "on": on})).collect::<Vec<_>>(),
-            "lines": rows(&s.lines),
-            "hint": s.hint.trim(),
-        })
-    });
-    json!({
-        "accent": tint(Some(app.accent)),
-        "bar": {"state": bar.state, "esc": bar.esc, "busy": bar.busy},
-        "bubbles": bubbles,
-        "status": {
-            "left": runs(&status.left),
-            "note": run(&status.note, Style::default()),
-            "right": runs(&status.right),
-        },
-        "error": is_error_status(&app.status).then(|| app.status.clone()),
-        "sheet": sheet,
-    })
-    .to_string()
+#[derive(Serialize)]
+struct Row<'a> {
+    mono: bool,
+    runs: Vec<Run<'a>>,
+}
+
+fn rows<S: Serializer>(lines: &[Line<'static>], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(lines.iter().map(|line| Row {
+        mono: crate::md::mono(line),
+        runs: line.spans.iter().map(|span| Run::of(span, line.style)).collect(),
+    }))
+}
+
+fn runs<S: Serializer>(spans: &[Span<'static>], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(spans.iter().map(|span| Run::of(span, Style::default())))
+}
+
+fn run<S: Serializer>(span: &Span<'static>, s: S) -> Result<S::Ok, S::Error> {
+    Run::of(span, Style::default()).serialize(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    fn message(role: Role) -> Message {
+        Message {
+            role,
+            content: "hi".into(),
+            images: Vec::new(),
+            guest: None,
+            brain: String::new(),
+            heart: String::new(),
+            streaming: false,
+            waiting: false,
+            timestamp: "10:00".into(),
+            phase: Phase::Streaming,
+            current_tool: None,
+            turn_id: 1,
+            tool_events: Vec::new(),
+        }
+    }
 
     #[test]
     fn usage_formats_in_k_terms() {
@@ -616,5 +768,50 @@ mod tests {
         assert!(is_error_status("error: y"));
         assert!(!is_error_status("saved station 'a'"));
         assert!(!is_error_status(""));
+    }
+
+    #[test]
+    fn mark_follows_what_the_assistant_is_doing() {
+        let at = |phase, tool: Option<&str>| {
+            mark(&Message {
+                streaming: true,
+                phase,
+                current_tool: tool.map(String::from),
+                ..message(Role::Assistant)
+            })
+        };
+        assert_eq!(mark(&message(Role::Assistant)), ("⌃", false));
+        assert_eq!(mark(&message(Role::User)), (USER_MARK, false));
+        assert_eq!(UnicodeWidthStr::width(USER_MARK), 1);
+        assert_eq!(at(Phase::Writing, None), ("⬩", true));
+        assert_eq!(at(Phase::Thinking, None), ("✦", true));
+        assert_eq!(at(Phase::Tinkering, Some("shell")), ("‣", true));
+        assert_eq!(at(Phase::Tinkering, Some(crate::tools::BOOK_NAME)), ("಄", false));
+    }
+
+    #[test]
+    fn thinking_follows_the_turn_not_the_message() {
+        let holder = || Message {
+            brain: "pondering".into(),
+            ..message(Role::Assistant)
+        };
+        let live = Message {
+            streaming: true,
+            phase: Phase::Thinking,
+            ..message(Role::Assistant)
+        };
+        assert_eq!(thinking_turn(&[holder(), live]), Some(holder().turn_id));
+        assert_eq!(thinking_turn(&[holder()]), None);
+    }
+
+    #[test]
+    fn bubble_wire_carries_styles_and_marks() {
+        let b = bubble("3".into(), &message(Role::User), false);
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["id"], "3");
+        assert_eq!(v["ink"], "Green");
+        assert_eq!(v["mark"], USER_MARK);
+        assert_eq!(v["reply"][0]["runs"][0]["t"], "hi");
+        assert_eq!(v["reply"][0]["mono"], false);
     }
 }

@@ -6,9 +6,10 @@ pub mod book;
 pub mod config;
 pub mod demo;
 pub mod explore;
+pub mod action;
+pub mod control;
 pub mod input;
 pub mod jobs;
-pub mod keys;
 pub mod md;
 pub mod platform;
 pub mod popup;
@@ -27,6 +28,7 @@ pub mod shop_memory;
 mod spec;
 pub mod station;
 pub mod station_save;
+pub mod term;
 pub mod tools;
 pub mod ui;
 pub mod voice;
@@ -37,13 +39,13 @@ pub mod web;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use ratatui::{Terminal, backend::Backend};
 use tokio::sync::mpsc;
 
 use api::{Client, StreamEvent};
 use app::App;
-use input::Input;
-use platform::{Event, Task};
+use control::Intent;
+use platform::Task;
+use scene::Scene;
 
 pub struct Boot {
     pub client: Client,
@@ -81,14 +83,28 @@ pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
 }
 
 pub trait Surface {
-    fn present(&mut self, app: &mut App, input: &Input) -> Result<()>;
+    type Event;
+    fn present(&mut self, scene: &Scene) -> Result<()>;
+    fn feed(&mut self, ev: Self::Event, scene: &Scene) -> Vec<Intent>;
 }
 
-impl<B: Backend<Error = std::io::Error>> Surface for Terminal<B> {
-    fn present(&mut self, app: &mut App, input: &Input) -> Result<()> {
-        self.draw(|f| ui::draw(f, app, input))
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!("draw: {e}"))
+async fn reload(app: &mut App) {
+    match boot(None).await {
+        Ok(b) => {
+            let unavailable = station::unavailable_note(&b.stations, &b.shops);
+            app.reconfigure(
+                b.shops,
+                b.stations,
+                b.active_station,
+                b.active_shop,
+                b.active_origin,
+            );
+            app.note(match unavailable {
+                Some(n) => format!("config connected · {n}"),
+                None => "config connected".to_string(),
+            });
+        }
+        Err(e) => app.note(format!("config: {e:#}")),
     }
 }
 
@@ -106,7 +122,7 @@ pub async fn run<V, S>(
 ) -> Result<()>
 where
     V: Surface,
-    S: futures_util::Stream<Item = Event> + Unpin,
+    S: futures_util::Stream<Item = V::Event> + Unpin,
 {
     let mut app = App::new(
         system,
@@ -121,7 +137,6 @@ where
     } else if let Some(note) = station::unavailable_note(&app.stations, &app.shops) {
         app.note(note);
     }
-    let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
     let mut in_flight_task: Option<Task> = None;
     let window_id = app.window_id.clone();
@@ -140,7 +155,8 @@ where
     let mut tick: u64 = 0;
 
     loop {
-        surface.present(&mut app, &input)?;
+        let scene = scene::build(&app);
+        surface.present(&scene)?;
         if app.should_quit {
             break;
         }
@@ -148,37 +164,11 @@ where
         tokio::select! {
             maybe_ev = events.next() => {
                 if let Some(ev) = maybe_ev {
-                    match ev {
-                        Event::Key(k) => {
-                            keys::handle_key(k, &mut app, &mut input, &client, &tx, &mut in_flight_task);
+                    for intent in surface.feed(ev, &scene) {
+                        match intent {
+                            Intent::Reload => reload(&mut app).await,
+                            intent => control::apply(intent, &mut app, &client, &tx, &mut in_flight_task),
                         }
-                        Event::Mouse(m) => keys::handle_mouse(m, &mut app),
-                        Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
-                        #[cfg(target_arch = "wasm32")]
-                        Event::GuestNote(note) => {
-                            crate::keys::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        Event::ReloadConfig => {
-                            match crate::boot(None).await {
-                                Ok(b) => {
-                                    let unavailable = station::unavailable_note(&b.stations, &b.shops);
-                                    app.reconfigure(
-                                        b.shops,
-                                        b.stations,
-                                        b.active_station,
-                                        b.active_shop,
-                                        b.active_origin,
-                                    );
-                                    app.note(match unavailable {
-                                        Some(n) => format!("config connected · {n}"),
-                                        None => "config connected".to_string(),
-                                    });
-                                }
-                                Err(e) => app.note(format!("config: {e:#}")),
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -186,7 +176,7 @@ where
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
             Some(note) = guest_rx.recv() => {
-                crate::keys::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
+                crate::control::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
                 #[cfg(unix)]
@@ -325,10 +315,10 @@ fn handle_stream_event(
             }
             if !app.awaiting.is_empty() {
                 let pending = std::mem::take(&mut app.awaiting);
-                crate::keys::start_turn(app, client, tx, in_flight_task, pending);
+                crate::control::start_turn(app, client, tx, in_flight_task, pending);
             } else if !app.guest_queue.is_empty() {
                 let note = app.guest_queue.remove(0);
-                crate::keys::start_guest_turn(app, client, tx, in_flight_task, note);
+                crate::control::start_guest_turn(app, client, tx, in_flight_task, note);
             }
         }
         StreamEvent::Error { message } => {
@@ -434,13 +424,10 @@ pub fn run_native() -> Result<()> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn native_main() -> Result<()> {
-    use crossterm::event::EventStream;
-    use clap::Parser as _;
-
+pub fn instrument() -> sentry::ClientInitGuard {
     init_logging();
     shell_env::bootstrap();
-    let _sentry = sentry::init(sentry::ClientOptions {
+    let guard = sentry::init(sentry::ClientOptions {
         dsn: std::env::var("SENTRY_DSN")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -454,6 +441,15 @@ async fn native_main() -> Result<()> {
         ..Default::default()
     });
     tracing::info!(version = env!("WRYME_VERSION"), "wme launch");
+    guard
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn native_main() -> Result<()> {
+    use crossterm::event::EventStream;
+    use clap::Parser as _;
+
+    let _sentry = instrument();
     let args = cli::Args::parse();
 
     let boot = boot(args.station.as_deref()).await?;
@@ -476,14 +472,14 @@ async fn native_main() -> Result<()> {
         "wme start"
     );
 
-    let mut terminal = setup_terminal().context("entering tui")?;
+    let mut surface = term::Term::new(setup_terminal().context("entering tui")?);
     install_panic_hook();
 
     let events = crate::platform::tty::rejoin(
         EventStream::new().filter_map(|r| futures_util::future::ready(r.ok())),
     );
     let result = run(
-        &mut terminal,
+        &mut surface,
         boot.client,
         args.system,
         boot.shops,
@@ -495,7 +491,7 @@ async fn native_main() -> Result<()> {
     )
     .await;
 
-    restore_terminal(&mut terminal).ok();
+    restore_terminal(&mut surface.terminal).ok();
     result
 }
 

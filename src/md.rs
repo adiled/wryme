@@ -52,10 +52,11 @@ fn gutter_fences(inp: Vec<Line<'static>>) -> Vec<Line<'static>> {
     out
 }
 
-pub fn fenced(line: &Line<'_>) -> bool {
+pub fn mono(line: &Line<'_>) -> bool {
     line.spans
         .first()
-        .is_some_and(|s| s.content == "│ " || s.content == "╭ ")
+        .and_then(|s| s.content.chars().next())
+        .is_some_and(|c| matches!(c, '│' | '╭' | '┌' | '├' | '└'))
 }
 
 fn fence_lang(line: &Line<'static>) -> Option<String> {

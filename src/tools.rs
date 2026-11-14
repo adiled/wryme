@@ -478,8 +478,10 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub const SPAWNS: bool = !cfg!(target_os = "ios");
+
 pub fn tool_defs_chat() -> Vec<serde_json::Value> {
-    vec![
+    let spawning = [
         serde_json::json!({
             "type": "function",
             "function": {
@@ -507,19 +509,22 @@ pub fn tool_defs_chat() -> Vec<serde_json::Value> {
                 "strict": true,
             },
         }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": book_name(),
-                "description": BOOK_DESCRIPTION,
-                "parameters": book_parameters(),
-                "strict": true,
-            },
-        }),
-    ]
-    .into_iter()
-    .chain(window_tool_defs_chat())
-    .collect()
+    ];
+    let book = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": book_name(),
+            "description": BOOK_DESCRIPTION,
+            "parameters": book_parameters(),
+            "strict": true,
+        },
+    });
+    spawning
+        .into_iter()
+        .filter(|_| SPAWNS)
+        .chain([book])
+        .chain(window_tool_defs_chat())
+        .collect()
 }
 
 pub fn window_tool_defs() -> Vec<serde_json::Value> {
@@ -561,7 +566,7 @@ pub fn window_tool_defs_chat() -> Vec<serde_json::Value> {
 }
 
 pub fn tool_defs() -> Vec<serde_json::Value> {
-    vec![
+    let spawning = [
         serde_json::json!({
             "type": "function",
             "name": shell_name(),
@@ -577,17 +582,20 @@ pub fn tool_defs() -> Vec<serde_json::Value> {
             "strict": true,
         }),
         serde_json::json!({ "type": "function", "name": check_name(), "description": CHECK_DESCRIPTION, "parameters": check_parameters(), "strict": true }),
-        serde_json::json!({
-            "type": "function",
-            "name": book_name(),
-            "description": BOOK_DESCRIPTION,
-            "parameters": book_parameters(),
-            "strict": true,
-        }),
-    ]
-    .into_iter()
-    .chain(window_tool_defs())
-    .collect()
+    ];
+    let book = serde_json::json!({
+        "type": "function",
+        "name": book_name(),
+        "description": BOOK_DESCRIPTION,
+        "parameters": book_parameters(),
+        "strict": true,
+    });
+    spawning
+        .into_iter()
+        .filter(|_| SPAWNS)
+        .chain([book])
+        .chain(window_tool_defs())
+        .collect()
 }
 
 #[cfg(test)]

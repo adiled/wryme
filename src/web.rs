@@ -83,8 +83,9 @@ async fn boot_and_run(events: crate::platform::web::EventStream) -> Result<()> {
     let backend = WebBackend::new()?;
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+    let mut surface = crate::term::Term::new(terminal);
     crate::run(
-        &mut terminal,
+        &mut surface,
         boot.client,
         None,
         boot.shops,
