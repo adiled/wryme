@@ -2,6 +2,8 @@
 
 One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/popup_ui.rs`), the browser (the same terminal surface on a web backend), and the Mac and iPhone apps (`apple/`).
 
+Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/serve.rs`), so windows behave exactly like separate terminal windows: their own id, notes between them, Ctrl-C closes one. The iPhone runs its one window inside the app through the same code.
+
 ## Shared, so it cannot drift
 
 - `src/scene.rs` describes everything any surface shows. Painters read only the scene, never `App`.
@@ -28,6 +30,7 @@ One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/po
 | Images | send a path as the whole message | drop a file | photo picker |
 | Tools | all | all | none that run programs (shell, explore, job check) |
 | Quit (Ctrl-C) | quits | quits | not offered |
+| Another window | run `wme` again | File › New Window starts its own `wme`; no tabs | one window |
 | Extras | | menu bar, Cmd-, settings | action menu |
 | Streaming state | "streaming…" and "esc interrupt" in the input title | dimmed input border only | dimmed input border only |
 | Running tool, inlined | on the input border | before the time on the reply's first row | same as Mac |

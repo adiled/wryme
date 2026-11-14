@@ -11,7 +11,7 @@ enum Folder {
     static func boot() {
         let defaults = UserDefaults.standard
         if defaults.bool(forKey: demo) {
-            Core.shared.start()
+            Core.phone.start()
             return
         }
         var stale = false
@@ -19,7 +19,7 @@ enum Folder {
             let url = try? URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale),
             url.startAccessingSecurityScopedResource()
         else {
-            Core.shared.needsFolder = true
+            Core.phone.needsFolder = true
             return
         }
         open(url)
@@ -35,15 +35,15 @@ enum Folder {
 
     static func useDemo() {
         UserDefaults.standard.set(true, forKey: demo)
-        Core.shared.needsFolder = false
-        Core.shared.start()
+        Core.phone.needsFolder = false
+        Core.phone.start()
     }
 
     static func refresh() {
-        guard let chosen, Core.shared.stage != nil else { return }
+        guard let chosen, Core.phone.stage != nil else { return }
         DispatchQueue.global().async {
             fetch(chosen)
-            DispatchQueue.main.async { Core.shared.reload() }
+            DispatchQueue.main.async { Core.phone.reload() }
         }
     }
 
@@ -51,12 +51,12 @@ enum Folder {
         chosen?.stopAccessingSecurityScopedResource()
         chosen = url
         UserDefaults.standard.set(false, forKey: demo)
-        Core.shared.needsFolder = false
+        Core.phone.needsFolder = false
         setenv("WRYME_CONFIG_DIR", url.path, 1)
         DispatchQueue.global().async {
             fetch(url)
             DispatchQueue.main.async {
-                let core = Core.shared
+                let core = Core.phone
                 if core.started { core.reload() } else { core.start() }
             }
         }

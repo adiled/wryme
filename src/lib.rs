@@ -21,6 +21,8 @@ pub mod reservoir;
 pub mod reservoir;
 pub mod scene;
 pub mod select;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod serve;
 pub mod shell_env;
 pub mod shop;
 pub mod shop_memory;
@@ -417,11 +419,16 @@ async fn one_shot(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> Result<()> {
+    use clap::Parser as _;
+    let args = cli::Args::parse();
+    if args.serve {
+        return serve::stdio();
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building runtime")?;
-    rt.block_on(native_main())
+    rt.block_on(native_main(args))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -446,12 +453,10 @@ pub fn instrument() -> sentry::ClientInitGuard {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn native_main() -> Result<()> {
+async fn native_main(args: cli::Args) -> Result<()> {
     use crossterm::event::EventStream;
-    use clap::Parser as _;
 
     let _sentry = instrument();
-    let args = cli::Args::parse();
 
     let boot = boot(args.station.as_deref()).await?;
 
@@ -515,6 +520,9 @@ mod cli {
 
         #[arg(long)]
         pub system: Option<String>,
+
+        #[arg(long, hide = true)]
+        pub serve: bool,
     }
 }
 

@@ -1,4 +1,7 @@
 import Combine
+#if os(macOS)
+import AppKit
+#endif
 import Foundation
 import SwiftUI
 
@@ -159,8 +162,91 @@ final class Readout: ObservableObject {
     }
 }
 
+protocol Link: AnyObject {
+    func start(_ receive: @escaping (Data) -> Void, ended: @escaping () -> Void)
+    func send(_ text: String)
+    func stop()
+}
+
+func fatalLine(_ text: String) -> Data {
+    (try? JSONSerialization.data(withJSONObject: ["fatal": text])) ?? Data()
+}
+
+#if os(macOS)
+final class Child: Link {
+    private let process = Process()
+    private let input = Pipe()
+    private let output = Pipe()
+    private var buffer = Data()
+
+    func start(_ receive: @escaping (Data) -> Void, ended: @escaping () -> Void) {
+        guard let url = Bundle.main.url(forAuxiliaryExecutable: "wme") else {
+            receive(fatalLine("wme is missing from the app bundle"))
+            return
+        }
+        process.executableURL = url
+        process.arguments = ["--serve"]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard let self, !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self.buffer.append(chunk)
+            while let end = self.buffer.firstIndex(of: 0x0A) {
+                let line = Data(self.buffer[self.buffer.startIndex..<end])
+                self.buffer.removeSubrange(self.buffer.startIndex...end)
+                if line.first == UInt8(ascii: "{") { receive(line) }
+            }
+        }
+        process.terminationHandler = { _ in DispatchQueue.main.async { ended() } }
+        do {
+            try process.run()
+        } catch {
+            receive(fatalLine("could not start wme: \(error.localizedDescription)"))
+        }
+    }
+
+    func send(_ text: String) {
+        try? input.fileHandleForWriting.write(contentsOf: Data((text + "\n").utf8))
+    }
+
+    func stop() {
+        if process.isRunning { process.terminate() }
+    }
+}
+#else
+final class Inline: Link {
+    private static var receive: ((Data) -> Void)?
+
+    func start(_ receive: @escaping (Data) -> Void, ended: @escaping () -> Void) {
+        Inline.receive = receive
+        wryme_start { text in
+            guard let text else { return }
+            Inline.receive?(Data(bytes: text, count: strlen(text)))
+        }
+    }
+
+    func send(_ text: String) { wryme_send(text) }
+
+    func stop() {}
+}
+#endif
+
 final class Core: ObservableObject {
-    static let shared = Core()
+    #if os(macOS)
+    private static let open = NSHashTable<Core>.weakObjects()
+    weak var window: NSWindow?
+
+    static var focused: Core? {
+        open.allObjects.first { $0.window != nil && $0.window === NSApp.keyWindow }
+    }
+    #else
+    static let phone = Core(link: Inline())
+    #endif
 
     @Published var stage: Stage?
     @Published var bubbles: [Bubble] = []
@@ -169,6 +255,7 @@ final class Core: ObservableObject {
     @Published var needsFolder = false
     @Published var draft = ""
     @Published var fieldText = ""
+    @Published var ended = false
     #if os(iOS)
     @Published var draftSelection: TextSelection?
     @Published var fieldSelection: TextSelection?
@@ -178,26 +265,35 @@ final class Core: ObservableObject {
     let sheetMoves = PassthroughSubject<Move, Never>()
     let readout = Readout()
 
+    private let link: Link
     private var cache: [String: Bubble] = [:]
     private(set) var started = false
+
+    init(link: Link) {
+        self.link = link
+        #if os(macOS)
+        Core.open.add(self)
+        #endif
+    }
 
     func start() {
         guard !started else { return }
         started = true
-        wryme_start { text in
-            guard let text else { return }
-            let data = Data(bytes: text, count: strlen(text))
+        link.start({ [weak self] data in
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let result = Result { try decoder.decode(Envelope.self, from: data) }
             DispatchQueue.main.async {
+                guard let self else { return }
                 switch result {
-                case .success(let envelope): Core.shared.apply(envelope)
-                case .failure(let error): Core.shared.fatal = "This app can't read what wryme sent: \(error)"
+                case .success(let envelope): self.apply(envelope)
+                case .failure(let error): self.fatal = "This app can't read what wryme sent: \(error)"
                 }
             }
-        }
+        }, ended: { [weak self] in self?.ended = true })
     }
+
+    func stop() { link.stop() }
 
     private func apply(_ e: Envelope) {
         if let bindings = e.bindings { self.bindings = bindings }
@@ -221,7 +317,7 @@ final class Core: ObservableObject {
         guard let data = try? JSONSerialization.data(withJSONObject: msg, options: [.fragmentsAllowed]),
             let text = String(data: data, encoding: .utf8)
         else { return }
-        wryme_send(text)
+        link.send(text)
     }
 
     func act(_ name: String) { send(["do": name]) }
@@ -272,7 +368,7 @@ final class Core: ObservableObject {
             if Platform.allows(name) { act(name) }
             return true
         case .edit(let e):
-            return Editor.perform(e)
+            return Editor.perform(e, self)
         case .pane(let p):
             pane(p)
             return true

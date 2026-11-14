@@ -4,7 +4,7 @@ struct Panel: View {
     let sheet: Sheet
     let stage: Stage
     let accent: Color
-    @ObservedObject var core = Core.shared
+    @EnvironmentObject var core: Core
     @FocusState private var editing: Bool
     @State private var position = ScrollPosition(idType: Int.self)
     @State private var geo = GeoBox()

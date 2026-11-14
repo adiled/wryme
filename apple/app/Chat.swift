@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 #endif
 
 struct Root: View {
-    @ObservedObject var core = Core.shared
+    @EnvironmentObject var core: Core
     @Environment(\.scenePhase) private var phase
 
     var body: some View {
@@ -102,7 +102,7 @@ struct Main: View {
 struct Composer: View {
     let stage: Stage
     let accent: Color
-    @ObservedObject var core = Core.shared
+    @EnvironmentObject var core: Core
     @FocusState private var focused: Bool
     #if os(iOS)
     @State private var photo: PhotosPickerItem?
@@ -196,7 +196,7 @@ struct Composer: View {
 struct Transcript: View {
     let stage: Stage
     let accent: Color
-    @ObservedObject var core = Core.shared
+    @EnvironmentObject var core: Core
     @State private var position = ScrollPosition(edge: .top)
     @State private var geo = GeoBox()
 
@@ -386,8 +386,18 @@ struct Mark: View {
 struct Footer: View {
     let stage: Stage
     let accent: Color
-    @ObservedObject var core = Core.shared
-    @ObservedObject var readout = Core.shared.readout
+    @EnvironmentObject var core: Core
+
+    var body: some View {
+        FooterLine(stage: stage, accent: accent, readout: core.readout, any: core.bubbles.contains { !$0.waiting })
+    }
+}
+
+struct FooterLine: View {
+    let stage: Stage
+    let accent: Color
+    @ObservedObject var readout: Readout
+    let any: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -402,7 +412,7 @@ struct Footer: View {
     private var left: AttributedString {
         let dot = Theme.plain(" • ", Theme.faint, face: stage.font, size: 11)
         var out = Theme.paint(stage.status.left, face: stage.font, size: 11)
-        if core.bubbles.contains(where: { !$0.waiting }) {
+        if any {
             let (text, lit) = readout.label(stage.view)
             out += dot
             out += Theme.plain(text, lit ? accent : Theme.faint, face: stage.font, size: 11)

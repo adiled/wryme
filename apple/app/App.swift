@@ -4,8 +4,8 @@ import SwiftUI
 struct WrymeApp: App {
     init() {
         #if os(macOS)
+        NSWindow.allowsAutomaticWindowTabbing = false
         Keys.install()
-        Core.shared.start()
         #else
         Folder.boot()
         #endif
@@ -14,15 +14,54 @@ struct WrymeApp: App {
     var body: some Scene {
         #if os(macOS)
         WindowGroup {
-            Root().frame(minWidth: 420, minHeight: 360)
+            WindowRoot().frame(minWidth: 420, minHeight: 360)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 640)
-        .commands { Menus(core: Core.shared) }
+        .commands { Menus() }
         #else
         WindowGroup {
-            Root()
+            Root().environmentObject(Core.phone)
         }
         #endif
     }
 }
+
+#if os(macOS)
+struct WindowRoot: View {
+    @StateObject private var core = Core(link: Child())
+
+    var body: some View {
+        Root()
+            .environmentObject(core)
+            .focusedSceneObject(core)
+            .background(WindowReader { core.window = $0 })
+            .onAppear { core.start() }
+            .onDisappear { core.stop() }
+            .onChange(of: core.ended) { _, ended in
+                if ended { core.window?.close() }
+            }
+    }
+}
+
+struct WindowReader: NSViewRepresentable {
+    let found: (NSWindow?) -> Void
+
+    final class Probe: NSView {
+        var found: ((NSWindow?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            found?(window)
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.found = found
+        return probe
+    }
+
+    func updateNSView(_ probe: Probe, context: Context) {}
+}
+#endif

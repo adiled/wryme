@@ -133,7 +133,7 @@ enum Keys {
     }
 
     private static func handle(_ event: NSEvent) -> Bool {
-        let core = Core.shared
+        guard let core = Core.focused else { return false }
         let flags = event.modifierFlags
         guard let scope = core.stage?.scope, !flags.contains(.option) else { return false }
         if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.hasMarkedText() {
@@ -155,10 +155,10 @@ enum Keys {
 }
 
 enum Editor {
-    static func perform(_ e: Edit) -> Bool {
+    static func perform(_ e: Edit, _ core: Core) -> Bool {
         switch e {
         case .send:
-            Core.shared.sendField()
+            core.sendField()
             return true
         case .left, .right, .backspace, .delete: return false
         case .home: return run(#selector(NSResponder.moveToBeginningOfParagraph(_:)))
@@ -175,25 +175,26 @@ enum Editor {
 }
 
 struct Menus: Commands {
-    @ObservedObject var core: Core
+    @FocusedObject var core: Core?
 
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
-            Button("Settings…") { core.act("settings") }.keyboardShortcut(",")
+            Button("Settings…") { core?.act("settings") }
+                .keyboardShortcut(",")
+                .disabled(core == nil)
         }
         CommandMenu("Chat") {
-            ForEach(core.menu) { b in
-                Button(b.about.prefix(1).uppercased() + b.about.dropFirst()) { core.perform(b) }
+            ForEach(core?.menu ?? []) { b in
+                Button(b.about.prefix(1).uppercased() + b.about.dropFirst()) { core?.perform(b) }
                     .shortcut(b.chord)
-                    .disabled(!core.live(b.name))
+                    .disabled(!(core?.live(b.name) ?? false))
             }
         }
     }
 }
 #else
 enum Editor {
-    static func perform(_ e: Edit) -> Bool {
-        let core = Core.shared
+    static func perform(_ e: Edit, _ core: Core) -> Bool {
         switch e {
         case .send:
             core.sendField()
@@ -238,7 +239,7 @@ enum Editor {
 }
 
 struct Shortcuts: View {
-    @ObservedObject var core = Core.shared
+    @EnvironmentObject var core: Core
 
     var body: some View {
         ZStack {
@@ -253,7 +254,7 @@ struct Shortcuts: View {
 }
 
 struct ActionMenu: View {
-    @ObservedObject var core = Core.shared
+    @EnvironmentObject var core: Core
 
     var body: some View {
         Menu {

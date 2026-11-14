@@ -26,7 +26,13 @@ ios-sim)
     ;;
 esac
 
-cargo build -p wryme-apple --target "$TRIPLE" $FLAG
+if [ "$TARGET" = mac ]; then
+    cargo build --bin wme --target "$TRIPLE" $FLAG
+    CORE=""
+else
+    cargo build -p wryme-apple --target "$TRIPLE" $FLAG
+    CORE="$CARGO_TARGET_DIR/$TRIPLE/$PROFILE/libwryme_apple.a"
+fi
 
 rm -rf "$APP"
 mkdir -p "$BIN" "$RES"
@@ -34,6 +40,8 @@ mkdir -p "$BIN" "$RES"
 if [ "$TARGET" = mac ]; then
     cp apple/mac.plist "$PLIST"
     cp desktop/macos/AppIcon.icns "$RES/AppIcon.icns"
+    cp "$CARGO_TARGET_DIR/$TRIPLE/$PROFILE/wme" "$BIN/wme"
+    codesign --force --sign - "$BIN/wme"
 else
     cp apple/ios.plist "$PLIST"
     ASSETS="$CARGO_TARGET_DIR/Assets.xcassets"
@@ -53,7 +61,7 @@ xcrun --sdk "$SDK" swiftc -O -swift-version 5 -parse-as-library \
     -target "$SWIFT_TARGET" \
     -import-objc-header apple/wryme.h \
     apple/app/*.swift \
-    "$CARGO_TARGET_DIR/$TRIPLE/$PROFILE/libwryme_apple.a" \
+    $CORE \
     -framework Security -framework SystemConfiguration -framework CoreFoundation \
     -o "$BIN/wryme"
 
