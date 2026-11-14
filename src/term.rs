@@ -227,10 +227,10 @@ impl View {
         let sheet = scene.sheet.is_some();
         match p {
             Pane::Copy => return self.finish_selection(),
-            Pane::PageUp if sheet => self.sheet_scroll = self.sheet_scroll.saturating_add(1),
-            Pane::PageDown if sheet => self.sheet_scroll = self.sheet_scroll.saturating_sub(1),
-            Pane::PageUp => self.page_up(scene.view),
-            Pane::PageDown => self.page_down(scene.view),
+            Pane::PageUp if sheet => self.sheet_scroll = self.sheet_scroll.saturating_sub(1),
+            Pane::PageDown if sheet => self.sheet_scroll = self.sheet_scroll.saturating_add(1),
+            Pane::PageUp => self.newer(scene.view),
+            Pane::PageDown => self.older(scene.view),
         }
         Vec::new()
     }
@@ -255,7 +255,7 @@ impl View {
         self.page_base.saturating_sub(self.viewport_h / 2)
     }
 
-    fn page_up(&mut self, view: ViewMode) {
+    fn older(&mut self, view: ViewMode) {
         match view {
             ViewMode::Page if self.page_base > 0 && self.page == 0 => {
                 let cur = self.scroll_row.min(self.trigger());
@@ -272,7 +272,7 @@ impl View {
         }
     }
 
-    fn page_down(&mut self, view: ViewMode) {
+    fn newer(&mut self, view: ViewMode) {
         match view {
             ViewMode::Page if self.page_base > 0 => {
                 if self.page >= 2 {
@@ -291,11 +291,11 @@ impl View {
         }
     }
 
-    fn wheel(&mut self, up: bool, view: ViewMode) {
+    fn wheel(&mut self, older: bool, view: ViewMode) {
         match view {
             ViewMode::Page if self.page_base > 0 && self.page == 0 => {
                 let trigger = self.trigger();
-                if !up {
+                if !older {
                     self.scroll_row = self.scroll_row.saturating_sub(ROWS_PER_TICK);
                 } else if self.scroll_row.min(trigger) >= trigger {
                     self.scroll_row = trigger;
@@ -306,7 +306,7 @@ impl View {
                 }
             }
             ViewMode::Page => {
-                self.wheel_accum += if up { 1 } else { -1 };
+                self.wheel_accum += if older { 1 } else { -1 };
                 while self.wheel_accum >= TICKS_PER_PAGE {
                     self.page = self.page.saturating_add(1);
                     self.wheel_accum -= TICKS_PER_PAGE;
@@ -319,7 +319,7 @@ impl View {
                     self.scroll_row = self.trigger();
                 }
             }
-            ViewMode::Scroll if up => self.scroll_row = self.scroll_row.saturating_add(ROWS_PER_TICK),
+            ViewMode::Scroll if older => self.scroll_row = self.scroll_row.saturating_add(ROWS_PER_TICK),
             ViewMode::Scroll => self.scroll_row = self.scroll_row.saturating_sub(ROWS_PER_TICK),
         }
     }
@@ -332,12 +332,12 @@ impl View {
         let up = matches!(m.kind, MouseEventKind::ScrollUp);
         let wheel = up || matches!(m.kind, MouseEventKind::ScrollDown);
         match (scene.scope, m.kind) {
-            (Scope::Chat, _) if wheel => self.wheel(up, scene.view),
+            (Scope::Chat, _) if wheel => self.wheel(!up, scene.view),
             (_, _) if wheel && up => {
-                self.sheet_scroll = self.sheet_scroll.saturating_add(SHEET_ROWS_PER_TICK)
+                self.sheet_scroll = self.sheet_scroll.saturating_sub(SHEET_ROWS_PER_TICK)
             }
             (_, _) if wheel => {
-                self.sheet_scroll = self.sheet_scroll.saturating_sub(SHEET_ROWS_PER_TICK)
+                self.sheet_scroll = self.sheet_scroll.saturating_add(SHEET_ROWS_PER_TICK)
             }
             (Scope::Chat, MouseEventKind::Down(MouseButton::Left)) => {
                 self.selection = Some(Selection::new(point));
@@ -373,5 +373,62 @@ impl View {
             Some(s) if s.picks.contains(&line) => vec![Intent::Pick(line)],
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::shop::Shop;
+    use crate::station::Station;
+
+    fn scene(view: ViewMode) -> Scene {
+        let mut app = App::new(None, vec![Shop::demo()], vec![Station::demo()], Station::demo(), Shop::demo(), None);
+        app.view_mode = view;
+        crate::scene::build(&app)
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn wheel(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn down_goes_down_the_screen_toward_older() {
+        let scene = scene(ViewMode::Scroll);
+        let mut view = View {
+            viewport_h: 10,
+            ..View::default()
+        };
+        view.feed(key(KeyCode::PageDown), &scene);
+        assert_eq!(view.scroll_row, 9);
+        view.feed(key(KeyCode::PageUp), &scene);
+        assert_eq!(view.scroll_row, 0);
+        view.feed(wheel(MouseEventKind::ScrollDown), &scene);
+        assert_eq!(view.scroll_row, ROWS_PER_TICK);
+        view.feed(wheel(MouseEventKind::ScrollUp), &scene);
+        assert_eq!(view.scroll_row, 0);
+    }
+
+    #[test]
+    fn page_mode_pages_down_on_page_down() {
+        let scene = scene(ViewMode::Page);
+        let mut view = View {
+            viewport_h: 10,
+            ..View::default()
+        };
+        view.feed(key(KeyCode::PageDown), &scene);
+        assert_eq!(view.page, 1);
+        view.feed(key(KeyCode::PageUp), &scene);
+        assert_eq!(view.page, 0);
     }
 }

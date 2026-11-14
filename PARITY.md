@@ -22,7 +22,6 @@ One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/po
 | Code, tables, settings rows | monospace | monospace | monospace |
 | Dim grey | terminal palette | lighter `#7a7a88` | lighter `#7a7a88` |
 | Selecting text | drag, copies on release; Shift-arrows extend | native selection, Cmd-C | native selection |
-| PgUp / PgDn | older / newer (view moves down / up) | toward top / bottom | same as Mac, hardware keyboard |
 | Page mode | pins the start of a long reply, steps rows, then pages | snaps whole screens | snaps whole screens |
 | Position readout | rows | percent | percent |
 | Station search | type letters | type letters | search field |
