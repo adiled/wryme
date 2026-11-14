@@ -13,7 +13,7 @@ pub enum Intent {
     Find(String),
     Tab(usize),
     Pick(usize),
-    Say(&'static str),
+    Say(String),
     Note(crate::windows::Note),
     Reload,
 }

@@ -33,6 +33,7 @@ pub enum Edit {
     KillToStart,
     KillToEnd,
     KillWord,
+    Picture,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -63,6 +64,7 @@ impl Edit {
         Edit::KillToStart,
         Edit::KillToEnd,
         Edit::KillWord,
+        Edit::Picture,
     ];
 }
 
@@ -110,6 +112,7 @@ impl Action {
                 Edit::KillToStart => "delete to start",
                 Edit::KillToEnd => "delete to end",
                 Edit::KillWord => "delete previous word",
+                Edit::Picture => "attach the clipboard image",
             },
             Action::Pane(p) => match p {
                 Pane::PageUp => "page up",
@@ -335,8 +338,9 @@ const ANY: [Binding; 5] = [
     core(Scope::Any, ctrl('v'), Core::Voice),
 ];
 
-const CHAT: [Binding; 6] = [
+const CHAT: [Binding; 7] = [
     edit(Scope::Chat, key(Key::Enter), Edit::Send),
+    edit(Scope::Chat, ctrl('y'), Edit::Picture),
     core(Scope::Chat, key(Key::Esc), Core::Interrupt),
     core(Scope::Chat, ctrl('s'), Core::Settings),
     core(Scope::Chat, ctrl('t'), Core::ViewMode),

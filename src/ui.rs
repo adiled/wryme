@@ -59,6 +59,22 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
         );
     }
 
+    if !view.attachments.is_empty() {
+        let names: Vec<String> = view
+            .attachments
+            .iter()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map_or_else(|| p.clone(), |n| n.to_string_lossy().into_owned())
+            })
+            .collect();
+        input_block = input_block.title_bottom(Line::from(Span::styled(
+            format!(" 📷 {} ", names.join(" · ")),
+            Style::default().fg(accent),
+        )));
+    }
+
     let input = &view.input;
     let inner = Rect {
         x: input_chunk.x + 1,

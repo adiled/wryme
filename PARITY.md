@@ -29,7 +29,8 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 | Page mode | pins the start of a long reply, steps rows, then pages | snaps whole screens | snaps whole screens |
 | Position readout | rows | percent | percent |
 | Station search | type letters | type letters | search field |
-| Images | send a path as the whole message; shown as a path | paste (Cmd-V) or drop, attached as chips; shown as thumbnails | photo picker; thumbnails |
+| Images | Ctrl-Y attaches the clipboard image, dropped files attach; listed on the input border; shown as a path | Cmd-V or Ctrl-Y, or drop; chips above the input; thumbnails | photo picker or Ctrl-Y; thumbnails |
+| Images in the browser | none (no files to point at) | | |
 | Tools | all | all | none that run programs (shell, explore, job check) |
 | Quit (Ctrl-C) | quits | quits | not offered |
 | Another window | run `wme` again | File › New Window starts its own `wme`; no tabs | one window |

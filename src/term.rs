@@ -18,6 +18,7 @@ const TICKS_PER_PAGE: i32 = 3;
 #[derive(Default)]
 pub struct View {
     pub input: Input,
+    pub attachments: Vec<String>,
     pub field: Option<Input>,
     pub page: usize,
     pub scroll_row: usize,
@@ -126,8 +127,13 @@ impl View {
             Event::Key(k) => self.key(k, scene),
             Event::Mouse(m) => self.mouse(m, scene),
             Event::Paste(text) => {
-                if let Some(input) = self.typing(scene.scope) {
-                    input.insert_paste(&text);
+                match crate::pictures::dropped(&text) {
+                    Some(paths) if scene.scope == Scope::Chat => self.attachments.extend(paths),
+                    _ => {
+                        if let Some(input) = self.typing(scene.scope) {
+                            input.insert_paste(&text);
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -199,17 +205,34 @@ impl View {
     }
 
     fn edit(&mut self, e: Edit, scope: Scope) -> Vec<Intent> {
+        if scope == Scope::Chat {
+            match e {
+                Edit::Send => {
+                    let text = self.input.take();
+                    return vec![Intent::Submit(text, std::mem::take(&mut self.attachments))];
+                }
+                Edit::Picture => {
+                    return match crate::pictures::from_clipboard() {
+                        Ok(path) => {
+                            self.attachments.push(path);
+                            Vec::new()
+                        }
+                        Err(_) => vec![Intent::Say("no image on the clipboard".into())],
+                    };
+                }
+                Edit::Backspace if self.input.text.is_empty() && !self.attachments.is_empty() => {
+                    self.attachments.pop();
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
         let Some(input) = self.typing(scope) else {
             return Vec::new();
         };
         match e {
-            Edit::Send => {
-                let text = match scope {
-                    Scope::Field => input.text.clone(),
-                    _ => input.take(),
-                };
-                return vec![Intent::Submit(text, Vec::new())];
-            }
+            Edit::Send => return vec![Intent::Submit(input.text.clone(), Vec::new())],
+            Edit::Picture => {}
             Edit::Left => input.move_left(),
             Edit::Right => input.move_right(),
             Edit::Home => input.home(),
@@ -244,7 +267,7 @@ impl View {
             return Vec::new();
         }
         crate::platform::copy(&text);
-        vec![Intent::Say("copied")]
+        vec![Intent::Say("copied".into())]
     }
 
     fn step(&self) -> usize {

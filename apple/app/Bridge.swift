@@ -334,6 +334,7 @@ final class Core: ObservableObject {
     func find(_ text: String) { send(["find": text]) }
     func tab(_ i: Int) { send(["tab": i]) }
     func pick(_ i: Int) { send(["pick": i]) }
+    func say(_ text: String) { send(["say": text]) }
     func reload() { send("reload") }
 
     func sendField() {

@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod md;
 pub mod platform;
 pub mod popup;
+pub mod pictures;
 pub mod popup_ui;
 #[cfg(feature = "reservoir")]
 pub mod reservoir;

@@ -26,6 +26,7 @@ enum Inbound {
     Find(String),
     Tab(usize),
     Pick(usize),
+    Say(String),
     Reload,
 }
 
@@ -39,6 +40,7 @@ impl From<Inbound> for Intent {
             Inbound::Find(text) => Intent::Find(text),
             Inbound::Tab(i) => Intent::Tab(i),
             Inbound::Pick(i) => Intent::Pick(i),
+            Inbound::Say(text) => Intent::Say(text),
             Inbound::Reload => Intent::Reload,
         }
     }

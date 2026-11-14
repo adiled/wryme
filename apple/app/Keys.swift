@@ -6,7 +6,7 @@ import AppKit
 import UIKit
 #endif
 
-enum Edit: String { case send, left, right, home, end, backspace, delete, kill_to_start, kill_to_end, kill_word }
+enum Edit: String { case send, left, right, home, end, backspace, delete, kill_to_start, kill_to_end, kill_word, picture }
 enum Pane: String { case page_up, page_down, copy }
 
 enum Act {
@@ -176,6 +176,9 @@ enum Editor {
         case .kill_to_start: return run(#selector(NSResponder.deleteToBeginningOfParagraph(_:)))
         case .kill_to_end: return run(#selector(NSResponder.deleteToEndOfParagraph(_:)))
         case .kill_word: return run(#selector(NSResponder.deleteWordBackward(_:)))
+        case .picture:
+            if !Pictures.paste(into: core) { core.say("no image on the clipboard") }
+            return true
         }
     }
 
@@ -210,6 +213,11 @@ enum Editor {
             core.sendField()
             return true
         case .left, .right, .backspace, .delete: return false
+        case .picture:
+            if let png = UIPasteboard.general.image?.pngData(), let path = Pictures.store(png, ext: "png") {
+                core.attach(path)
+            }
+            return true
         case .home, .end, .kill_to_start, .kill_to_end, .kill_word:
             if core.stage?.scope == .field {
                 (core.fieldText, core.fieldSelection) = apply(e, core.fieldText, core.fieldSelection)
@@ -241,7 +249,7 @@ enum Editor {
             while start > 0, !chars[start - 1].isWhitespace { start -= 1 }
             chars.removeSubrange(start..<caret)
             caret = start
-        case .send, .left, .right, .backspace, .delete: break
+        case .send, .left, .right, .backspace, .delete, .picture: break
         }
         let out = String(chars)
         return (out, TextSelection(insertionPoint: out.index(out.startIndex, offsetBy: caret)))
