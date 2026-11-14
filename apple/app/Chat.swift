@@ -142,9 +142,9 @@ struct Composer: View {
     @ViewBuilder
     private var field: some View {
         #if os(iOS)
-        TextField("say something", text: $core.draft, selection: $core.draftSelection, axis: .vertical)
+        TextField("", text: $core.draft, selection: $core.draftSelection, axis: .vertical)
         #else
-        TextField("say something", text: $core.draft, axis: .vertical)
+        TextField("", text: $core.draft, axis: .vertical)
         #endif
     }
 
