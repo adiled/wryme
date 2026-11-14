@@ -29,6 +29,7 @@ One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/po
 | Tools | all | all | none that run programs (shell, explore, job check) |
 | Quit (Ctrl-C) | quits | quits | not offered |
 | Extras | | menu bar, Cmd-, settings | action menu |
+| Streaming state | "streaming…" and "esc interrupt" in the input title | dimmed input border only | dimmed input border only |
 | Sync row (Pref tab) | macOS: links the files into iCloud Drive › wryme; elsewhere hidden | same as the terminal on macOS | opens the Files folder picker |
 
 ## Sync

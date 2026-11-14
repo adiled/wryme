@@ -111,18 +111,17 @@ struct Composer: View {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(stage.bar.busy ? Theme.faint.opacity(0.4) : accent.opacity(0.7), lineWidth: 1)
             )
-            HStack {
-                if !stage.bar.state.isEmpty {
-                    Text("\(stage.bar.state)  ·  \(stage.bar.esc)")
-                }
-                Spacer()
+            .overlay(alignment: .bottomTrailing) {
                 if let tool = stage.bar.tool {
-                    Text(tool).fontWeight(.bold).foregroundStyle(accent)
+                    Text(tool)
+                        .font(Theme.font(stage.font, size: 11))
+                        .fontWeight(.bold)
+                        .foregroundStyle(accent)
+                        .padding(.horizontal, 6)
+                        .background(Theme.bg)
+                        .offset(x: -16, y: 7)
                 }
             }
-            .font(Theme.font(stage.font, size: 11))
-            .foregroundStyle(Theme.faint)
-            .padding(.horizontal, 4)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
