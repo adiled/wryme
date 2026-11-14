@@ -371,7 +371,7 @@ async fn one_shot(
     });
 
     let engine = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot")).expect("open book"),
+        crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot"), "oneshot").expect("open book"),
     ));
     let (tx, mut rx) = mpsc::unbounded_channel::<api::StreamEvent>();
     let task = platform::spawn({

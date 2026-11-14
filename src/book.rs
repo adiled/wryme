@@ -39,6 +39,7 @@ pub struct StreamRow {
     pub role: String,
     pub content: String,
     pub ts: i64,
+    pub window: String,
 }
 
 #[derive(Debug, Clone)]
@@ -50,9 +51,9 @@ pub struct Message {
 
 pub struct Book {
     dir: PathBuf,
+    window: String,
     next_row: u64,
-    next_seg: u64,
-    watermark: u64,
+    mine: Vec<u64>,
     unattr_tokens: i64,
     unattr_turns: i64,
     unattr_tail: Vec<(String, String)>,
@@ -113,9 +114,11 @@ mod term {
 
 pub const FIND_SHOW: usize = 6;
 
-pub fn open_engine(dir: &Path) -> Result<Engine> {
+pub fn open_engine(dir: &Path, window: &str) -> Result<Engine> {
+    let mut book = open_book(dir)?;
+    book.window = window.to_string();
     Ok(Engine {
-        book: open_book(dir)?,
+        book,
         established: vec![],
         pending_prod: false,
         last_lookup_row: 0,
@@ -155,12 +158,12 @@ impl Engine {
         }
         let book = &mut self.book;
         book.pending.push(StreamRow {
-            row_id: book.next_row,
+            row_id: 0,
             role: role.to_string(),
             content: content.to_string(),
             ts: now_ms(),
+            window: book.window.clone(),
         });
-        book.next_row += 1;
         book.unattr_tokens += content.len() as i64;
         book.unattr_turns += 1;
         book.unattr_tail
@@ -183,7 +186,12 @@ impl Engine {
         self.last_lookup_row = self.book.next_row;
     }
 
+    pub fn refresh(&mut self) {
+        refresh_index(&mut self.book);
+    }
+
     pub fn open(&mut self, topic: &str) -> Result<Option<String>> {
+        self.refresh();
         let Some(meta) = compartment(&self.book, topic).cloned() else {
             return Ok(None);
         };
@@ -220,9 +228,9 @@ pub fn open_book(dir: &Path) -> Result<Book> {
         let _ = dir;
         return Ok(Book {
             dir: dir.to_path_buf(),
+            window: String::new(),
             next_row: 0,
-            next_seg: 0,
-            watermark: 0,
+            mine: Vec::new(),
             unattr_tokens: 0,
             unattr_turns: 0,
             unattr_tail: Vec::new(),
@@ -247,17 +255,9 @@ fn open_book_fs(dir: &Path) -> Result<Book> {
     index.retain(|m| !m.topic.trim().is_empty());
     let rows = read_stream_on_disk(dir)?;
     let next_row = rows.last().map(|r| r.row_id + 1).unwrap_or(0);
-    let next_seg = read_stream_max_seg(dir)? + 1;
 
     let summary_path = dir.join("life_summary.txt");
     let life_summary = std::fs::read_to_string(&summary_path).unwrap_or_default();
-
-    let watermark = index
-        .iter()
-        .flat_map(|m| m.spans.iter().map(|(_, e)| *e))
-        .max()
-        .unwrap_or(0)
-        .min(next_row);
 
     for meta in index.iter_mut() {
         meta.tail = meta
@@ -266,16 +266,14 @@ fn open_book_fs(dir: &Path) -> Result<Book> {
             .map(|(s, e)| format_tail(&tail_entries(&rows, *s, *e)))
             .unwrap_or_default();
     }
-    let unattr_tail = tail_entries(&rows, watermark, next_row);
-
     Ok(Book {
         dir: dir.to_path_buf(),
+        window: String::new(),
         next_row,
-        next_seg,
-        watermark,
+        mine: Vec::new(),
         unattr_tokens: 0,
         unattr_turns: 0,
-        unattr_tail,
+        unattr_tail: Vec::new(),
         index,
         pending: vec![],
         life_summary,
@@ -283,90 +281,149 @@ fn open_book_fs(dir: &Path) -> Result<Book> {
 }
 
 pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
-    let topic = bookmark.topic.trim();
+    let topic = bookmark.topic.trim().to_string();
     if topic.is_empty() {
         return Ok("a page needs a topic to be deemed into".to_string());
     }
-    let now = now_ms();
-    let mut page = None;
-    let mut i = 0;
-    while i < book.index.len() {
-        if eq_topic(&book.index[i].topic, topic) {
-            if page.is_none() {
-                page = Some(i);
-                i += 1;
-                continue;
-            }
-            let dup = book.index.remove(i);
-            if let Some(p) = page {
-                book.index[p].spans.extend(dup.spans);
-                merge_spans(&mut book.index[p].spans);
-                book.index[p].life_tokens += dup.life_tokens;
-                book.index[p].opened_at = book.index[p].opened_at.min(dup.opened_at);
-            }
-            continue;
-        }
-        i += 1;
-    }
-    let idx = match page {
-        Some(i) => i,
-        None => {
-            book.index.push(CompartmentMeta {
-                opened_at: now,
-                last_inked: now,
-                topic: topic.to_string(),
-                tags: vec![],
-                people: vec![],
-                facts: vec![],
-                plans: vec![],
-                open: vec![],
-                spans: vec![],
-                life_tokens: 0,
-                tail: String::new(),
-            });
-            book.index.len() - 1
-        }
-    };
-    let start = book.watermark;
-    let end = book.next_row;
-    if start >= end {
+    flush_stream(book)?;
+    if book.mine.is_empty() {
         return Ok(format!("no new turns to deem into \"{topic}\""));
     }
-    let meta = &mut book.index[idx];
-    meta.spans.push((start, end));
-    merge_spans(&mut meta.spans);
-    meta.life_tokens += book.unattr_tokens;
-    meta.tags = bookmark.tags.clone();
-    meta.people = bookmark.people.clone();
-    meta.facts = bookmark.facts.clone();
-    meta.plans = bookmark.plans.clone();
-    meta.open = bookmark.open.clone();
-    meta.last_inked = now;
-    meta.tail = format_tail(&book.unattr_tail);
-    flush_stream(book)?;
-    book.watermark = end;
+    let mut spans: Vec<(u64, u64)> = book.mine.iter().map(|&id| (id, id + 1)).collect();
+    merge_spans(&mut spans);
+    let now = now_ms();
+    let tail = format_tail(&book.unattr_tail);
+    let tokens = book.unattr_tokens;
+    edit_index(book, |index| {
+        let idx = page_for(index, &topic, now);
+        let meta = &mut index[idx];
+        meta.spans.extend(spans.iter().copied());
+        merge_spans(&mut meta.spans);
+        meta.life_tokens += tokens;
+        meta.tags = bookmark.tags.clone();
+        meta.people = bookmark.people.clone();
+        meta.facts = bookmark.facts.clone();
+        meta.plans = bookmark.plans.clone();
+        meta.open = bookmark.open.clone();
+        meta.last_inked = now;
+        meta.tail = tail.clone();
+    })?;
+    book.mine.clear();
     book.unattr_tokens = 0;
     book.unattr_turns = 0;
     book.unattr_tail.clear();
-    write_index(book)?;
-    Ok(format!(
-        "deemed rows {start}..{end} into \"{topic}\"; bookmark refreshed"
-    ))
+    let rows = spans
+        .iter()
+        .map(|(s, e)| format!("{s}..{e}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!("deemed rows {rows} into \"{topic}\"; bookmark refreshed"))
+}
+
+fn page_for(index: &mut Vec<CompartmentMeta>, topic: &str, now: i64) -> usize {
+    let mut page = None;
+    let mut i = 0;
+    while i < index.len() {
+        if !eq_topic(&index[i].topic, topic) {
+            i += 1;
+            continue;
+        }
+        match page {
+            None => {
+                page = Some(i);
+                i += 1;
+            }
+            Some(p) => {
+                let dup = index.remove(i);
+                index[p].spans.extend(dup.spans);
+                merge_spans(&mut index[p].spans);
+                index[p].life_tokens += dup.life_tokens;
+                index[p].opened_at = index[p].opened_at.min(dup.opened_at);
+            }
+        }
+    }
+    page.unwrap_or_else(|| {
+        index.push(CompartmentMeta {
+            opened_at: now,
+            last_inked: now,
+            topic: topic.to_string(),
+            tags: vec![],
+            people: vec![],
+            facts: vec![],
+            plans: vec![],
+            open: vec![],
+            spans: vec![],
+            life_tokens: 0,
+            tail: String::new(),
+        });
+        index.len() - 1
+    })
 }
 
 pub fn update_bookmark(book: &mut Book, topic: &str, bookmark: &Bookmark) -> Result<()> {
-    let Some(meta) = book.index.iter_mut().find(|m| eq_topic(&m.topic, topic)) else {
-        return Ok(());
-    };
-    meta.topic = bookmark.topic.clone();
-    meta.tags = bookmark.tags.clone();
-    meta.people = bookmark.people.clone();
-    meta.facts = bookmark.facts.clone();
-    meta.plans = bookmark.plans.clone();
-    meta.open = bookmark.open.clone();
-    meta.last_inked = now_ms();
-    write_index(book)?;
+    let now = now_ms();
+    edit_index(book, |index| {
+        if let Some(meta) = index.iter_mut().find(|m| eq_topic(&m.topic, topic)) {
+            meta.topic = bookmark.topic.clone();
+            meta.tags = bookmark.tags.clone();
+            meta.people = bookmark.people.clone();
+            meta.facts = bookmark.facts.clone();
+            meta.plans = bookmark.plans.clone();
+            meta.open = bookmark.open.clone();
+            meta.last_inked = now;
+        }
+    })
+}
+
+struct Held(std::fs::File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn hold(dir: &Path) -> Result<Held> {
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))?;
+    file.lock()?;
+    Ok(Held(file))
+}
+
+fn carry_tails(fresh: &mut [CompartmentMeta], old: &[CompartmentMeta]) {
+    for meta in fresh.iter_mut().filter(|m| m.tail.is_empty()) {
+        if let Some(was) = old.iter().find(|o| eq_topic(&o.topic, &meta.topic)) {
+            meta.tail = was.tail.clone();
+        }
+    }
+}
+
+fn disk_index(dir: &Path) -> Result<Vec<CompartmentMeta>> {
+    let path = dir.join("index.parquet");
+    let mut index = if path.exists() { read_index(&path)? } else { vec![] };
+    index.retain(|m| !m.topic.trim().is_empty());
+    Ok(index)
+}
+
+fn edit_index(book: &mut Book, change: impl FnOnce(&mut Vec<CompartmentMeta>)) -> Result<()> {
+    let _held = hold(&book.dir)?;
+    let mut index = disk_index(&book.dir)?;
+    carry_tails(&mut index, &book.index);
+    change(&mut index);
+    write_index_to(&book.dir, &index)?;
+    book.index = index;
     Ok(())
+}
+
+fn refresh_index(book: &mut Book) {
+    if let Ok(mut index) = disk_index(&book.dir) {
+        carry_tails(&mut index, &book.index);
+        book.index = index;
+    }
 }
 
 pub fn index_entries(book: &Book) -> &[CompartmentMeta] {
@@ -568,18 +625,28 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
     hits.into_iter().map(|(m, _)| m).collect()
 }
 
-fn stream_dir(book: &Book) -> PathBuf {
-    book.dir.join("stream")
-}
-
 fn flush_stream(book: &mut Book) -> Result<()> {
     if book.pending.is_empty() {
         return Ok(());
     }
-    let seg = book.next_seg;
-    book.next_seg += 1;
-    write_stream_segment(book, seg, &book.pending)?;
+    let _held = hold(&book.dir)?;
+    let counter = book.dir.join("rows");
+    let mut next = match std::fs::read_to_string(&counter).ok().and_then(|t| t.trim().parse::<u64>().ok()) {
+        Some(n) => n,
+        None => read_stream_on_disk(&book.dir)?.last().map_or(0, |r| r.row_id + 1),
+    };
+    let first = next;
+    for row in book.pending.iter_mut() {
+        row.row_id = next;
+        next += 1;
+    }
+    write_stream_segment(&book.dir, first, &book.pending)?;
+    let staged = book.dir.join(format!("rows.{}", std::process::id()));
+    std::fs::write(&staged, next.to_string())?;
+    std::fs::rename(&staged, &counter)?;
+    book.mine.extend(book.pending.iter().map(|r| r.row_id));
     book.pending.clear();
+    book.next_row = next;
     Ok(())
 }
 
@@ -604,24 +671,6 @@ fn read_stream(book: &Book) -> Result<Vec<StreamRow>> {
     all.extend(book.pending.iter().cloned());
     all.sort_by_key(|r| r.row_id);
     Ok(all)
-}
-
-fn read_stream_max_seg(dir: &Path) -> Result<u64> {
-    let stream_dir = dir.join("stream");
-    if !stream_dir.exists() {
-        return Ok(0);
-    }
-    let mut max = 0u64;
-    for entry in std::fs::read_dir(&stream_dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = name.strip_suffix(".parquet")
-            && let Ok(n) = stem.parse::<u64>()
-        {
-            max = max.max(n);
-        }
-    }
-    Ok(max)
 }
 
 fn eq_topic(a: &str, b: &str) -> bool {
@@ -665,56 +714,57 @@ fn stream_schema() -> SchemaRef {
         Field::new("role", DataType::Utf8, true),
         Field::new("content", DataType::Utf8, true),
         Field::new("ts", DataType::Int64, false),
+        Field::new("window", DataType::Utf8, true),
     ];
     Schema::new(fields).into()
 }
 
-fn write_index(book: &Book) -> Result<()> {
-    let opened = Int64Array::from(book.index.iter().map(|m| m.opened_at).collect::<Vec<_>>());
-    let last_inked = Int64Array::from(book.index.iter().map(|m| m.last_inked).collect::<Vec<_>>());
+fn write_index_to(dir: &Path, index: &[CompartmentMeta]) -> Result<()> {
+    let opened = Int64Array::from(index.iter().map(|m| m.opened_at).collect::<Vec<_>>());
+    let last_inked = Int64Array::from(index.iter().map(|m| m.last_inked).collect::<Vec<_>>());
     let topic = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| m.topic.as_str())
             .collect::<Vec<_>>(),
     );
     let tags = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| join(&m.tags))
             .collect::<Vec<String>>(),
     );
     let people = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| join(&m.people))
             .collect::<Vec<String>>(),
     );
     let facts = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| join(&m.facts))
             .collect::<Vec<String>>(),
     );
     let plans = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| join(&m.plans))
             .collect::<Vec<String>>(),
     );
     let open = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| join(&m.open))
             .collect::<Vec<String>>(),
     );
     let spans = StringArray::from(
-        book.index
+        index
             .iter()
             .map(|m| join_spans(&m.spans))
             .collect::<Vec<String>>(),
     );
-    let tokens = Int64Array::from(book.index.iter().map(|m| m.life_tokens).collect::<Vec<_>>());
+    let tokens = Int64Array::from(index.iter().map(|m| m.life_tokens).collect::<Vec<_>>());
 
     let batch = RecordBatch::try_new(
         index_schema(),
@@ -732,11 +782,12 @@ fn write_index(book: &Book) -> Result<()> {
         ],
     )?;
 
-    let file = std::fs::File::create(book.dir.join("index.parquet"))?;
-    let writer = ArrowWriter::try_new(file, index_schema(), None)?;
-    let mut writer = writer;
+    let staged = dir.join(format!("index.parquet.{}", std::process::id()));
+    let file = std::fs::File::create(&staged)?;
+    let mut writer = ArrowWriter::try_new(file, index_schema(), None)?;
     writer.write(&batch)?;
     let _ = writer.close()?;
+    std::fs::rename(&staged, dir.join("index.parquet"))?;
     Ok(())
 }
 
@@ -778,13 +829,14 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     Ok(metas)
 }
 
-fn write_stream_segment(book: &Book, seg: u64, rows: &[StreamRow]) -> Result<()> {
-    let dir = stream_dir(book);
+fn write_stream_segment(book_dir: &Path, first: u64, rows: &[StreamRow]) -> Result<()> {
+    let dir = book_dir.join("stream");
     std::fs::create_dir_all(&dir)?;
     let ids = Int64Array::from(rows.iter().map(|r| r.row_id as i64).collect::<Vec<_>>());
     let role = StringArray::from(rows.iter().map(|r| r.role.as_str()).collect::<Vec<_>>());
     let content = StringArray::from(rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>());
     let ts = Int64Array::from(rows.iter().map(|r| r.ts).collect::<Vec<_>>());
+    let window = StringArray::from(rows.iter().map(|r| r.window.as_str()).collect::<Vec<_>>());
 
     let batch = RecordBatch::try_new(
         stream_schema(),
@@ -793,10 +845,11 @@ fn write_stream_segment(book: &Book, seg: u64, rows: &[StreamRow]) -> Result<()>
             std::sync::Arc::new(role),
             std::sync::Arc::new(content),
             std::sync::Arc::new(ts),
+            std::sync::Arc::new(window),
         ],
     )?;
 
-    let file = std::fs::File::create(dir.join(format!("{seg:04}.parquet")))?;
+    let file = std::fs::File::create(dir.join(format!("r{first:08}.parquet")))?;
     let writer = ArrowWriter::try_new(file, stream_schema(), None)?;
     let mut writer = writer;
     writer.write(&batch)?;
@@ -814,12 +867,14 @@ fn read_stream_segment(path: &Path) -> Result<Vec<StreamRow>> {
         let role = batch.column_by_name("role").unwrap();
         let content = batch.column_by_name("content").unwrap();
         let ts = batch.column_by_name("ts").unwrap();
+        let window = batch.column_by_name("window");
         for i in 0..batch.num_rows() {
             rows.push(StreamRow {
                 row_id: as_i64(ids, i) as u64,
                 role: as_str(role, i),
                 content: as_str(content, i),
                 ts: as_i64(ts, i),
+                window: window.map(|w| as_str(w, i)).unwrap_or_default(),
             });
         }
     }
@@ -885,6 +940,7 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             ts: now_ms(),
+            window: "test".into(),
         }
     }
 
@@ -978,7 +1034,7 @@ mod tests {
     fn an_open_page_is_said_the_same_until_inked_again() {
         let dir = tmpdir("preamble");
         let _ = std::fs::remove_dir_all(&dir);
-        let mut engine = open_engine(&dir).unwrap();
+        let mut engine = open_engine(&dir, "w1").unwrap();
         engine.record_turn("user", "let us plan the garden");
         engine
             .deem(&Bookmark {
@@ -1003,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn deem_advances_watermark_and_skips_empty() {
+    fn deem_takes_this_windows_new_turns_and_skips_empty() {
         let dir = tmpdir("watermark");
         let _ = std::fs::remove_dir_all(&dir);
         let mut book = open_book(&dir).unwrap();
@@ -1019,7 +1075,7 @@ mod tests {
             .unwrap()
             .contains("no new turns")
         );
-        assert_eq!(book.watermark, 0);
+        assert!(book.mine.is_empty());
 
         book.pending.push(msg("user", "one", book.next_row));
         book.next_row += 1;
@@ -1033,7 +1089,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(book.watermark, 1);
+        assert!(book.mine.is_empty());
         assert_eq!(book.unattr_tokens, 0);
         assert_eq!(compartment(&book, "t").unwrap().spans, vec![(0, 1)]);
 
@@ -1056,7 +1112,7 @@ mod tests {
     fn engine_prod_fires_only_when_weightful_and_unshielded() {
         let dir = tmpdir("prod");
         let _ = std::fs::remove_dir_all(&dir);
-        let mut e = open_engine(&dir).unwrap();
+        let mut e = open_engine(&dir, "w1").unwrap();
 
         for _ in 0..4 {
             e.record_turn("user", "a");
@@ -1068,14 +1124,14 @@ mod tests {
         }
         assert!(e.take_prod().is_some());
 
-        let mut e2 = open_engine(&dir).unwrap();
+        let mut e2 = open_engine(&dir, "w2").unwrap();
         e2.record_turn("user", "this is a long enough sentence to count as weight");
         e2.note_lookup();
         e2.record_turn("user", "this is a long enough sentence to count as weight");
         e2.record_turn("user", "this is a long enough sentence to count as weight");
         assert_eq!(e2.take_prod(), None);
 
-        let mut e3 = open_engine(&dir).unwrap();
+        let mut e3 = open_engine(&dir, "w3").unwrap();
         for _ in 0..40 {
             e3.record_turn("user", "this is a long enough sentence to count as weight");
         }
@@ -1093,7 +1149,7 @@ mod tests {
     fn engine_flushes_every_turn_so_turns_survive_without_deem() {
         let dir = tmpdir("durable");
         let _ = std::fs::remove_dir_all(&dir);
-        let mut e = open_engine(&dir).unwrap();
+        let mut e = open_engine(&dir, "w1").unwrap();
 
         e.record_turn("user", "remember our lisbon plans");
         e.record_turn("assistant", "may is lovely");
@@ -1105,7 +1161,7 @@ mod tests {
         assert_eq!(rows[0].content, "remember our lisbon plans");
         assert_eq!(rows[1].content, "may is lovely");
 
-        let mut e2 = open_engine(&dir).unwrap();
+        let mut e2 = open_engine(&dir, "w2").unwrap();
         e2.record_turn("user", "third turn");
         let book3 = open_book(&dir).unwrap();
         let rows = read_stream(&book3).unwrap();
@@ -1206,6 +1262,111 @@ mod tests {
         assert_eq!(page.tags, vec!["roses"]);
         assert_eq!(page.facts, vec!["soil loves sun"]);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rows_on(dir: &Path) -> Vec<StreamRow> {
+        read_stream_on_disk(dir).unwrap()
+    }
+
+    #[test]
+    fn two_windows_never_overwrite_or_share_row_numbers() {
+        let dir = tmpdir("two_windows");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = open_engine(&dir, "aaaa").unwrap();
+        let mut b = open_engine(&dir, "bbbb").unwrap();
+        for i in 0..5 {
+            a.record_turn("user", &format!("a{i}"));
+            b.record_turn("user", &format!("b{i}"));
+        }
+        let rows = rows_on(&dir);
+        assert_eq!(rows.len(), 10);
+        let mut ids: Vec<u64> = rows.iter().map(|r| r.row_id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 10);
+        assert!(rows.iter().all(|r| r.content.starts_with(&r.window[..1])));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_holds_only_the_turns_of_the_window_that_filed_it() {
+        let dir = tmpdir("own_turns");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = open_engine(&dir, "aaaa").unwrap();
+        let mut b = open_engine(&dir, "bbbb").unwrap();
+        for i in 0..3 {
+            a.record_turn("user", &format!("about the garden {i}"));
+            b.record_turn("user", &format!("about the heart colour {i}"));
+        }
+        a.deem(&Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+        let thread = read_compartment(&a.book, "garden").unwrap().unwrap();
+        assert_eq!(thread.len(), 3);
+        assert!(thread.iter().all(|m| m.content.contains("garden")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pages_filed_by_different_windows_all_survive() {
+        let dir = tmpdir("both_pages");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = open_engine(&dir, "aaaa").unwrap();
+        let mut b = open_engine(&dir, "bbbb").unwrap();
+        a.record_turn("user", "alpha talk");
+        b.record_turn("user", "beta talk");
+        a.deem(&Bookmark { topic: "alpha".into(), ..Default::default() }).unwrap();
+        b.deem(&Bookmark { topic: "beta".into(), ..Default::default() }).unwrap();
+        let fresh = open_book(&dir).unwrap();
+        assert!(compartment(&fresh, "alpha").is_some());
+        assert!(compartment(&fresh, "beta").is_some());
+        a.refresh();
+        assert!(compartment(&a.book, "beta").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_window_starts_with_nothing_of_anyone_elses() {
+        let dir = tmpdir("fresh_tail");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = open_engine(&dir, "aaaa").unwrap();
+        a.record_turn("user", "a secret about the heart");
+        let b = open_engine(&dir, "bbbb").unwrap();
+        assert!(b.book.unattr_tail.is_empty());
+        assert!(b.book.mine.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_turn_files_without_a_window_still_read() {
+        let dir = tmpdir("legacy_stream");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("stream")).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("row_id", DataType::Int64, false),
+            Field::new("role", DataType::Utf8, true),
+            Field::new("content", DataType::Utf8, true),
+            Field::new("ts", DataType::Int64, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(schema.clone()),
+            vec![
+                std::sync::Arc::new(Int64Array::from(vec![41])),
+                std::sync::Arc::new(StringArray::from(vec![Some("user")])),
+                std::sync::Arc::new(StringArray::from(vec![Some("old words")])),
+                std::sync::Arc::new(Int64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(dir.join("stream").join("0042.parquet")).unwrap();
+        let mut writer = ArrowWriter::try_new(file, std::sync::Arc::new(schema), None).unwrap();
+        writer.write(&batch).unwrap();
+        let _ = writer.close().unwrap();
+        let mut e = open_engine(&dir, "aaaa").unwrap();
+        e.record_turn("user", "new words");
+        let rows = rows_on(&dir);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].window, "");
+        assert_eq!(rows[1].row_id, 42);
+        assert_eq!(rows[1].window, "aaaa");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

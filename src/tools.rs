@@ -372,6 +372,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .unwrap_or("")
                 .to_string();
             let mut e = engine.lock().unwrap();
+            e.refresh();
             e.note_lookup();
             let hits = book::match_compartments(&e.book, &query);
             render_find(&query, &hits)
@@ -395,7 +396,8 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let e = engine.lock().unwrap();
+            let mut e = engine.lock().unwrap();
+            e.refresh();
             match book::read_compartment(&e.book, &topic) {
                 Ok(Some(msgs)) if !msgs.is_empty() => book::render_compartment(&msgs),
                 Ok(_) => format!("page \"{topic}\" has no thread yet"),
@@ -734,7 +736,7 @@ mod tests {
     async fn book_tool_deem_births_find_open_roundtrip() {
         let dir = std::env::temp_dir().join(format!("wryme_btool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        let engine = Arc::new(Mutex::new(book::open_engine(&dir, "test").unwrap()));
 
         {
             let mut e = engine.lock().unwrap();
@@ -776,7 +778,7 @@ mod tests {
     async fn book_tool_deem_advances_watermark() {
         let dir = std::env::temp_dir().join(format!("wryme_btool2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        let engine = Arc::new(Mutex::new(book::open_engine(&dir, "test").unwrap()));
 
         {
             let mut e = engine.lock().unwrap();

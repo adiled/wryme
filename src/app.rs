@@ -148,10 +148,12 @@ impl App {
         active_origin: Option<String>,
     ) -> Self {
         crate::sync::publish();
+        let window_id = crate::windows::mint();
+        let engine = book::open_engine(&book_dir(), &window_id).expect("open book");
         Self {
             messages: Vec::new(),
             system,
-            window_id: crate::windows::mint(),
+            window_id,
             guest_queue: Vec::new(),
             in_flight: false,
             status: String::new(),
@@ -183,9 +185,7 @@ impl App {
             shop_check: None,
             shop_check_task: None,
             popup: Popup::default(),
-            engine: Arc::new(Mutex::new(
-                book::open_engine(&book_dir()).expect("open book"),
-            )),
+            engine: Arc::new(Mutex::new(engine)),
             reservoir: Arc::new(Mutex::new(Reservoir::load())),
             turn_counter: 0,
             last_stream_was_brain: false,
@@ -713,7 +713,7 @@ mod tests {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("wryme_app_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        app.engine = Arc::new(Mutex::new(book::open_engine(&dir, "test").unwrap()));
         app
     }
 
