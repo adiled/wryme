@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 #if os(iOS)
 import PhotosUI
 import UniformTypeIdentifiers
@@ -32,9 +36,34 @@ struct Root: View {
         .onChange(of: phase) { _, now in
             if now == .active { Folder.refresh() }
         }
+        #else
+        .overlay(alignment: .top) { TitleStrip() }
         #endif
     }
 }
+
+#if os(macOS)
+struct TitleStrip: View {
+    var body: some View {
+        Color.clear
+            .frame(height: 28)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { TitleStrip.doubleClick() }
+            .gesture(WindowDragGesture())
+            .ignoresSafeArea(edges: .top)
+    }
+
+    static func doubleClick() {
+        guard let window = NSApp.keyWindow else { return }
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": window.miniaturize(nil)
+        case "None": break
+        default: window.zoom(nil)
+        }
+    }
+}
+#endif
 
 struct Main: View {
     let stage: Stage
