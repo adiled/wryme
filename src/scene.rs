@@ -16,6 +16,7 @@ pub const AWAITING: &str = "awaiting";
 
 #[derive(Serialize)]
 pub struct Scene {
+    pub window: String,
     #[serde(serialize_with = "ink")]
     pub accent: Color,
     pub nametags: NametagMode,
@@ -285,6 +286,7 @@ pub fn build(app: &App) -> Scene {
         )
         .collect();
     Scene {
+        window: crate::windows::tag(&app.window_id),
         accent: app.accent,
         nametags: app.nametags,
         font: app.typeface,

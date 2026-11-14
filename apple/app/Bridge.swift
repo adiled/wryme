@@ -90,6 +90,7 @@ struct Sheet: Decodable {
 }
 
 struct Stage: Decodable {
+    let window: String
     let accent: String?
     let nametags: Nametags
     let font: Typeface
@@ -307,6 +308,9 @@ final class Core: ObservableObject {
         if stage.scope == .field, old?.scope != .field {
             fieldText = stage.sheet?.field?.text ?? ""
         }
+        #if os(macOS)
+        if let window, window.title != stage.window { window.title = stage.window }
+        #endif
         if old?.turn != stage.turn || old?.view != stage.view {
             chatMoves.send(.top)
         }
