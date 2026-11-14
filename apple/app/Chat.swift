@@ -74,7 +74,7 @@ struct Composer: View {
     let stage: Stage
     let accent: Color
     @ObservedObject var core = Core.shared
-    @FocusState private var focused: Bool
+    @State private var focus = 0
     #if os(iOS)
     @State private var photo: PhotosPickerItem?
     #endif
@@ -83,11 +83,11 @@ struct Composer: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
                 Text("›").foregroundStyle(accent)
-                field
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...8)
-                    .focused($focused)
-                    .onChange(of: core.draft) { _, text in settle(text) }
+                Typer(
+                    text: $core.draft, caret: $core.draftCaret,
+                    font: Theme.platformFont(stage.font, size: 15), ink: Theme.fg, lines: 8, focus: focus
+                )
+                .onChange(of: core.draft) { _, text in settle(text) }
                 #if os(iOS)
                 PhotosPicker(selection: $photo, matching: .images) {
                     Image(systemName: "photo")
@@ -130,22 +130,18 @@ struct Composer: View {
         .padding(.bottom, 4)
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
-            core.draft = url.path
+            put(url.path)
             return true
         }
-        .onAppear { focused = true }
+        .onAppear { focus += 1 }
         .onChange(of: stage.scope) { _, scope in
-            if scope == .chat { focused = true }
+            if scope == .chat { focus += 1 }
         }
     }
 
-    @ViewBuilder
-    private var field: some View {
-        #if os(iOS)
-        TextField("say something", text: $core.draft, selection: $core.draftSelection, axis: .vertical)
-        #else
-        TextField("say something", text: $core.draft, axis: .vertical)
-        #endif
+    private func put(_ text: String) {
+        core.draft = text
+        core.draftCaret = (text as NSString).length
     }
 
     private func settle(_ text: String) {
@@ -154,7 +150,7 @@ struct Composer: View {
             core.draft = String(text.dropLast())
             core.sendField()
         } else {
-            core.draft = text.replacingOccurrences(of: "\n", with: " ")
+            put(text.replacingOccurrences(of: "\n", with: " "))
         }
     }
 
@@ -169,7 +165,7 @@ struct Composer: View {
                 .appendingPathComponent("wryme-\(UUID().uuidString).jpg")
             guard (try? jpeg.write(to: url)) != nil else { return }
             await MainActor.run {
-                core.draft = url.path
+                put(url.path)
                 photo = nil
             }
         }

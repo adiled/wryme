@@ -5,7 +5,6 @@ struct Panel: View {
     let stage: Stage
     let accent: Color
     @ObservedObject var core = Core.shared
-    @FocusState private var editing: Bool
     @State private var position = ScrollPosition(idType: Int.self)
     @State private var geo = GeoBox()
     #if os(iOS)
@@ -48,10 +47,11 @@ struct Panel: View {
                 if let field = sheet.field {
                     HStack(spacing: 8) {
                         Text("\(field.label):").foregroundStyle(accent)
-                        editor
-                            .textFieldStyle(.plain)
-                            .focused($editing)
-                            .onAppear { editing = true }
+                        Typer(
+                            text: $core.fieldText, caret: $core.fieldCaret,
+                            font: Theme.platformFont(stage.font, size: 13, mono: true), ink: Theme.fg,
+                            lines: 1, focus: 1
+                        )
                     }
                     .font(Theme.font(stage.font, size: 13, mono: true))
                 }
@@ -86,15 +86,6 @@ struct Panel: View {
                 .buttonStyle(.plain)
             }
         }
-    }
-
-    @ViewBuilder
-    private var editor: some View {
-        #if os(iOS)
-        TextField("", text: $core.fieldText, selection: $core.fieldSelection)
-        #else
-        TextField("", text: $core.fieldText)
-        #endif
     }
 
     @ViewBuilder

@@ -102,7 +102,7 @@ struct Stage: Decodable {
 }
 
 struct Envelope: Decodable {
-    let bindings: [Binding]?
+    let bindings: [Bind]?
     let stage: Stage?
     let order: [String]?
     let bubbles: [String: Bubble]?
@@ -164,15 +164,13 @@ final class Core: ObservableObject {
 
     @Published var stage: Stage?
     @Published var bubbles: [Bubble] = []
-    @Published var bindings: [Binding] = []
+    @Published var bindings: [Bind] = []
     @Published var fatal: String?
     @Published var needsFolder = false
     @Published var draft = ""
     @Published var fieldText = ""
-    #if os(iOS)
-    @Published var draftSelection: TextSelection?
-    @Published var fieldSelection: TextSelection?
-    #endif
+    @Published var draftCaret = 0
+    @Published var fieldCaret = 0
 
     let chatMoves = PassthroughSubject<Move, Never>()
     let sheetMoves = PassthroughSubject<Move, Never>()
@@ -210,6 +208,7 @@ final class Core: ObservableObject {
         let old = self.stage
         if stage.scope == .field, old?.scope != .field {
             fieldText = stage.sheet?.field?.text ?? ""
+            fieldCaret = (fieldText as NSString).length
         }
         if old?.turn != stage.turn || old?.view != stage.view {
             chatMoves.send(.top)
@@ -242,7 +241,7 @@ final class Core: ObservableObject {
         submit(text)
     }
 
-    func reaches(_ b: Binding) -> Bool {
+    func reaches(_ b: Bind) -> Bool {
         b.scope == .any || b.scope == stage?.scope
     }
 
@@ -250,13 +249,13 @@ final class Core: ObservableObject {
         bindings.contains { $0.name == name && reaches($0) }
     }
 
-    func lookup(_ chord: Chord) -> Binding? {
+    func lookup(_ chord: Chord) -> Bind? {
         let near = bindings.filter(reaches)
         return near.first { $0.chord.fits(chord, relax: false) }
             ?? near.first { $0.chord.fits(chord, relax: true) }
     }
 
-    var menu: [Binding] {
+    var menu: [Bind] {
         var seen = Set<String>()
         return bindings.filter { b in
             guard case .core = b.act, Platform.allows(b.name), !seen.contains(b.name) else { return false }
@@ -266,7 +265,7 @@ final class Core: ObservableObject {
     }
 
     @discardableResult
-    func perform(_ b: Binding) -> Bool {
+    func perform(_ b: Bind) -> Bool {
         switch b.act {
         case .core(let name):
             if Platform.allows(name) { act(name) }
