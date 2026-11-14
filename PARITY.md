@@ -22,6 +22,8 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 |---|---|---|---|
 | Chat text | the terminal's font | font pref (system, serif, rounded, mono) | font pref |
 | Code, tables, settings rows | monospace | monospace | monospace |
+| Code blocks | gutter with the language | card with the language and a copy button (on hover) | card with a copy button |
+| Window background | the terminal's | translucent | solid |
 | Dim grey | terminal palette | lighter `#7a7a88` | lighter `#7a7a88` |
 | Selecting text | drag, copies on release; Shift-arrows extend | native selection, Cmd-C | native selection |
 | Page mode | pins the start of a long reply, steps rows, then pages | snaps whole screens | snaps whole screens |

@@ -15,7 +15,7 @@ struct Root: View {
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            Backdrop()
             if let fatal = core.fatal {
                 Text(fatal)
                     .foregroundStyle(Theme.color("Red") ?? .red)
@@ -279,11 +279,11 @@ struct BubbleView: View {
                 }
                 Text(bubble.time).foregroundStyle(Theme.faint).monospacedDigit()
             }
-            if !head.characters.isEmpty {
-                Text(head).frame(maxWidth: .infinity, alignment: .leading)
+            if hasHead {
+                Blocks(lead: lead, rows: bubble.reply, face: face)
             }
-            thought("brain", bubble.brain, after: !head.characters.isEmpty)
-            thought("heart", bubble.heart, after: !head.characters.isEmpty || !bubble.brain.isEmpty)
+            thought("brain", bubble.brain, after: hasHead)
+            thought("heart", bubble.heart, after: hasHead || !bubble.brain.isEmpty)
         }
     }
 
@@ -298,23 +298,23 @@ struct BubbleView: View {
         }
     }
 
-    private var head: AttributedString {
+    private var hasHead: Bool { !lead.characters.isEmpty || !bubble.reply.isEmpty }
+
+    private var lead: AttributedString {
         var lines: [AttributedString] = bubble.images.map {
             Theme.plain("📷 attached: \($0)", Theme.faint, face: face)
         }
         if bubble.orphan { lines.append(Theme.plain("▌", Theme.faint, face: face)) }
-        if !bubble.reply.isEmpty {
-            var reply = AttributedString()
-            if stage.nametags == .inlined, let guest = bubble.guest {
-                reply += Theme.plain("@\(guest) ", ink, face: face)
-            }
-            reply += Theme.paint(bubble.reply, face: face)
-            lines.append(reply)
-        }
         var out = AttributedString()
         for (i, line) in lines.enumerated() {
             if i > 0 { out += AttributedString("\n") }
             out += line
+        }
+        if !bubble.reply.isEmpty {
+            if !lines.isEmpty { out += AttributedString("\n") }
+            if stage.nametags == .inlined, let guest = bubble.guest {
+                out += Theme.plain("@\(guest) ", ink, face: face)
+            }
         }
         return out
     }
@@ -323,19 +323,20 @@ struct BubbleView: View {
         let mark: String
         let ink: Color
         let blinks: Bool
-        let text: AttributedString
+        let lead: AttributedString
+        let rows: [Row]
     }
 
     private var parts: [Part] {
         var out: [Part] = []
-        if !head.characters.isEmpty {
-            out.append(Part(mark: bubble.mark, ink: ink, blinks: bubble.blinks, text: head))
+        if hasHead {
+            out.append(Part(mark: bubble.mark, ink: ink, blinks: bubble.blinks, lead: lead, rows: bubble.reply))
         }
         for (rows, mark) in [(bubble.brain, stage.marks.brain), (bubble.heart, stage.marks.heart)] where !rows.isEmpty {
-            out.append(Part(mark: mark, ink: Theme.faint, blinks: bubble.thinkingLive, text: Theme.paint(rows, face: face)))
+            out.append(Part(mark: mark, ink: Theme.faint, blinks: bubble.thinkingLive, lead: AttributedString(), rows: rows))
         }
         if out.isEmpty {
-            out.append(Part(mark: bubble.mark, ink: ink, blinks: bubble.blinks, text: AttributedString()))
+            out.append(Part(mark: bubble.mark, ink: ink, blinks: bubble.blinks, lead: AttributedString(), rows: []))
         }
         return out
     }
@@ -346,7 +347,7 @@ struct BubbleView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
                     Mark(text: part.mark, ink: part.ink, blinks: part.blinks)
                         .frame(width: Theme.size * 1.6, alignment: .leading)
-                    Text(part.text).frame(maxWidth: .infinity, alignment: .leading)
+                    Blocks(lead: part.lead, rows: part.rows, face: face)
                     if i == 0, let tool = bubble.tool {
                         Text(tool).fontWeight(.bold).foregroundStyle(accent).padding(.leading, 12)
                     }

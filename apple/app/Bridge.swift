@@ -16,8 +16,11 @@ struct Run: Decodable {
     let x: Bool
 }
 
+enum Kind: String, Decodable { case prose, head, code, table }
+
 struct Row: Decodable {
     let mono: Bool
+    let kind: Kind
     let runs: [Run]
 }
 

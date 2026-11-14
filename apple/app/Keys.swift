@@ -107,9 +107,16 @@ extension View {
 
 enum Platform {
     #if os(macOS)
+    static let hovers = true
     static func allows(_ action: String) -> Bool { true }
     static func copy() { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
     #else
+    static let hovers = false
+    static func copy(_ text: String) { UIPasteboard.general.string = text }
     static func allows(_ action: String) -> Bool { action != "quit" }
     static func copy() {
         UIApplication.shared.sendAction(

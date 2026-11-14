@@ -35,7 +35,12 @@ struct WindowRoot: View {
         Root()
             .environmentObject(core)
             .focusedSceneObject(core)
-            .background(WindowReader { core.window = $0 })
+            .background(
+                WindowReader { window in
+                    core.window = window
+                    window?.isOpaque = false
+                    window?.backgroundColor = .clear
+                })
             .onAppear { core.start() }
             .onDisappear { core.stop() }
             .onChange(of: core.ended) { _, ended in

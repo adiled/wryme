@@ -713,12 +713,14 @@ impl<'a> Run<'a> {
 #[derive(Serialize)]
 struct Row<'a> {
     mono: bool,
+    kind: crate::md::Kind,
     runs: Vec<Run<'a>>,
 }
 
 fn rows<S: Serializer>(lines: &[Line<'static>], s: S) -> Result<S::Ok, S::Error> {
     s.collect_seq(lines.iter().map(|line| Row {
         mono: crate::md::mono(line),
+        kind: crate::md::kind(line),
         runs: line.spans.iter().map(|span| Run::of(span, line.style)).collect(),
     }))
 }
