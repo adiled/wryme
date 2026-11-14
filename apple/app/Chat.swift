@@ -107,7 +107,6 @@ struct Composer: View {
             .foregroundStyle(Theme.fg)
             .font(Theme.font(stage.font, size: 15))
             .padding(12)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panel))
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(stage.bar.busy ? Theme.faint.opacity(0.4) : accent.opacity(0.7), lineWidth: 1)
