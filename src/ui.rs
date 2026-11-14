@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::input::Input;
 use crate::popup;
-use crate::shop::Protocol;
+use crate::scene::{self, Activity, HEART_MARK};
 
 const ERROR_BOX_MAX_ROWS: usize = 8;
 
@@ -27,26 +27,21 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
     let (input_chunk, messages_chunk, status_chunk) = (chunks[0], chunks[1], chunks[2]);
 
     let prompt = "› ";
-    let (state, esc) = if app.in_flight {
-        if app.voice_is_active() {
-            ("streaming + speaking…", "esc quiet ")
-        } else {
-            ("streaming…", "esc interrupt ")
-        }
-    } else if app.voice_is_active() {
-        ("speaking…", "esc quiet ")
-    } else {
-        ("", "")
-    };
-    let label = if state.is_empty() {
+    let bar = scene::bar(app);
+    let label = if bar.state.is_empty() {
         " wme. ".to_string()
     } else {
-        format!(" wme. {state} ")
+        format!(" wme. {} ", bar.state)
+    };
+    let esc = if bar.esc.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", bar.esc)
     };
     let mut input_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if app.in_flight {
+        .border_style(if bar.busy {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(app.accent)
@@ -110,22 +105,7 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
 
     let mut lines: Vec<Line> = Vec::new();
     let msg_width = messages_chunk.width;
-    if !app.awaiting.is_empty() {
-        let phantom = Message {
-            role: Role::User,
-            content: app.awaiting.clone(),
-            images: Vec::new(),
-            guest: None,
-            brain: String::new(),
-            heart: String::new(),
-            streaming: false,
-            waiting: true,
-            timestamp: String::new(),
-            phase: Phase::Streaming,
-            current_tool: None,
-            turn_id: 0,
-            tool_events: Vec::new(),
-        };
+    if let Some(phantom) = scene::awaiting(app) {
         push_message(&mut lines, &phantom, msg_width, app.accent, app.nametags, false);
         lines.push(Line::from(""));
     }
@@ -188,59 +168,10 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
 
     f.render_widget(messages_para.scroll((scroll_y, 0)), messages_chunk);
 
-    let dot = " • ";
-    let is_demo = app.active_shop.protocol == Protocol::Demo;
-    let dirty = app.is_dirty();
-    let station_label = match (&app.active_origin, dirty) {
-        (Some(origin), true) => format!("tuned from {}", origin),
-        (Some(origin), false) => origin.clone(),
-        (None, _) => app.active_station.name.clone(),
-    };
-    let station_color = if is_demo {
-        Color::Yellow
-    } else if dirty {
-        Color::Magenta
-    } else {
-        app.accent
-    };
-    let mut pieces = vec![
-        Span::styled(
-            crate::windows::tag(&app.window_id),
-            Style::default().fg(app.accent),
-        ),
-        Span::raw(dot),
-        Span::styled(
-            format!("station: {}", station_label),
-            Style::default().fg(station_color),
-        ),
-        Span::styled(
-            format!(" via {}", app.active_shop.name),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ];
-    #[cfg(feature = "reservoir")]
-    {
-        let heart_score = app
-            .reservoir
-            .lock()
-            .ok()
-            .map(|r| r.static_figure())
-            .unwrap_or(0);
-        let ht = heart_tilt(heart_score);
-        let heart_color = hue_lit(120.0 * (1.0 - ht));
-        pieces.push(Span::styled(format!(" {HEART_MARK} "), heart_color));
-    }
-    #[cfg(not(feature = "reservoir"))]
-    {
-        pieces.push(Span::raw(dot));
-    }
-    pieces.push(Span::raw(format!("{} msg", app.messages.len())));
-    if app.voice_on {
-        pieces.push(Span::raw(dot));
-        pieces.push(Span::styled("voice", Style::default().fg(app.accent)));
-    }
+    let status = scene::status(app);
+    let mut pieces = status.left;
     if !app.messages.is_empty() {
-        pieces.push(Span::raw(dot));
+        pieces.push(Span::raw(scene::DOT));
         match app.view_mode {
             ViewMode::Page => {
                 pieces.push(Span::styled(
@@ -264,66 +195,28 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
             }
         }
     }
-    pieces.push(Span::raw(dot));
-    pieces.push(Span::styled(
-        app.status.clone(),
-        Style::default().fg(if is_error_status(&app.status) {
-            Color::Red
-        } else {
-            Color::Gray
-        }),
-    ));
-    let used = app.usage_ctx + app.usage_out;
-    let mut trailer: Vec<Span<'static>> = Vec::new();
-    if used > 0 {
-        let fill = app
-            .reservoir
-            .lock()
-            .ok()
-            .and_then(|r| r.dip(&app.active_station.name))
-            .unwrap_or(0.0);
-        let color = if fill >= 0.5 {
-            let t = ((fill - 0.5) / 0.5).clamp(0.0, 1.0);
-            Color::Rgb(255, (255.0 * (1.0 - t)) as u8, 0)
-        } else {
-            Color::DarkGray
+    pieces.push(Span::raw(scene::DOT));
+    pieces.push(status.note);
+    if !status.right.is_empty() {
+        let width = |spans: &[Span<'_>]| -> usize {
+            spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum()
         };
-        trailer.push(Span::styled(format_k(used), Style::default().fg(color)));
-        if let Some(pct) = cache_pct(app.usage_cached, app.usage_ctx) {
-            let cache_color = if pct >= 50 {
-                Color::DarkGray
-            } else if pct > 0 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            trailer.push(Span::styled(
-                format!(" cache {pct}%"),
-                Style::default().fg(cache_color),
-            ));
-        }
-    }
-    if !trailer.is_empty() {
-        let left_w: usize = pieces
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
-        let tr_w: usize = trailer
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
+        let (left_w, tr_w) = (width(&pieces), width(&status.right));
         let bar_w = status_chunk.width as usize;
         if bar_w > left_w + tr_w + 2 {
             pieces.push(Span::raw(" ".repeat(bar_w - left_w - tr_w)));
         } else {
             pieces.push(Span::raw("  "));
         }
-        pieces.extend(trailer);
+        pieces.extend(status.right);
     }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, status_chunk);
 
-    if is_error_status(&app.status) {
+    if scene::is_error_status(&app.status) {
         draw_error_overlay(f, area, status_chunk, &app.status);
     }
 
@@ -362,61 +255,6 @@ fn paint_selection(f: &mut Frame, app: &mut App) {
             buf[(x, y)].modifier |= Modifier::REVERSED;
         }
     }
-}
-
-fn cache_pct(cached: u64, input: u64) -> Option<u64> {
-    (input > 0 && cached > 0).then(|| (cached * 100 / input).min(100))
-}
-
-fn format_k(n: u64) -> String {
-    if n < 1000 {
-        return n.to_string();
-    }
-    if n < 999_500 {
-        return format!("{}K", (n + 500) / 1000);
-    }
-    format!("{}M", (n + 500_000) / 1_000_000)
-}
-
-fn is_error_status(s: &str) -> bool {
-    s.starts_with("error")
-        || s.starts_with("upstream")
-        || s.starts_with("stopped:")
-        || s.starts_with("save failed")
-        || s.starts_with("update failed")
-}
-
-#[cfg(feature = "reservoir")]
-fn heart_tilt(score: u32) -> f64 {
-    const NEUTRAL: f64 = 50.0;
-    let top = crate::reservoir::STATIC_BOT_SCORE as f64;
-    ((score as f64 - NEUTRAL) / (top - NEUTRAL)).clamp(0.0, 1.0)
-}
-
-#[cfg(feature = "reservoir")]
-fn hue_lit(hue: f64) -> Color {
-    const LIGHTNESS: f64 = 0.45;
-    const SATURATION: f64 = 0.85;
-    const HUE_SECTOR_DEGREES: f64 = 60.0;
-
-    let l = LIGHTNESS;
-    let s = SATURATION;
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((hue / HUE_SECTOR_DEGREES) % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = match (hue.rem_euclid(360.0) / HUE_SECTOR_DEGREES).floor() as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    Color::Rgb(
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    )
 }
 
 fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) {
@@ -502,28 +340,18 @@ fn cut_at_width(s: &str, width: usize) -> &str {
     &s[..end]
 }
 
-fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, text: &str, cursor: bool, gap: bool) {
+fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, body: Vec<Line<'static>>, gap: bool) {
+    if body.is_empty() {
+        return;
+    }
     if gap {
         out.push(Line::from(""));
     }
-    let body = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
     out.push(Line::from(Span::styled(
         label.to_string(),
-        body.add_modifier(Modifier::BOLD),
+        scene::dim().add_modifier(Modifier::ITALIC | Modifier::BOLD),
     )));
-    let last_idx = text.split('\n').count().saturating_sub(1);
-    for (i, raw) in text.split('\n').enumerate() {
-        if i == last_idx && cursor {
-            out.push(Line::from(vec![
-                Span::styled(raw.to_string(), body),
-                Span::styled("▌", Style::default().fg(Color::DarkGray)),
-            ]));
-        } else {
-            out.push(Line::from(Span::styled(raw.to_string(), body)));
-        }
-    }
+    out.extend(body);
 }
 
 fn push_message(
@@ -538,72 +366,26 @@ fn push_message(
         Role::User => Color::Green,
         Role::Assistant => Color::Magenta,
     };
+    let b = scene::bubble(msg);
     if nametags == crate::config::NametagMode::Inlined {
-        return push_message_inlined(out, msg, area_width, role_color, thinking_live);
+        return push_message_inlined(out, msg, b, area_width, role_color, thinking_live);
     }
-
-    let role_text = match (&msg.role, &msg.guest) {
-        (Role::User, Some(from)) => format!("guest@{from}"),
-        (Role::User, None) => "you".to_string(),
-        (Role::Assistant, _) => "assistant".to_string(),
-    };
     let start = out.len();
 
     let mut header: Vec<Span<'static>> = vec![Span::styled(
-        role_text,
+        b.name,
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     )];
-    if msg.streaming {
-        let hidden = msg
-            .current_tool
-            .as_ref()
-            .map(|n| crate::tools::is_hidden_tool(n))
-            .unwrap_or(false);
-        let bookish = msg
-            .current_tool
-            .as_ref()
-            .map(|n| crate::tools::is_book_tool(n))
-            .unwrap_or(false);
-        let label = match (msg.phase, hidden, bookish) {
-            (Phase::Writing, ..) => Some("  writing…"),
-            (Phase::Thinking, ..) => Some("  thinking…"),
-            (Phase::Communing, ..) => Some("  communing…"),
-            (Phase::Tinkering, false, _) => Some("  tinkering…"),
-            (Phase::Tinkering, true, true) => Some("  reminiscing…"),
-            (Phase::Tinkering, true, false) => None,
-            (Phase::Streaming, ..) => None,
-        };
-        if let Some(l) = label {
-            header.push(Span::styled(
-                l.to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+    if let Some(label) = b.activity.label() {
+        header.push(Span::styled(format!("  {label}"), scene::dim()));
     }
-
     if msg.waiting {
-        header.push(Span::styled(
-            "  waiting…".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ));
+        header.push(Span::styled("  waiting…", scene::dim()));
     }
-
-    let tool_span: Option<Span<'static>> = if msg.streaming {
-        msg.current_tool
-            .as_ref()
-            .filter(|name| !crate::tools::is_hidden_tool(name))
-            .map(|name| {
-                Span::styled(
-                    name.clone(),
-                    Style::default()
-                        .fg(accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-            })
-    } else {
-        None
-    };
-    let ts_span = Span::styled(msg.timestamp.clone(), Style::default().fg(Color::DarkGray));
+    let tool_span = b
+        .tool
+        .map(|name| Span::styled(name, Style::default().fg(accent).add_modifier(Modifier::BOLD)));
+    let ts_span = Span::styled(msg.timestamp.clone(), scene::dim());
 
     let left_width: usize = header
         .iter()
@@ -625,87 +407,38 @@ fn push_message(
     header.push(ts_span);
     out.push(Line::from(header));
 
-    let has_reply = !msg.content.is_empty();
-    let has_brain = !msg.brain.is_empty();
-    let has_heart = !msg.heart.is_empty();
-    let cursor_in_reply = msg.streaming && has_reply;
-    let cursor_in_brain = msg.streaming && !has_reply && has_brain;
-    let cursor_in_heart = msg.streaming && !has_reply && !has_brain && has_heart;
-    let cursor_orphan = msg.streaming && !has_reply && !has_brain && !has_heart;
-
-    if cursor_orphan {
+    if b.orphan {
+        out.push(Line::from(scene::cursor()));
+    }
+    for img in &b.images {
         out.push(Line::from(Span::styled(
-            "▌",
-            Style::default().fg(Color::DarkGray),
+            format!("📷 attached: {img}"),
+            scene::dim(),
         )));
     }
-
-    if has_reply {
-        match msg.role {
-            Role::Assistant => {
-                out.extend(crate::md::render(&msg.content, cursor_in_reply));
-            }
-            Role::User => {
-                for img in &msg.images {
-                    out.push(Line::from(Span::styled(
-                        format!("📷 attached: {img}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-                let last_idx = msg.content.split('\n').count().saturating_sub(1);
-                for (i, raw) in msg.content.split('\n').enumerate() {
-                    if i == last_idx && cursor_in_reply {
-                        out.push(Line::from(vec![
-                            Span::raw(raw.to_string()),
-                            Span::styled("▌", Style::default().fg(Color::DarkGray)),
-                        ]));
-                    } else {
-                        out.push(Line::from(raw.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
+    out.extend(b.reply);
     let reply_rows = out.len() - start;
 
-    if has_brain {
-        thinking_block(out, "brain", &msg.brain, cursor_in_brain, has_reply);
-    }
-
-    if has_heart {
-        thinking_block(
-            out,
-            "heart",
-            &msg.heart,
-            cursor_in_heart,
-            has_reply || has_brain,
-        );
-    }
+    thinking_block(out, "brain", b.brain, b.replied);
+    thinking_block(out, "heart", b.heart, b.replied || !msg.brain.is_empty());
     reply_rows
 }
 
 const INLINE_LEFT: usize = 2;
 const INLINE_RIGHT: usize = 6;
 const BRAIN_MARK: &str = "✶";
-const HEART_MARK: &str = "\u{2764}\u{FE0E}";
 const USER_MARK: &str = "\u{23F9}\u{FE0E}";
 
 fn inline_icon(msg: &Message) -> (&'static str, bool) {
     if msg.role == Role::User {
         return (USER_MARK, false);
     }
-    if !msg.streaming {
-        return ("⌃", false);
-    }
-    let tool = msg.current_tool.as_deref();
-    let hidden = tool.is_some_and(crate::tools::is_hidden_tool);
-    let bookish = tool.is_some_and(crate::tools::is_book_tool);
-    match msg.phase {
-        Phase::Thinking => ("✦", true),
-        Phase::Tinkering if hidden && bookish => ("಄", false),
-        Phase::Tinkering | Phase::Communing => ("‣", true),
-        Phase::Writing | Phase::Streaming => ("⬩", true),
+    match Activity::of(msg) {
+        Activity::Idle => ("⌃", false),
+        Activity::Thinking => ("✦", true),
+        Activity::Reminiscing => ("಄", false),
+        Activity::Tinkering | Activity::Hidden | Activity::Communing => ("‣", true),
+        Activity::Writing | Activity::Streaming => ("⬩", true),
     }
 }
 
@@ -737,6 +470,7 @@ fn thinking_turn(messages: &[Message]) -> Option<u64> {
 fn push_message_inlined(
     out: &mut Vec<Line<'static>>,
     msg: &Message,
+    b: scene::Bubble,
     area_width: u16,
     role_color: Color,
     thinking_live: bool,
@@ -745,69 +479,37 @@ fn push_message_inlined(
     let right = if msg.waiting { "waiting…" } else { msg.timestamp.as_str() };
     let right_w = INLINE_RIGHT.max(UnicodeWidthStr::width(right) + 1);
     let text_w = width.saturating_sub(INLINE_LEFT + right_w).max(1);
-    let dim = Style::default().fg(Color::DarkGray);
-    let cursor = || Span::styled("▌", dim);
-
-    let has_reply = !msg.content.is_empty();
-    let has_brain = !msg.brain.is_empty();
-    let has_heart = !msg.heart.is_empty();
-    let cursor_in_reply = msg.streaming && has_reply;
-    let cursor_in_brain = msg.streaming && !has_reply && has_brain;
-    let cursor_in_heart = msg.streaming && !has_reply && !has_brain && has_heart;
-    let cursor_orphan = msg.streaming && !has_reply && !has_brain && !has_heart;
+    let dim = scene::dim();
 
     let mut rows: Vec<Line<'static>> = Vec::new();
-    if cursor_orphan {
-        rows.push(Line::from(cursor()));
+    if b.orphan {
+        rows.push(Line::from(scene::cursor()));
     }
-    if has_reply {
-        match msg.role {
-            Role::Assistant => {
-                for line in crate::md::render(&msg.content, cursor_in_reply) {
-                    rows.extend(wrap_line(line, text_w));
-                }
-            }
-            Role::User => {
-                for img in &msg.images {
-                    let line = Line::from(Span::styled(format!("📷 attached: {img}"), dim));
-                    rows.extend(wrap_line(line, text_w));
-                }
-                let last_idx = msg.content.split('\n').count().saturating_sub(1);
-                for (i, raw) in msg.content.split('\n').enumerate() {
-                    let mut spans = vec![Span::raw(raw.to_string())];
-                    if let (0, Some(from)) = (i, &msg.guest) {
-                        spans.insert(0, Span::styled(format!("@{from} "), Style::default().fg(role_color)));
-                    }
-                    if i == last_idx && cursor_in_reply {
-                        spans.push(cursor());
-                    }
-                    rows.extend(wrap_line(Line::from(spans), text_w));
-                }
-            }
+    for img in &b.images {
+        let line = Line::from(Span::styled(format!("📷 attached: {img}"), dim));
+        rows.extend(wrap_line(line, text_w));
+    }
+    for (i, mut line) in b.reply.into_iter().enumerate() {
+        if let (0, Some(from)) = (i, &msg.guest) {
+            line.spans
+                .insert(0, Span::styled(format!("@{from} "), Style::default().fg(role_color)));
         }
+        rows.extend(wrap_line(line, text_w));
     }
     let reply_rows = rows.len().max(1);
 
     let thinking = dim.add_modifier(Modifier::ITALIC);
     let mut labels: Vec<(usize, &str)> = Vec::new();
-    for (text, cur, label) in [
-        (&msg.brain, cursor_in_brain, BRAIN_MARK),
-        (&msg.heart, cursor_in_heart, HEART_MARK),
-    ] {
-        if text.is_empty() {
+    for (body, label) in [(b.brain, BRAIN_MARK), (b.heart, HEART_MARK)] {
+        if body.is_empty() {
             continue;
         }
         if !rows.is_empty() {
             rows.push(Line::from(""));
         }
         labels.push((rows.len(), label));
-        let last_idx = text.split('\n').count().saturating_sub(1);
-        for (i, raw) in text.split('\n').enumerate() {
-            let mut spans = vec![Span::styled(raw.to_string(), thinking)];
-            if i == last_idx && cur {
-                spans.push(cursor());
-            }
-            rows.extend(wrap_line(Line::from(spans), text_w));
+        for line in body {
+            rows.extend(wrap_line(line, text_w));
         }
     }
     if rows.is_empty() {
@@ -937,22 +639,7 @@ fn assistant_base(app: &App, width: u16, viewport_h: usize) -> usize {
         return 0;
     }
     let mut prefix: Vec<Line<'static>> = Vec::new();
-    if !app.awaiting.is_empty() {
-        let phantom = Message {
-            role: Role::User,
-            content: app.awaiting.clone(),
-            images: Vec::new(),
-            guest: None,
-            brain: String::new(),
-            heart: String::new(),
-            streaming: false,
-            waiting: true,
-            timestamp: String::new(),
-            phase: Phase::Streaming,
-            current_tool: None,
-            turn_id: 0,
-            tool_events: Vec::new(),
-        };
+    if let Some(phantom) = scene::awaiting(app) {
         push_message(&mut prefix, &phantom, width, app.accent, app.nametags, false);
         prefix.push(Line::from(""));
     }
@@ -998,27 +685,6 @@ mod tests {
         for r in &rows {
             assert!(UnicodeWidthStr::width(r.trim_end_matches('-').to_string().as_str()) <= 10);
         }
-    }
-
-    #[test]
-    fn usage_formats_in_k_terms() {
-        assert_eq!(format_k(0), "0");
-        assert_eq!(format_k(950), "950");
-        assert_eq!(format_k(1000), "1K");
-        assert_eq!(format_k(12400), "12K");
-        assert_eq!(format_k(12500), "13K");
-        assert_eq!(format_k(999_600), "1M");
-        assert_eq!(format_k(2_300_000), "2M");
-        assert_eq!(format_k(2_600_000), "3M");
-    }
-
-    #[test]
-    fn error_status_detection() {
-        assert!(is_error_status("upstream 500: x"));
-        assert!(is_error_status("stopped: length"));
-        assert!(is_error_status("error: y"));
-        assert!(!is_error_status("saved station 'a'"));
-        assert!(!is_error_status(""));
     }
 
     fn thinking_message(brain: &str, heart: &str) -> Message {

@@ -18,6 +18,7 @@ pub mod reservoir;
 #[cfg(not(feature = "reservoir"))]
 #[path = "reservoir_stub.rs"]
 pub mod reservoir;
+pub mod scene;
 pub mod select;
 pub mod shell_env;
 pub mod shop;
@@ -79,9 +80,21 @@ pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
     })
 }
 
+pub trait Surface {
+    fn present(&mut self, app: &mut App, input: &Input) -> Result<()>;
+}
+
+impl<B: Backend<Error = std::io::Error>> Surface for Terminal<B> {
+    fn present(&mut self, app: &mut App, input: &Input) -> Result<()> {
+        self.draw(|f| ui::draw(f, app, input))
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("draw: {e}"))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn run<B, S>(
-    terminal: &mut Terminal<B>,
+pub async fn run<V, S>(
+    surface: &mut V,
     client: Client,
     system: Option<String>,
     shops: Vec<shop::Shop>,
@@ -92,7 +105,7 @@ pub async fn run<B, S>(
     mut events: S,
 ) -> Result<()>
 where
-    B: Backend<Error = std::io::Error>,
+    V: Surface,
     S: futures_util::Stream<Item = Event> + Unpin,
 {
     let mut app = App::new(
@@ -127,9 +140,7 @@ where
     let mut tick: u64 = 0;
 
     loop {
-        terminal
-            .draw(|f| ui::draw(f, &mut app, &input))
-            .map_err(|e| anyhow::anyhow!("draw: {e}"))?;
+        surface.present(&mut app, &input)?;
         if app.should_quit {
             break;
         }

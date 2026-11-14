@@ -52,6 +52,12 @@ fn gutter_fences(inp: Vec<Line<'static>>) -> Vec<Line<'static>> {
     out
 }
 
+pub fn fenced(line: &Line<'_>) -> bool {
+    line.spans
+        .first()
+        .is_some_and(|s| s.content == "│ " || s.content == "╭ ")
+}
+
 fn fence_lang(line: &Line<'static>) -> Option<String> {
     line.spans
         .first()

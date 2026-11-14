@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{App, ViewMode};
+use crate::app::App;
 use crate::popup::{self, Tab};
 
 const MODAL_WIDTH_RATIO: f32 = 0.60;
@@ -19,190 +19,8 @@ const SCROLLBAR_INSET: u16 = 2;
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let hint: String;
-    if app.popup.tab == Tab::Shops {
-        lines = popup::shops_lines(app);
-        hint = " read-only · edit ~/.config/wryme/shops.toml · Esc / Ctrl-S close ".to_string();
-    } else if app.popup.tab == Tab::Help {
-        for (key, what) in popup::help_rows() {
-            if key.is_empty() {
-                lines.push(Line::from(""));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {:<22}", key), Style::default().fg(app.accent)),
-                    Span::styled(what, Style::default()),
-                ]));
-            }
-        }
-        hint = " Esc close  ·  Ctrl-S close ".to_string();
-    } else {
-        let rows = popup::rows(app);
-
-        for (i, row) in rows.iter().enumerate() {
-            let selected = i == app.popup.selected && app.popup.mode == popup::Mode::Browse;
-            match row {
-                popup::Row::SectionHeader(label) => {
-                    let mut spans = vec![Span::styled(
-                        format!("  {}", label),
-                        Style::default()
-                            .fg(app.accent)
-                            .add_modifier(Modifier::BOLD),
-                    )];
-                    if *label == "saved stations" && !app.popup.search.is_empty() {
-                        spans.push(Span::styled(
-                            format!("  › {}", app.popup.search),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                    lines.push(Line::from(spans));
-                }
-                popup::Row::Blank => {
-                    lines.push(Line::from(""));
-                }
-                popup::Row::Model => {
-                    let style = focus_style(selected, app.accent);
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled("model        ", style),
-                        Span::styled(app.active_station.model.clone(), style),
-                    ]));
-                }
-                popup::Row::Dial(idx) => {
-                    let style = focus_style(selected, app.accent);
-                    if let Some(meta) = popup::dial_metas().get(*idx) {
-                        let label = (meta.label)(&app.active_station.dials);
-                        let name = format!("{:<13}", meta.name);
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", style),
-                            Span::styled(name, style),
-                            Span::styled(label, style),
-                        ]));
-                    }
-                }
-                popup::Row::ActiveStation => {
-                    let st = &app.active_station;
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::raw(st.name.clone()),
-                        dim(format!(" ({})", st.model)),
-                        dim(format!(" • {}", popup::active_shop_label(app))),
-                    ]));
-                }
-                popup::Row::SavedStation(idx) => {
-                    let st = &app.stations[*idx];
-                    let style = focus_style(selected, app.accent);
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled(st.name.clone(), style),
-                        dim(format!(" ({})", st.model)),
-                        dim(format!(" • {}", popup::shops_label(app, &st.model))),
-                    ]));
-                }
-                popup::Row::Unstationed(model) => {
-                    let style = focus_style(selected, app.accent);
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled(model.clone(), style),
-                        dim(format!(" • {}", popup::shops_label(app, model))),
-                    ]));
-                }
-                popup::Row::UpdateAction => {
-                    let style = focus_style(selected, app.accent);
-                    let origin = app.active_origin.clone().unwrap_or_else(|| "?".into());
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled(format!("update '{}'", origin), style),
-                    ]));
-                }
-                popup::Row::SaveAsAction => {
-                    let style = focus_style(selected, app.accent);
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled("save active as new…", style),
-                    ]));
-                }
-                popup::Row::PrefVoice => {
-                    let style = focus_style(selected, app.accent);
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled("voice", style),
-                        Span::styled(
-                            format!("  {}", if app.voice_on { "on" } else { "off" }),
-                            style,
-                        ),
-                    ]));
-                }
-                popup::Row::PrefView => {
-                    let style = focus_style(selected, app.accent);
-                    let val = match app.view_mode {
-                        ViewMode::Page => "page",
-                        ViewMode::Scroll => "scroll",
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled("view mode", style),
-                        Span::styled(format!("  {val}"), style),
-                    ]));
-                }
-                popup::Row::PrefAccent => {
-                    let style = focus_style(selected, app.accent);
-                    let (name, color) =
-                        crate::config::ACCENTS[crate::config::accent_index(app.accent)];
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled("accent", style),
-                        Span::styled(
-                            format!("  {name}"),
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                }
-                popup::Row::PrefNametags => {
-                    let style = focus_style(selected, app.accent);
-                    let name = app.nametags.name();
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", style),
-                        Span::styled("nametags", style),
-                        Span::styled(
-                            format!("  {name}"),
-                            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                }
-            }
-        }
-
-        if app.popup.mode == popup::Mode::SaveAs {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("  name: ", Style::default().fg(app.accent)),
-                Span::raw(app.popup.name_input.text.clone()),
-            ]));
-        }
-        if app.popup.mode == popup::Mode::DialEdit {
-            lines.push(Line::from(""));
-            if let Some(idx) = app.popup.dial_idx
-                && let Some(meta) = popup::dial_metas().get(idx)
-            {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {}: ", meta.name),
-                        Style::default().fg(app.accent),
-                    ),
-                    Span::raw(app.popup.dial_input.text.clone()),
-                ]));
-            }
-        }
-
-        hint = if app.popup.mode == popup::Mode::SaveAs {
-            " Enter save  ·  Esc cancel ".to_string()
-        } else if app.popup.mode == popup::Mode::DialEdit {
-            " Enter save  ·  Esc cancel  ·  all | 0 | 12 | 50% ".to_string()
-        } else {
-            " ↑↓ select  ·  ←→ / Enter toggle or adjust  ·  Esc / Ctrl-S close ".to_string()
-        };
-    }
+    let sheet = crate::scene::sheet(app);
+    let (lines, hint) = (&sheet.lines, sheet.hint);
 
     let modal_w = (area.width as f32 * MODAL_WIDTH_RATIO)
         .max(MODAL_MIN_WIDTH as f32)
@@ -244,15 +62,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Clear, modal_area);
 
-    let tab_spans: Vec<Span<'static>> = [
-            (Tab::Station, " Station "),
-            (Tab::Shops, " Shops "),
-            (Tab::Pref, " Pref "),
-            (Tab::Help, " Help "),
-        ]
+    let tab_spans: Vec<Span<'static>> = sheet
+        .tabs
         .iter()
-        .map(|(t, label)| {
-            let style = if app.popup.tab == *t {
+        .map(|(label, on)| {
+            let style = if *on {
                 Style::default()
                     .fg(Color::Black)
                     .bg(app.accent)
@@ -260,7 +74,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
-            Span::styled(*label, style)
+            Span::styled(format!(" {label} "), style)
         })
         .collect();
     let title = Line::from(tab_spans);
@@ -297,50 +111,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         );
     }
 
-    if app.popup.mode == popup::Mode::SaveAs {
-        let name_line_idx = lines.len().saturating_sub(1);
-        let name_y = modal_area.y + 1 + (name_line_idx.saturating_sub(scroll)) as u16;
-        let prompt_len = "  name: ".len() as u16;
-        let caret = app.popup.name_input.display_col();
-        f.set_cursor_position(Position {
-            x: modal_area.x + prompt_len + caret,
-            y: name_y,
-        });
-    }
-    if app.popup.mode == popup::Mode::DialEdit {
-        let line_count = lines.len();
-        let name_line_idx = line_count.saturating_sub(1);
-        let name_y = modal_area.y + 1 + (name_line_idx.saturating_sub(scroll)) as u16;
-        let prompt = if let Some(idx) = app.popup.dial_idx {
-            if let Some(meta) = popup::dial_metas().get(idx) {
-                format!("  {}: ", meta.name)
-            } else {
-                "  value: ".to_string()
-            }
-        } else {
-            "  value: ".to_string()
+    if let Some(prompt) = &sheet.prompt {
+        let input = match app.popup.mode {
+            popup::Mode::SaveAs => &app.popup.name_input,
+            _ => &app.popup.dial_input,
         };
-        let prompt_len = prompt.len() as u16;
-        let caret = app.popup.dial_input.display_col();
+        let row = lines.len().saturating_sub(1).saturating_sub(scroll) as u16;
         f.set_cursor_position(Position {
-            x: modal_area.x + prompt_len + caret,
-            y: name_y,
+            x: modal_area.x + prompt.len() as u16 + input.display_col(),
+            y: modal_area.y + 1 + row,
         });
-    }
-}
-
-fn dim(text: String) -> Span<'static> {
-    Span::styled(text, Style::default().fg(Color::DarkGray))
-}
-
-fn focus_style(selected: bool, accent: Color) -> Style {
-    if selected {
-        Style::default()
-            .fg(Color::Black)
-            .bg(accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
     }
 }
 

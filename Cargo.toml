@@ -8,7 +8,7 @@ repository = "https://github.com/adiled/wryme"
 homepage = "https://github.com/adiled/wryme"
 documentation = "https://github.com/adiled/wryme#readme"
 readme = "README.md"
-exclude = ["dist/", "desktop/", "target/", "web/", "hive/", "spec/"]
+exclude = ["dist/", "desktop/", "target/", "web/", "apple/", "hive/", "spec/"]
 keywords = ["tui", "terminal", "chat", "ai", "agent"]
 categories = ["command-line-interface"]
 
@@ -17,7 +17,7 @@ name = "wryme"
 path = "src/lib.rs"
 
 [workspace]
-members = ["web"]
+members = ["web", "apple"]
 
 [[bin]]
 name = "wme"
