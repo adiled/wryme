@@ -184,10 +184,9 @@ struct Transcript: View {
                 }
             }
             .font(Theme.font(stage.font))
-            .frame(maxWidth: 780, alignment: .leading)
-            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .frame(maxWidth: .infinity)
         }
         .scrollPosition($position)
         .scrollTargetBehavior(Snap(paging: stage.view == .page))
