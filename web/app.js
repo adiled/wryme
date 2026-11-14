@@ -189,6 +189,10 @@
     focusTerm();
   }
 
+  window.wrymePickFolder = () => {
+    pick();
+  };
+
   window.wrymeWriteFile = async (name, content) => {
     if (!dir || !granted) return false;
     const ok = await writeFile(dir, name, content);

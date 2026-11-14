@@ -52,6 +52,35 @@ fn gutter_fences(inp: Vec<Line<'static>>) -> Vec<Line<'static>> {
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Prose,
+    Head,
+    Code,
+    Table,
+}
+
+impl Kind {
+    pub const ALL: &[Kind] = &[Kind::Prose, Kind::Head, Kind::Code, Kind::Table];
+}
+
+pub fn kind(line: &Line<'_>) -> Kind {
+    match line.spans.first().map(|s| s.content.as_ref()) {
+        Some("╭ ") => Kind::Head,
+        Some("│ ") => Kind::Code,
+        Some(s) if s.starts_with(['┌', '├', '└', '│']) => Kind::Table,
+        _ => Kind::Prose,
+    }
+}
+
+pub fn mono(line: &Line<'_>) -> bool {
+    line.spans
+        .first()
+        .and_then(|s| s.content.chars().next())
+        .is_some_and(|c| matches!(c, '│' | '╭' | '┌' | '├' | '└'))
+}
+
 fn fence_lang(line: &Line<'static>) -> Option<String> {
     line.spans
         .first()
@@ -116,5 +145,17 @@ mod tests {
             }
         }
         assert!(out.iter().any(|l| l.to_string().contains("    if x {")));
+    }
+
+    #[test]
+    fn lines_know_what_they_are() {
+        let out = render("say\n\n```rust\nlet x = 1;\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |", false);
+        let kinds: Vec<Kind> = out.iter().map(kind).collect();
+        assert_eq!(kinds[0], Kind::Prose);
+        assert!(kinds.contains(&Kind::Head));
+        assert!(kinds.contains(&Kind::Code));
+        assert!(kinds.contains(&Kind::Table));
+        let head = out.iter().find(|l| kind(l) == Kind::Head).unwrap();
+        assert_eq!(head.to_string(), "╭ rust");
     }
 }

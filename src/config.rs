@@ -42,7 +42,8 @@ pub const ACCENTS: &[(&str, ratatui::style::Color)] = &[
     ("lightmagenta", ratatui::style::Color::LightMagenta),
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NametagMode {
     Standout,
     Inlined,
@@ -136,6 +137,56 @@ pub fn write_nametags(mode: NametagMode) -> Result<()> {
     write_pref("nametags", mode.name())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Typeface {
+    System,
+    Serif,
+    Rounded,
+    Mono,
+}
+
+pub const TYPEFACES: &[(&str, Typeface)] = &[
+    ("system", Typeface::System),
+    ("serif", Typeface::Serif),
+    ("rounded", Typeface::Rounded),
+    ("mono", Typeface::Mono),
+];
+
+impl Typeface {
+    pub fn name(self) -> &'static str {
+        TYPEFACES
+            .iter()
+            .find(|(_, t)| *t == self)
+            .map_or("system", |(n, _)| *n)
+    }
+}
+
+pub fn typeface_pref() -> Typeface {
+    let name = prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("font")?.as_str().map(String::from));
+    TYPEFACES
+        .iter()
+        .find(|(n, _)| Some(*n) == name.as_deref())
+        .map_or(Typeface::System, |(_, t)| *t)
+}
+
+pub fn write_typeface(face: Typeface) -> Result<()> {
+    write_pref("font", face.name())
+}
+
+pub fn host_pref() -> Option<String> {
+    prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("host")?.as_str().map(String::from))
+        .filter(|h| !h.is_empty())
+}
+
+pub fn write_host(name: &str) -> Result<()> {
+    write_pref("host", name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +205,14 @@ mod tests {
         let after: serde_json::Value =
             serde_json::from_str(&merged_prefs(Some("not json"), "nametags", "inlined")).unwrap();
         assert_eq!(after, serde_json::json!({ "nametags": "inlined" }));
+    }
+
+    #[test]
+    fn typeface_names_match_the_wire() {
+        for (name, face) in TYPEFACES {
+            assert_eq!(face.name(), *name);
+            assert_eq!(serde_json::to_value(face).unwrap(), *name);
+        }
     }
 
     #[test]
@@ -189,6 +248,9 @@ mod imp {
     use std::path::PathBuf;
 
     fn dir() -> Option<PathBuf> {
+        if let Some(shared) = std::env::var_os("WRYME_CONFIG_DIR") {
+            return Some(PathBuf::from(shared));
+        }
         std::env::var("HOME").ok().map(|h| {
             PathBuf::from(h)
                 .join(".config")

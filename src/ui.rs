@@ -7,14 +7,14 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Message, Phase, Role, ViewMode};
-use crate::input::Input;
-use crate::popup;
-use crate::shop::Protocol;
+use crate::app::ViewMode;
+use crate::config::NametagMode;
+use crate::scene::{self, AWAITING, BRAIN_MARK, Bubble, HEART_MARK, Scene};
+use crate::term::View;
 
 const ERROR_BOX_MAX_ROWS: usize = 8;
 
-pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
+pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -25,45 +25,42 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         ])
         .split(area);
     let (input_chunk, messages_chunk, status_chunk) = (chunks[0], chunks[1], chunks[2]);
+    let accent = scene.accent;
 
     let prompt = "› ";
-    let (state, esc) = if app.in_flight {
-        if app.voice_is_active() {
-            ("streaming + speaking…", "esc quiet ")
-        } else {
-            ("streaming…", "esc interrupt ")
-        }
-    } else if app.voice_is_active() {
-        ("speaking…", "esc quiet ")
-    } else {
-        ("", "")
-    };
-    let label = if state.is_empty() {
+    let bar = &scene.bar;
+    let label = if bar.state.is_empty() {
         " wme. ".to_string()
     } else {
-        format!(" wme. {state} ")
+        format!(" wme. {} ", bar.state)
+    };
+    let esc = if bar.esc.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", bar.esc)
     };
     let mut input_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if app.in_flight {
+        .border_style(if bar.busy {
             Style::default().fg(Color::DarkGray)
         } else {
-            Style::default().fg(app.accent)
+            Style::default().fg(accent)
         })
         .title(label)
         .title(Line::from(format!(" {esc}^s settings ^c exit ")).right_aligned());
-    if let Some(tool) = inlined_tool(app) {
+    if let Some(tool) = &bar.tool {
         input_block = input_block.title_bottom(
             Line::from(Span::styled(
                 format!(" {tool} "),
-                Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
         );
     }
 
-    let inner = ratatui::layout::Rect {
+    let input = &view.input;
+    let inner = Rect {
         x: input_chunk.x + 1,
         y: input_chunk.y + 1,
         width: input_chunk.width.saturating_sub(2),
@@ -77,62 +74,37 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         input_chunk,
     );
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            prompt,
-            Style::default().fg(app.accent),
-        ))),
-        ratatui::layout::Rect {
+        Paragraph::new(Line::from(Span::styled(prompt, Style::default().fg(accent)))),
+        Rect {
             x: inner.x,
             y: inner.y,
             width: prompt.len() as u16,
             height: inner.height,
         },
     );
-    let text_area = ratatui::layout::Rect {
+    let text_area = Rect {
         x: inner.x + prompt.len() as u16,
         y: inner.y,
         width: visible_width as u16,
         height: inner.height,
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::raw(&input.text))).scroll((0, h_scroll as u16)),
+        Paragraph::new(Line::from(Span::raw(input.text.as_str()))).scroll((0, h_scroll as u16)),
         text_area,
     );
 
     let cursor_x = text_area.x + input.display_col() - h_scroll as u16;
-    let cursor_y = text_area.y;
-    if cursor_x < text_area.x + text_area.width {
+    if scene.sheet.is_none() && cursor_x < text_area.x + text_area.width {
         f.set_cursor_position(Position {
             x: cursor_x,
-            y: cursor_y,
+            y: text_area.y,
         });
     }
 
     let mut lines: Vec<Line> = Vec::new();
     let msg_width = messages_chunk.width;
-    if !app.awaiting.is_empty() {
-        let phantom = Message {
-            role: Role::User,
-            content: app.awaiting.clone(),
-            images: Vec::new(),
-            guest: None,
-            brain: String::new(),
-            heart: String::new(),
-            streaming: false,
-            waiting: true,
-            timestamp: String::new(),
-            phase: Phase::Streaming,
-            current_tool: None,
-            turn_id: 0,
-            tool_events: Vec::new(),
-        };
-        push_message(&mut lines, &phantom, msg_width, app.accent, app.nametags, false);
-        lines.push(Line::from(""));
-    }
-    let live = thinking_turn(&app.messages);
-    for msg in app.messages.iter().rev() {
-        let thinking_live = live == Some(msg.turn_id);
-        push_message(&mut lines, msg, msg_width, app.accent, app.nametags, thinking_live);
+    for b in &scene.bubbles {
+        push_message(&mut lines, b, msg_width, accent, scene.nametags);
         lines.push(Line::from(""));
     }
     if lines.is_empty() {
@@ -148,17 +120,17 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         .block(Block::default().borders(Borders::NONE));
 
     let viewport_h = messages_chunk.height as usize;
-    app.last_viewport_h = viewport_h;
+    view.viewport_h = viewport_h;
     let total_rows = wrapped_row_count(&lines, messages_chunk.width);
-    let base = assistant_base(app, messages_chunk.width, viewport_h);
-    app.page_base = base;
+    let base = assistant_base(scene, messages_chunk.width, viewport_h);
+    view.page_base = base;
     let trigger = page_trigger(base, viewport_h);
     let n_pages = if total_rows == 0 || viewport_h == 0 {
         1
     } else {
         total_rows.div_ceil(viewport_h)
     };
-    let mut page = app.current_page.min(n_pages.saturating_sub(1));
+    let mut page = view.page.min(n_pages.saturating_sub(1));
     if base > 0 && page >= 1 && viewport_h > 0 {
         let max_page = if base >= total_rows {
             1
@@ -167,89 +139,36 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
         };
         page = page.min(max_page).min(n_pages.saturating_sub(1).max(1));
     }
-    app.current_page = page;
+    view.page = page;
 
     let max_scroll = total_rows.saturating_sub(1);
-    let scroll_offset = match app.view_mode {
+    let scroll_offset = match scene.view {
         ViewMode::Page => {
             if base == 0 || page >= 1 {
                 page_offset(base, page, 0, viewport_h)
             } else {
-                app.scroll_row = app.scroll_row.min(trigger).min(max_scroll);
-                app.scroll_row
+                view.scroll_row = view.scroll_row.min(trigger).min(max_scroll);
+                view.scroll_row
             }
         }
         ViewMode::Scroll => {
-            app.scroll_row = app.scroll_row.min(max_scroll);
-            app.scroll_row
+            view.scroll_row = view.scroll_row.min(max_scroll);
+            view.scroll_row
         }
     };
     let scroll_y = scroll_offset.min(u16::MAX as usize) as u16;
 
     f.render_widget(messages_para.scroll((scroll_y, 0)), messages_chunk);
 
-    let dot = " • ";
-    let is_demo = app.active_shop.protocol == Protocol::Demo;
-    let dirty = app.is_dirty();
-    let station_label = match (&app.active_origin, dirty) {
-        (Some(origin), true) => format!("tuned from {}", origin),
-        (Some(origin), false) => origin.clone(),
-        (None, _) => app.active_station.name.clone(),
-    };
-    let station_color = if is_demo {
-        Color::Yellow
-    } else if dirty {
-        Color::Magenta
-    } else {
-        app.accent
-    };
-    let mut pieces = vec![
-        Span::styled(
-            crate::windows::tag(&app.window_id),
-            Style::default().fg(app.accent),
-        ),
-        Span::raw(dot),
-        Span::styled(
-            format!("station: {}", station_label),
-            Style::default().fg(station_color),
-        ),
-        Span::styled(
-            format!(" via {}", app.active_shop.name),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ];
-    #[cfg(feature = "reservoir")]
-    {
-        let heart_score = app
-            .reservoir
-            .lock()
-            .ok()
-            .map(|r| r.static_figure())
-            .unwrap_or(0);
-        let ht = heart_tilt(heart_score);
-        let heart_color = hue_lit(120.0 * (1.0 - ht));
-        pieces.push(Span::styled(format!(" {HEART_MARK} "), heart_color));
-    }
-    #[cfg(not(feature = "reservoir"))]
-    {
-        pieces.push(Span::raw(dot));
-    }
-    pieces.push(Span::raw(format!("{} msg", app.messages.len())));
-    if app.voice_on {
-        pieces.push(Span::raw(dot));
-        pieces.push(Span::styled("voice", Style::default().fg(app.accent)));
-    }
-    if !app.messages.is_empty() {
-        pieces.push(Span::raw(dot));
-        match app.view_mode {
+    let status = &scene.status;
+    let mut pieces = status.left.clone();
+    if scene.bubbles.iter().any(|b| b.id != AWAITING) {
+        pieces.push(Span::raw(scene::DOT));
+        match scene.view {
             ViewMode::Page => {
                 pieces.push(Span::styled(
                     format!("page {}/{}", page + 1, n_pages),
-                    Style::default().fg(if n_pages > 1 {
-                        app.accent
-                    } else {
-                        Color::DarkGray
-                    }),
+                    Style::default().fg(if n_pages > 1 { accent } else { Color::DarkGray }),
                 ));
             }
             ViewMode::Scroll => {
@@ -259,83 +178,45 @@ pub fn draw(f: &mut Frame, app: &mut App, input: &Input) {
                     } else {
                         format!("scroll +{}", scroll_offset)
                     },
-                    Style::default().fg(app.accent),
+                    Style::default().fg(accent),
                 ));
             }
         }
     }
-    pieces.push(Span::raw(dot));
-    pieces.push(Span::styled(
-        app.status.clone(),
-        Style::default().fg(if is_error_status(&app.status) {
-            Color::Red
-        } else {
-            Color::Gray
-        }),
-    ));
-    let used = app.usage_ctx + app.usage_out;
-    let mut trailer: Vec<Span<'static>> = Vec::new();
-    if used > 0 {
-        let fill = app
-            .reservoir
-            .lock()
-            .ok()
-            .and_then(|r| r.dip(&app.active_station.name))
-            .unwrap_or(0.0);
-        let color = if fill >= 0.5 {
-            let t = ((fill - 0.5) / 0.5).clamp(0.0, 1.0);
-            Color::Rgb(255, (255.0 * (1.0 - t)) as u8, 0)
-        } else {
-            Color::DarkGray
+    pieces.push(Span::raw(scene::DOT));
+    pieces.push(status.note.clone());
+    if !status.right.is_empty() {
+        let width = |spans: &[Span<'_>]| -> usize {
+            spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum()
         };
-        trailer.push(Span::styled(format_k(used), Style::default().fg(color)));
-        if let Some(pct) = cache_pct(app.usage_cached, app.usage_ctx) {
-            let cache_color = if pct >= 50 {
-                Color::DarkGray
-            } else if pct > 0 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            trailer.push(Span::styled(
-                format!(" cache {pct}%"),
-                Style::default().fg(cache_color),
-            ));
-        }
-    }
-    if !trailer.is_empty() {
-        let left_w: usize = pieces
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
-        let tr_w: usize = trailer
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
+        let (left_w, tr_w) = (width(&pieces), width(&status.right));
         let bar_w = status_chunk.width as usize;
         if bar_w > left_w + tr_w + 2 {
             pieces.push(Span::raw(" ".repeat(bar_w - left_w - tr_w)));
         } else {
             pieces.push(Span::raw("  "));
         }
-        pieces.extend(trailer);
+        pieces.extend(status.right.iter().cloned());
     }
     let status = Paragraph::new(Line::from(pieces)).style(Style::default().fg(Color::Gray));
     f.render_widget(status, status_chunk);
 
-    if is_error_status(&app.status) {
-        draw_error_overlay(f, area, status_chunk, &app.status);
+    if let Some(error) = &scene.error {
+        draw_error_overlay(f, area, status_chunk, error);
     }
 
-    if app.popup.mode != popup::Mode::Closed {
-        crate::popup_ui::draw(f, app);
+    if let Some(sheet) = &scene.sheet {
+        crate::popup_ui::draw(f, sheet, view, accent);
     }
 
-    paint_selection(f, app);
+    paint_selection(f, view);
 }
 
-fn paint_selection(f: &mut Frame, app: &mut App) {
-    let Some(sel) = app.selection else {
+fn paint_selection(f: &mut Frame, view: &mut View) {
+    let Some(sel) = view.selection else {
         return;
     };
     if sel.is_empty() {
@@ -346,7 +227,7 @@ fn paint_selection(f: &mut Frame, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    app.screen = (0..area.height)
+    view.screen = (0..area.height)
         .map(|y| {
             (0..area.width)
                 .map(|x| buf[(x, y)].symbol().to_string())
@@ -362,61 +243,6 @@ fn paint_selection(f: &mut Frame, app: &mut App) {
             buf[(x, y)].modifier |= Modifier::REVERSED;
         }
     }
-}
-
-fn cache_pct(cached: u64, input: u64) -> Option<u64> {
-    (input > 0 && cached > 0).then(|| (cached * 100 / input).min(100))
-}
-
-fn format_k(n: u64) -> String {
-    if n < 1000 {
-        return n.to_string();
-    }
-    if n < 999_500 {
-        return format!("{}K", (n + 500) / 1000);
-    }
-    format!("{}M", (n + 500_000) / 1_000_000)
-}
-
-fn is_error_status(s: &str) -> bool {
-    s.starts_with("error")
-        || s.starts_with("upstream")
-        || s.starts_with("stopped:")
-        || s.starts_with("save failed")
-        || s.starts_with("update failed")
-}
-
-#[cfg(feature = "reservoir")]
-fn heart_tilt(score: u32) -> f64 {
-    const NEUTRAL: f64 = 50.0;
-    let top = crate::reservoir::STATIC_BOT_SCORE as f64;
-    ((score as f64 - NEUTRAL) / (top - NEUTRAL)).clamp(0.0, 1.0)
-}
-
-#[cfg(feature = "reservoir")]
-fn hue_lit(hue: f64) -> Color {
-    const LIGHTNESS: f64 = 0.45;
-    const SATURATION: f64 = 0.85;
-    const HUE_SECTOR_DEGREES: f64 = 60.0;
-
-    let l = LIGHTNESS;
-    let s = SATURATION;
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((hue / HUE_SECTOR_DEGREES) % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = match (hue.rem_euclid(360.0) / HUE_SECTOR_DEGREES).floor() as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    Color::Rgb(
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    )
 }
 
 fn draw_error_overlay(f: &mut Frame, area: Rect, status_chunk: Rect, msg: &str) {
@@ -502,108 +328,46 @@ fn cut_at_width(s: &str, width: usize) -> &str {
     &s[..end]
 }
 
-fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, text: &str, cursor: bool, gap: bool) {
+fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, body: &[Line<'static>], gap: bool) {
+    if body.is_empty() {
+        return;
+    }
     if gap {
         out.push(Line::from(""));
     }
-    let body = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
     out.push(Line::from(Span::styled(
         label.to_string(),
-        body.add_modifier(Modifier::BOLD),
+        scene::dim().add_modifier(Modifier::ITALIC | Modifier::BOLD),
     )));
-    let last_idx = text.split('\n').count().saturating_sub(1);
-    for (i, raw) in text.split('\n').enumerate() {
-        if i == last_idx && cursor {
-            out.push(Line::from(vec![
-                Span::styled(raw.to_string(), body),
-                Span::styled("▌", Style::default().fg(Color::DarkGray)),
-            ]));
-        } else {
-            out.push(Line::from(Span::styled(raw.to_string(), body)));
-        }
-    }
+    out.extend(body.iter().cloned());
 }
 
 fn push_message(
     out: &mut Vec<Line<'static>>,
-    msg: &Message,
+    b: &Bubble,
     area_width: u16,
     accent: Color,
-    nametags: crate::config::NametagMode,
-    thinking_live: bool,
+    nametags: NametagMode,
 ) -> usize {
-    let role_color = match msg.role {
-        Role::User => Color::Green,
-        Role::Assistant => Color::Magenta,
-    };
-    if nametags == crate::config::NametagMode::Inlined {
-        return push_message_inlined(out, msg, area_width, role_color, thinking_live);
+    if nametags == NametagMode::Inlined {
+        return push_message_inlined(out, b, area_width);
     }
-
-    let role_text = match (&msg.role, &msg.guest) {
-        (Role::User, Some(from)) => format!("guest@{from}"),
-        (Role::User, None) => "you".to_string(),
-        (Role::Assistant, _) => "assistant".to_string(),
-    };
     let start = out.len();
 
     let mut header: Vec<Span<'static>> = vec![Span::styled(
-        role_text,
-        Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        b.name.clone(),
+        Style::default().fg(b.ink).add_modifier(Modifier::BOLD),
     )];
-    if msg.streaming {
-        let hidden = msg
-            .current_tool
-            .as_ref()
-            .map(|n| crate::tools::is_hidden_tool(n))
-            .unwrap_or(false);
-        let bookish = msg
-            .current_tool
-            .as_ref()
-            .map(|n| crate::tools::is_book_tool(n))
-            .unwrap_or(false);
-        let label = match (msg.phase, hidden, bookish) {
-            (Phase::Writing, ..) => Some("  writing…"),
-            (Phase::Thinking, ..) => Some("  thinking…"),
-            (Phase::Communing, ..) => Some("  communing…"),
-            (Phase::Tinkering, false, _) => Some("  tinkering…"),
-            (Phase::Tinkering, true, true) => Some("  reminiscing…"),
-            (Phase::Tinkering, true, false) => None,
-            (Phase::Streaming, ..) => None,
-        };
-        if let Some(l) = label {
-            header.push(Span::styled(
-                l.to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+    if let Some(label) = b.doing {
+        header.push(Span::styled(format!("  {label}"), scene::dim()));
     }
-
-    if msg.waiting {
-        header.push(Span::styled(
-            "  waiting…".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ));
+    if b.waiting {
+        header.push(Span::styled("  waiting…", scene::dim()));
     }
-
-    let tool_span: Option<Span<'static>> = if msg.streaming {
-        msg.current_tool
-            .as_ref()
-            .filter(|name| !crate::tools::is_hidden_tool(name))
-            .map(|name| {
-                Span::styled(
-                    name.clone(),
-                    Style::default()
-                        .fg(accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-            })
-    } else {
-        None
-    };
-    let ts_span = Span::styled(msg.timestamp.clone(), Style::default().fg(Color::DarkGray));
+    let tool_span = b.tool.clone().map(|name| {
+        Span::styled(name, Style::default().fg(accent).add_modifier(Modifier::BOLD))
+    });
+    let ts_span = Span::styled(b.time.clone(), scene::dim());
 
     let left_width: usize = header
         .iter()
@@ -613,7 +377,7 @@ fn push_message(
         .as_ref()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()) + 2)
         .unwrap_or(0);
-    let ts_width = UnicodeWidthStr::width(msg.timestamp.as_str());
+    let ts_width = UnicodeWidthStr::width(b.time.as_str());
     let pad = (area_width as usize)
         .saturating_sub(left_width + tool_width + ts_width)
         .max(1);
@@ -625,189 +389,67 @@ fn push_message(
     header.push(ts_span);
     out.push(Line::from(header));
 
-    let has_reply = !msg.content.is_empty();
-    let has_brain = !msg.brain.is_empty();
-    let has_heart = !msg.heart.is_empty();
-    let cursor_in_reply = msg.streaming && has_reply;
-    let cursor_in_brain = msg.streaming && !has_reply && has_brain;
-    let cursor_in_heart = msg.streaming && !has_reply && !has_brain && has_heart;
-    let cursor_orphan = msg.streaming && !has_reply && !has_brain && !has_heart;
-
-    if cursor_orphan {
+    if b.orphan {
+        out.push(Line::from(scene::cursor()));
+    }
+    for img in &b.images {
         out.push(Line::from(Span::styled(
-            "▌",
-            Style::default().fg(Color::DarkGray),
+            format!("📷 attached: {img}"),
+            scene::dim(),
         )));
     }
-
-    if has_reply {
-        match msg.role {
-            Role::Assistant => {
-                out.extend(crate::md::render(&msg.content, cursor_in_reply));
-            }
-            Role::User => {
-                for img in &msg.images {
-                    out.push(Line::from(Span::styled(
-                        format!("📷 attached: {img}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-                let last_idx = msg.content.split('\n').count().saturating_sub(1);
-                for (i, raw) in msg.content.split('\n').enumerate() {
-                    if i == last_idx && cursor_in_reply {
-                        out.push(Line::from(vec![
-                            Span::raw(raw.to_string()),
-                            Span::styled("▌", Style::default().fg(Color::DarkGray)),
-                        ]));
-                    } else {
-                        out.push(Line::from(raw.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
+    out.extend(b.reply.iter().cloned());
     let reply_rows = out.len() - start;
 
-    if has_brain {
-        thinking_block(out, "brain", &msg.brain, cursor_in_brain, has_reply);
-    }
-
-    if has_heart {
-        thinking_block(
-            out,
-            "heart",
-            &msg.heart,
-            cursor_in_heart,
-            has_reply || has_brain,
-        );
-    }
+    thinking_block(out, "brain", &b.brain, !b.reply.is_empty());
+    thinking_block(out, "heart", &b.heart, !b.reply.is_empty() || !b.brain.is_empty());
     reply_rows
 }
 
 const INLINE_LEFT: usize = 2;
 const INLINE_RIGHT: usize = 6;
-const BRAIN_MARK: &str = "✶";
-const HEART_MARK: &str = "\u{2764}\u{FE0E}";
-const USER_MARK: &str = "\u{23F9}\u{FE0E}";
-
-fn inline_icon(msg: &Message) -> (&'static str, bool) {
-    if msg.role == Role::User {
-        return (USER_MARK, false);
-    }
-    if !msg.streaming {
-        return ("⌃", false);
-    }
-    let tool = msg.current_tool.as_deref();
-    let hidden = tool.is_some_and(crate::tools::is_hidden_tool);
-    let bookish = tool.is_some_and(crate::tools::is_book_tool);
-    match msg.phase {
-        Phase::Thinking => ("✦", true),
-        Phase::Tinkering if hidden && bookish => ("಄", false),
-        Phase::Tinkering | Phase::Communing => ("‣", true),
-        Phase::Writing | Phase::Streaming => ("⬩", true),
-    }
-}
 
 fn blink_on() -> bool {
     ((crate::platform::unix_secs() * 2.0) as u64).is_multiple_of(2)
 }
 
-fn inlined_tool(app: &App) -> Option<&str> {
-    if app.nametags != crate::config::NametagMode::Inlined {
-        return None;
-    }
-    app.messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::Assistant && m.streaming)?
-        .current_tool
-        .as_deref()
-        .filter(|name| !crate::tools::is_hidden_tool(name))
-}
-
-fn thinking_turn(messages: &[Message]) -> Option<u64> {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::Assistant && m.streaming && m.phase == Phase::Thinking)
-        .map(|m| m.turn_id)
-}
-
-fn push_message_inlined(
-    out: &mut Vec<Line<'static>>,
-    msg: &Message,
-    area_width: u16,
-    role_color: Color,
-    thinking_live: bool,
-) -> usize {
+fn push_message_inlined(out: &mut Vec<Line<'static>>, b: &Bubble, area_width: u16) -> usize {
     let width = area_width as usize;
-    let right = if msg.waiting { "waiting…" } else { msg.timestamp.as_str() };
+    let right = if b.waiting { "waiting…" } else { b.time.as_str() };
     let right_w = INLINE_RIGHT.max(UnicodeWidthStr::width(right) + 1);
     let text_w = width.saturating_sub(INLINE_LEFT + right_w).max(1);
-    let dim = Style::default().fg(Color::DarkGray);
-    let cursor = || Span::styled("▌", dim);
-
-    let has_reply = !msg.content.is_empty();
-    let has_brain = !msg.brain.is_empty();
-    let has_heart = !msg.heart.is_empty();
-    let cursor_in_reply = msg.streaming && has_reply;
-    let cursor_in_brain = msg.streaming && !has_reply && has_brain;
-    let cursor_in_heart = msg.streaming && !has_reply && !has_brain && has_heart;
-    let cursor_orphan = msg.streaming && !has_reply && !has_brain && !has_heart;
+    let dim = scene::dim();
 
     let mut rows: Vec<Line<'static>> = Vec::new();
-    if cursor_orphan {
-        rows.push(Line::from(cursor()));
+    if b.orphan {
+        rows.push(Line::from(scene::cursor()));
     }
-    if has_reply {
-        match msg.role {
-            Role::Assistant => {
-                for line in crate::md::render(&msg.content, cursor_in_reply) {
-                    rows.extend(wrap_line(line, text_w));
-                }
-            }
-            Role::User => {
-                for img in &msg.images {
-                    let line = Line::from(Span::styled(format!("📷 attached: {img}"), dim));
-                    rows.extend(wrap_line(line, text_w));
-                }
-                let last_idx = msg.content.split('\n').count().saturating_sub(1);
-                for (i, raw) in msg.content.split('\n').enumerate() {
-                    let mut spans = vec![Span::raw(raw.to_string())];
-                    if let (0, Some(from)) = (i, &msg.guest) {
-                        spans.insert(0, Span::styled(format!("@{from} "), Style::default().fg(role_color)));
-                    }
-                    if i == last_idx && cursor_in_reply {
-                        spans.push(cursor());
-                    }
-                    rows.extend(wrap_line(Line::from(spans), text_w));
-                }
-            }
+    for img in &b.images {
+        let line = Line::from(Span::styled(format!("📷 attached: {img}"), dim));
+        rows.extend(wrap_line(line, text_w));
+    }
+    for (i, line) in b.reply.iter().enumerate() {
+        let mut line = line.clone();
+        if let (0, Some(from)) = (i, &b.guest) {
+            line.spans
+                .insert(0, Span::styled(format!("@{from} "), Style::default().fg(b.ink)));
         }
+        rows.extend(wrap_line(line, text_w));
     }
     let reply_rows = rows.len().max(1);
 
     let thinking = dim.add_modifier(Modifier::ITALIC);
     let mut labels: Vec<(usize, &str)> = Vec::new();
-    for (text, cur, label) in [
-        (&msg.brain, cursor_in_brain, BRAIN_MARK),
-        (&msg.heart, cursor_in_heart, HEART_MARK),
-    ] {
-        if text.is_empty() {
+    for (body, label) in [(&b.brain, BRAIN_MARK), (&b.heart, HEART_MARK)] {
+        if body.is_empty() {
             continue;
         }
         if !rows.is_empty() {
             rows.push(Line::from(""));
         }
         labels.push((rows.len(), label));
-        let last_idx = text.split('\n').count().saturating_sub(1);
-        for (i, raw) in text.split('\n').enumerate() {
-            let mut spans = vec![Span::styled(raw.to_string(), thinking)];
-            if i == last_idx && cur {
-                spans.push(cursor());
-            }
-            rows.extend(wrap_line(Line::from(spans), text_w));
+        for line in body {
+            rows.extend(wrap_line(line.clone(), text_w));
         }
     }
     if rows.is_empty() {
@@ -815,14 +457,13 @@ fn push_message_inlined(
     }
 
     let lit = blink_on();
-    let (icon, blinks) = inline_icon(msg);
-    let icon_w = UnicodeWidthStr::width(icon);
-    let icon = if blinks && !lit {
+    let icon_w = UnicodeWidthStr::width(b.mark);
+    let icon = if b.blinks && !lit {
         " ".repeat(icon_w)
     } else {
-        icon.to_string()
+        b.mark.to_string()
     };
-    let marks_lit = lit || !thinking_live;
+    let marks_lit = lit || !b.thinking_live;
     for (i, row) in rows.into_iter().enumerate() {
         let row_w = row.width();
         let label = labels.iter().find(|(at, _)| *at == i).map(|(_, l)| *l);
@@ -835,7 +476,7 @@ fn push_message_inlined(
             None if i == 0 => (
                 icon.clone(),
                 icon_w,
-                Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+                Style::default().fg(b.ink).add_modifier(Modifier::BOLD),
             ),
             None => (String::new(), 0, Style::default()),
         };
@@ -848,7 +489,7 @@ fn push_message_inlined(
             spans.push(Span::raw(" ".repeat(width.saturating_sub(used).max(1))));
             spans.push(Span::styled(right.to_string(), dim));
         }
-        if msg.waiting {
+        if b.waiting {
             for span in &mut spans {
                 span.style = span.style.add_modifier(Modifier::DIM);
             }
@@ -926,38 +567,24 @@ fn wrapped_row_count(lines: &[Line<'_>], area_width: u16) -> usize {
     total
 }
 
-fn assistant_base(app: &App, width: u16, viewport_h: usize) -> usize {
+fn assistant_base(scene: &Scene, width: u16, viewport_h: usize) -> usize {
     if viewport_h == 0 {
         return 0;
     }
-    let Some(newest) = app.messages.last() else {
-        return 0;
-    };
-    if newest.role != Role::Assistant || newest.content.is_empty() {
-        return 0;
-    }
+    let mut bubbles = scene.bubbles.iter().peekable();
     let mut prefix: Vec<Line<'static>> = Vec::new();
-    if !app.awaiting.is_empty() {
-        let phantom = Message {
-            role: Role::User,
-            content: app.awaiting.clone(),
-            images: Vec::new(),
-            guest: None,
-            brain: String::new(),
-            heart: String::new(),
-            streaming: false,
-            waiting: true,
-            timestamp: String::new(),
-            phase: Phase::Streaming,
-            current_tool: None,
-            turn_id: 0,
-            tool_events: Vec::new(),
-        };
-        push_message(&mut prefix, &phantom, width, app.accent, app.nametags, false);
+    if let Some(waiting) = bubbles.next_if(|b| b.id == AWAITING) {
+        push_message(&mut prefix, waiting, width, scene.accent, scene.nametags);
         prefix.push(Line::from(""));
     }
+    let Some(newest) = bubbles.next() else {
+        return 0;
+    };
+    if newest.user || newest.reply.is_empty() {
+        return 0;
+    }
     let mut head: Vec<Line<'static>> = Vec::new();
-    let reply_rows = push_message(&mut head, newest, width, app.accent, app.nametags, false);
+    let reply_rows = push_message(&mut head, newest, width, scene.accent, scene.nametags);
     prefix.extend(head.into_iter().take(reply_rows));
     let end = wrapped_row_count(&prefix, width);
     if end > viewport_h { end } else { 0 }
@@ -980,6 +607,8 @@ fn page_offset(base: usize, page: usize, scroll_row: usize, viewport_h: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{Message, Phase, Role};
+    use crate::scene::USER_MARK;
 
     #[test]
     fn error_box_wraps_inside_width() {
@@ -1000,27 +629,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn usage_formats_in_k_terms() {
-        assert_eq!(format_k(0), "0");
-        assert_eq!(format_k(950), "950");
-        assert_eq!(format_k(1000), "1K");
-        assert_eq!(format_k(12400), "12K");
-        assert_eq!(format_k(12500), "13K");
-        assert_eq!(format_k(999_600), "1M");
-        assert_eq!(format_k(2_300_000), "2M");
-        assert_eq!(format_k(2_600_000), "3M");
-    }
-
-    #[test]
-    fn error_status_detection() {
-        assert!(is_error_status("upstream 500: x"));
-        assert!(is_error_status("stopped: length"));
-        assert!(is_error_status("error: y"));
-        assert!(!is_error_status("saved station 'a'"));
-        assert!(!is_error_status(""));
-    }
-
     fn thinking_message(brain: &str, heart: &str) -> Message {
         Message {
             role: Role::Assistant,
@@ -1039,16 +647,20 @@ mod tests {
         }
     }
 
-    fn rendered(msg: &Message) -> Vec<String> {
+    fn paint(msg: &Message, width: u16, mode: NametagMode) -> (usize, Vec<Line<'static>>) {
         let mut out = Vec::new();
-        push_message(&mut out, msg, 80, Color::Cyan, crate::config::NametagMode::Standout, false);
+        let b = scene::bubble("0".into(), msg, false);
+        let reply_rows = push_message(&mut out, &b, width, Color::Cyan, mode);
+        (reply_rows, out)
+    }
+
+    fn rendered(msg: &Message) -> Vec<String> {
+        let (_, out) = paint(msg, 80, NametagMode::Standout);
         out.iter().map(|l| l.to_string()).collect()
     }
 
     fn inlined(msg: &Message, width: u16) -> (usize, Vec<String>) {
-        let mut out = Vec::new();
-        let reply_rows =
-            push_message(&mut out, msg, width, Color::Cyan, crate::config::NametagMode::Inlined, false);
+        let (reply_rows, out) = paint(msg, width, NametagMode::Inlined);
         (reply_rows, out.iter().map(|l| l.to_string()).collect())
     }
 
@@ -1104,8 +716,7 @@ mod tests {
         for row in &rows {
             assert!(UnicodeWidthStr::width(row.as_str()) <= 30, "{row:?}");
         }
-        let mut out = Vec::new();
-        push_message(&mut out, &msg, 30, Color::Cyan, crate::config::NametagMode::Inlined, false);
+        let (_, out) = paint(&msg, 30, NametagMode::Inlined);
         assert!(
             out.iter()
                 .flat_map(|l| &l.spans)
@@ -1142,48 +753,9 @@ mod tests {
     }
 
     #[test]
-    fn thinking_follows_the_turn_not_the_message() {
-        let holder = || thinking_message("pondering", "feeling");
-        let live = Message {
-            streaming: true,
-            phase: Phase::Thinking,
-            ..thinking_message("", "")
-        };
-        assert_eq!(thinking_turn(&[holder(), live]), Some(holder().turn_id));
-        assert_eq!(thinking_turn(&[holder()]), None);
-    }
-
-    #[test]
     fn standout_reply_rows_include_header() {
-        let mut out = Vec::new();
-        let reply_rows = push_message(
-            &mut out,
-            &thinking_message("pondering", ""),
-            80,
-            Color::Cyan,
-            crate::config::NametagMode::Standout,
-            false,
-        );
+        let (reply_rows, _) = paint(&thinking_message("pondering", ""), 80, NametagMode::Standout);
         assert_eq!(reply_rows, 2);
-    }
-
-    #[test]
-    fn inline_icon_follows_what_the_assistant_is_doing() {
-        let at = |phase, tool: Option<&str>| {
-            inline_icon(&Message {
-                streaming: true,
-                phase,
-                current_tool: tool.map(String::from),
-                ..thinking_message("", "")
-            })
-        };
-        assert_eq!(inline_icon(&thinking_message("", "")), ("⌃", false));
-        assert_eq!(inline_icon(&user_message("hi")), (USER_MARK, false));
-        assert_eq!(UnicodeWidthStr::width(USER_MARK), 1);
-        assert_eq!(at(Phase::Writing, None), ("⬩", true));
-        assert_eq!(at(Phase::Thinking, None), ("✦", true));
-        assert_eq!(at(Phase::Tinkering, Some("shell")), ("‣", true));
-        assert_eq!(at(Phase::Tinkering, Some(crate::tools::BOOK_NAME)), ("಄", false));
     }
 
     #[test]

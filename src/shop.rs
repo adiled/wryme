@@ -126,6 +126,15 @@ pub fn load_all() -> Result<Vec<Shop>> {
             out.push(def.resolve());
         }
     }
+    if crate::sync::AWAY
+        && let Some(host) = crate::config::host_pref()
+    {
+        for shop in &mut out {
+            if let Some(url) = crate::sync::reach(&shop.url, &host) {
+                shop.url = url;
+            }
+        }
+    }
     Ok(out)
 }
 

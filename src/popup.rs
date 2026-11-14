@@ -1,5 +1,4 @@
 use crate::app::App;
-use crate::input::Input;
 use crate::shop::{Protocol, Shop, WindowMode};
 use crate::station::{Brainy, Dials, Patience, Station};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,9 +9,6 @@ pub struct Popup {
     pub mode: Mode,
     pub tab: Tab,
     pub selected: usize,
-    pub scroll: usize,
-    pub name_input: Input,
-    pub dial_input: Input,
     pub dial_idx: Option<usize>,
     pub search: String,
 }
@@ -24,6 +20,19 @@ pub enum Tab {
     Shops,
     Pref,
     Help,
+}
+
+pub const TABS: [Tab; 4] = [Tab::Station, Tab::Shops, Tab::Pref, Tab::Help];
+
+impl Tab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Station => "Station",
+            Tab::Shops => "Shops",
+            Tab::Pref => "Pref",
+            Tab::Help => "Help",
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -49,6 +58,8 @@ pub enum Row {
     PrefView,
     PrefAccent,
     PrefNametags,
+    PrefFont,
+    PrefSync,
     Blank,
 }
 
@@ -91,19 +102,24 @@ pub fn dial_metas() -> Vec<DialMeta> {
 pub fn rows(app: &App) -> Vec<Row> {
     match app.popup.tab {
         Tab::Station => station_rows(app),
-        Tab::Pref => pref_rows(),
+        Tab::Pref => pref_rows(app),
         Tab::Shops | Tab::Help => vec![],
     }
 }
 
-fn pref_rows() -> Vec<Row> {
-    vec![
+fn pref_rows(app: &App) -> Vec<Row> {
+    let mut rows = vec![
         Row::SectionHeader("preferences"),
         Row::PrefVoice,
         Row::PrefView,
         Row::PrefAccent,
         Row::PrefNametags,
-    ]
+        Row::PrefFont,
+    ];
+    if app.sync.way.is_some() {
+        rows.push(Row::PrefSync);
+    }
+    rows
 }
 
 fn station_rows(app: &App) -> Vec<Row> {
@@ -199,7 +215,6 @@ pub fn toggle(app: &mut App) {
             app.popup.mode = Mode::Browse;
             app.popup.tab = Tab::Station;
             app.popup.selected = first_selectable(app);
-            app.popup.scroll = 0;
         }
         Mode::Browse | Mode::SaveAs | Mode::DialEdit => {
             close(app);
@@ -210,12 +225,24 @@ pub fn toggle(app: &mut App) {
 pub fn close(app: &mut App) {
     app.popup.mode = Mode::Closed;
     app.popup.tab = Tab::Station;
-    app.popup.name_input = Input::new();
-    app.popup.dial_input = Input::new();
     app.popup.dial_idx = None;
     app.popup.selected = 0;
-    app.popup.scroll = 0;
     app.popup.search.clear();
+}
+
+pub fn cancel_field(app: &mut App) {
+    if matches!(app.popup.mode, Mode::SaveAs | Mode::DialEdit) {
+        app.popup.mode = Mode::Browse;
+        app.popup.dial_idx = None;
+    }
+}
+
+pub fn pick(app: &mut App, row: usize) {
+    if app.popup.mode != Mode::Browse || !selectable_indices(&rows(app)).contains(&row) {
+        return;
+    }
+    app.popup.selected = row;
+    activate(app);
 }
 
 fn first_selectable(app: &App) -> usize {
@@ -248,9 +275,11 @@ pub fn adjust(app: &mut App, delta: i32) {
             }
         }
         Some(Row::PrefVoice) => toggle_voice(app),
-        Some(Row::PrefView) => crate::keys::toggle_view_mode(app),
+        Some(Row::PrefView) => crate::control::toggle_view_mode(app),
         Some(Row::PrefAccent) => cycle_accent(app, delta),
         Some(Row::PrefNametags) => cycle_nametags(app, delta),
+        Some(Row::PrefFont) => cycle_typeface(app, delta),
+        Some(Row::PrefSync) => sync(app),
         _ => {}
     }
 }
@@ -283,7 +312,6 @@ fn activate_row(app: &mut App, row: Row) {
         }
         Row::SaveAsAction => {
             app.popup.mode = Mode::SaveAs;
-            app.popup.name_input = Input::new();
         }
         Row::Dial(idx) => {
             enter_dial_edit(app, idx);
@@ -292,9 +320,11 @@ fn activate_row(app: &mut App, row: Row) {
             adjust(app, 1);
         }
         Row::PrefVoice => toggle_voice(app),
-        Row::PrefView => crate::keys::toggle_view_mode(app),
+        Row::PrefView => crate::control::toggle_view_mode(app),
         Row::PrefAccent => cycle_accent(app, 1),
         Row::PrefNametags => cycle_nametags(app, 1),
+        Row::PrefFont => cycle_typeface(app, 1),
+        Row::PrefSync => sync(app),
         _ => {}
     }
 }
@@ -322,6 +352,40 @@ fn cycle_nametags(app: &mut App, delta: i32) {
     app.note(format!("nametags: {name}"));
 }
 
+fn sync(app: &mut App) {
+    match app.sync.way {
+        Some(crate::sync::Way::Link) => {
+            let on = app.sync.place == "off";
+            match crate::sync::link(on) {
+                Ok(()) => {
+                    app.sync.refresh();
+                    app.note(if on {
+                        "sync on: shops, stations and prefs now live in iCloud Drive › wryme"
+                    } else {
+                        "sync off: settings are local again"
+                    });
+                }
+                Err(e) => app.note(format!("error: sync {e:#}")),
+            }
+        }
+        Some(crate::sync::Way::Pick) => {
+            app.sync.pick += 1;
+            app.note("choose the folder that holds shops.toml and stations.toml");
+        }
+        None => {}
+    }
+}
+
+fn cycle_typeface(app: &mut App, delta: i32) {
+    let faces = crate::config::TYPEFACES;
+    let n = faces.len() as i32;
+    let cur = faces.iter().position(|(_, f)| *f == app.typeface).unwrap_or(0) as i32;
+    let (name, face) = faces[(cur + delta).rem_euclid(n) as usize];
+    app.typeface = face;
+    let _ = crate::config::write_typeface(face);
+    app.note(format!("font: {name}"));
+}
+
 pub fn toggle_voice(app: &mut App) {
     if app.voice_on {
         app.voice_on = false;
@@ -337,23 +401,18 @@ pub fn toggle_voice(app: &mut App) {
 }
 
 fn enter_dial_edit(app: &mut App, idx: usize) {
-    if let Some(meta) = dial_metas().get(idx) {
-        let cur = (meta.label)(&app.active_station.dials);
-        let mut input = Input::new();
-        input.text = cur;
-        input.end();
-        app.popup.dial_input = input;
+    if idx < dial_metas().len() {
         app.popup.dial_idx = Some(idx);
         app.popup.mode = Mode::DialEdit;
     }
 }
 
-pub fn commit_dial_edit(app: &mut App) {
+pub fn commit_dial_edit(app: &mut App, text: &str) {
     let idx = match app.popup.dial_idx {
         Some(i) => i,
         None => return,
     };
-    let text = app.popup.dial_input.text.trim().to_string();
+    let text = text.trim().to_string();
     if text.is_empty() {
         app.note("tinker value can't be empty");
         return;
@@ -372,7 +431,6 @@ pub fn commit_dial_edit(app: &mut App) {
         app.note(format!("{} = {}", meta.name, val.label()));
     }
     app.popup.mode = Mode::Browse;
-    app.popup.dial_input = Input::new();
     app.popup.dial_idx = None;
 }
 
@@ -396,8 +454,8 @@ fn parse_tinker_val(s: &str) -> Option<crate::station::TinkerVal> {
     None
 }
 
-pub fn commit_save_as(app: &mut App) {
-    let name = app.popup.name_input.text.trim().to_string();
+pub fn commit_save_as(app: &mut App, text: &str) {
+    let name = text.trim().to_string();
     if name.is_empty() {
         app.note("name can't be empty");
         return;
@@ -425,7 +483,6 @@ pub fn commit_save_as(app: &mut App) {
     app.active_origin = Some(name.clone());
     app.note(format!("saved station '{}'", name));
     app.popup.mode = Mode::Browse;
-    app.popup.name_input = Input::new();
 }
 
 pub fn commit_update(app: &mut App) {
@@ -656,17 +713,22 @@ pub fn cycle_tinker_depth_dials(dials: &mut Dials, delta: i32) {
 }
 
 pub fn switch_tab(app: &mut App) {
-    app.popup.tab = match app.popup.tab {
-        Tab::Station => Tab::Shops,
-        Tab::Shops => Tab::Pref,
-        Tab::Pref => Tab::Help,
-        Tab::Help => Tab::Station,
-    };
+    let at = TABS.iter().position(|t| *t == app.popup.tab).unwrap_or(0);
+    enter_tab(app, TABS[(at + 1) % TABS.len()]);
+}
+
+pub fn jump_tab(app: &mut App, idx: usize) {
+    if let Some(tab) = TABS.get(idx) {
+        enter_tab(app, *tab);
+    }
+}
+
+fn enter_tab(app: &mut App, tab: Tab) {
+    app.popup.tab = tab;
     app.popup.mode = Mode::Browse;
-    app.popup.name_input = Input::new();
-    app.popup.selected = 0;
-    app.popup.scroll = 0;
+    app.popup.dial_idx = None;
     app.popup.search.clear();
+    app.popup.selected = first_selectable(app);
 }
 
 pub fn type_search(app: &mut App, c: char) {
@@ -674,6 +736,14 @@ pub fn type_search(app: &mut App, c: char) {
         return;
     }
     app.popup.search.push(c);
+    retarget_search(app);
+}
+
+pub fn set_search(app: &mut App, text: String) {
+    if app.popup.mode != Mode::Browse || app.popup.tab != Tab::Station {
+        return;
+    }
+    app.popup.search = text;
     retarget_search(app);
 }
 
@@ -698,59 +768,7 @@ fn retarget_search(app: &mut App) {
 }
 
 pub fn open_help(app: &mut App) {
-    if app.popup.mode == Mode::Closed {
-        app.popup.mode = Mode::Browse;
-        app.popup.selected = 0;
-    }
-    app.popup.tab = Tab::Help;
-    app.popup.mode = Mode::Browse;
-    app.popup.name_input = Input::new();
-    app.popup.scroll = 0;
-    app.popup.search.clear();
-}
-
-pub fn scroll(app: &mut App, delta: i32) {
-    let r = if delta > 0 {
-        app.popup.scroll.saturating_add(delta as usize)
-    } else {
-        app.popup.scroll.saturating_sub((-delta) as usize)
-    };
-    app.popup.scroll = r;
-}
-
-pub fn help_rows() -> Vec<(String, String)> {
-    vec![
-        ("Enter".into(), "send input".into()),
-        ("Esc".into(), "stop a streaming reply / clear note".into()),
-        ("Ctrl-C".into(), "quit immediately".into()),
-        ("Ctrl-T".into(), "toggle page / scroll view".into()),
-        ("Ctrl-V".into(), "read replies aloud on / off".into()),
-        ("PgUp / PgDn".into(), "page or scroll up / down".into()),
-        ("← / →".into(), "move the input cursor".into()),
-        ("Home / End".into(), "jump to input start / end".into()),
-        (
-            "Backspace / Delete".into(),
-            "delete before / after cursor".into(),
-        ),
-        ("Ctrl-A / Ctrl-E".into(), "jump to input start / end".into()),
-        ("Ctrl-U".into(), "kill to start of line".into()),
-        ("Ctrl-K".into(), "kill to end of line".into()),
-        ("Ctrl-W".into(), "kill previous word".into()),
-        ("Ctrl-S".into(), "open / close this popup".into()),
-        ("Tab / F1".into(), "switch Station / Shops / Pref / Help tab".into()),
-        ("Mouse wheel".into(), "scroll in page / scroll view".into()),
-        ("".into(), "".into()),
-        ("In the Station tab:".into(), "".into()),
-        ("↑ / ↓".into(), "move between selectable rows".into()),
-        ("← / →".into(), "adjust model / dials (also Enter)".into()),
-        ("Enter".into(), "load station / update / save-as".into()),
-        ("PgUp / PgDn".into(), "scroll the popup body".into()),
-        ("Esc".into(), "close popup".into()),
-        ("".into(), "".into()),
-        ("In the Help tab:".into(), "".into()),
-        ("Esc / Tab".into(), "leave Help back to Station".into()),
-        ("F1".into(), "open Help tab from anywhere".into()),
-    ]
+    enter_tab(app, Tab::Help);
 }
 
 pub fn shops_lines(app: &App) -> Vec<Line<'static>> {

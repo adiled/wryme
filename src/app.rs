@@ -22,7 +22,8 @@ pub enum Phase {
     Writing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     Page,
     Scroll,
@@ -65,13 +66,9 @@ pub struct App {
     pub in_flight: bool,
     pub status: String,
     pub awaiting: String,
+    pub awaiting_images: Vec<String>,
     pub should_quit: bool,
-    pub current_page: usize,
-    pub scroll_row: usize,
-    pub page_base: usize,
-    pub wheel_accum: i32,
     pub view_mode: ViewMode,
-    pub last_viewport_h: usize,
     pub last_response_id: Option<String>,
     pub wire: Option<Vec<serde_json::Value>>,
     wire_upto: usize,
@@ -85,6 +82,8 @@ pub struct App {
     pub voice_buffer: String,
     pub accent: ratatui::style::Color,
     pub nametags: crate::config::NametagMode,
+    pub typeface: crate::config::Typeface,
+    pub sync: crate::sync::Sync,
     pub shops: Vec<Shop>,
     pub stations: Vec<Station>,
     pub active_station: Station,
@@ -96,8 +95,6 @@ pub struct App {
     pub popup: Popup,
     pub engine: Arc<Mutex<book::Engine>>,
     pub reservoir: Arc<Mutex<Reservoir>>,
-    pub selection: Option<crate::select::Selection>,
-    pub screen: crate::select::Screen,
     turn_counter: u64,
     last_stream_was_brain: bool,
     last_stream_was_heart: bool,
@@ -150,6 +147,7 @@ impl App {
         active_shop: Shop,
         active_origin: Option<String>,
     ) -> Self {
+        crate::sync::publish();
         Self {
             messages: Vec::new(),
             system,
@@ -158,13 +156,9 @@ impl App {
             in_flight: false,
             status: String::new(),
             awaiting: String::new(),
+            awaiting_images: Vec::new(),
             should_quit: false,
-            current_page: 0,
-            scroll_row: 0,
-            page_base: 0,
-            wheel_accum: 0,
             view_mode: ViewMode::Page,
-            last_viewport_h: 0,
             last_response_id: None,
             wire: Some(Vec::new()),
             wire_upto: 0,
@@ -178,6 +172,8 @@ impl App {
             voice_buffer: String::new(),
             accent: crate::config::accent_pref(),
             nametags: crate::config::nametags_pref(),
+            typeface: crate::config::typeface_pref(),
+            sync: crate::sync::Sync::now(),
             shops,
             stations,
             active_station,
@@ -191,8 +187,6 @@ impl App {
                 book::open_engine(&book_dir()).expect("open book"),
             )),
             reservoir: Arc::new(Mutex::new(Reservoir::load())),
-            selection: None,
-            screen: Vec::new(),
             turn_counter: 0,
             last_stream_was_brain: false,
             last_stream_was_heart: false,
@@ -227,8 +221,14 @@ impl App {
         self.active_origin = active_origin;
         self.accent = crate::config::accent_pref();
         self.nametags = crate::config::nametags_pref();
+        self.typeface = crate::config::typeface_pref();
+        self.sync.refresh();
         self.last_response_id = None;
         self.forget_wire();
+    }
+
+    pub fn turn(&self) -> u64 {
+        self.turn_counter
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
