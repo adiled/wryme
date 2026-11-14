@@ -111,17 +111,6 @@ struct Composer: View {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(stage.bar.busy ? Theme.faint.opacity(0.4) : accent.opacity(0.7), lineWidth: 1)
             )
-            .overlay(alignment: .bottomTrailing) {
-                if let tool = stage.bar.tool {
-                    Text(tool)
-                        .font(Theme.font(stage.font, size: 11))
-                        .fontWeight(.bold)
-                        .foregroundStyle(accent)
-                        .padding(.horizontal, 6)
-                        .background(Theme.bg)
-                        .offset(x: -16, y: 7)
-                }
-            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -330,6 +319,9 @@ struct BubbleView: View {
                     Mark(text: part.mark, ink: part.ink, blinks: part.blinks)
                         .frame(width: Theme.size * 1.6, alignment: .leading)
                     Text(part.text).frame(maxWidth: .infinity, alignment: .leading)
+                    if i == 0, let tool = bubble.tool {
+                        Text(tool).fontWeight(.bold).foregroundStyle(accent).padding(.leading, 12)
+                    }
                     if i == 0 {
                         Text(bubble.waiting ? "waiting…" : bubble.time)
                             .foregroundStyle(Theme.faint)
