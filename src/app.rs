@@ -146,6 +146,7 @@ impl App {
         active_shop: Shop,
         active_origin: Option<String>,
     ) -> Self {
+        crate::sync::publish();
         Self {
             messages: Vec::new(),
             system,

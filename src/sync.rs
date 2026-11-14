@@ -57,7 +57,44 @@ pub fn place() -> String {
 }
 
 pub fn link(on: bool) -> Result<()> {
-    imp::set(on)
+    imp::set(on)?;
+    publish();
+    Ok(())
+}
+
+pub const AWAY: bool = cfg!(any(target_os = "ios", target_os = "android"));
+
+pub fn publish() {
+    if imp::linked() != Some(true) {
+        return;
+    }
+    let Some(name) = imp::local_name() else {
+        return;
+    };
+    let mine = crate::config::host_pref();
+    let theirs = mine.as_deref().is_some_and(|h| !h.ends_with(".local"));
+    if mine.as_deref() != Some(name.as_str()) && !theirs {
+        let _ = crate::config::write_host(&name);
+    }
+}
+
+fn split_host(authority: &str) -> (&str, &str) {
+    if authority.starts_with('[') {
+        let end = authority.find(']').map_or(authority.len(), |i| i + 1);
+        return authority.split_at(end);
+    }
+    authority.split_at(authority.find(':').unwrap_or(authority.len()))
+}
+
+pub fn reach(url: &str, host: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let (name, port) = split_host(authority);
+    let local = matches!(
+        name.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]"
+    );
+    local.then(|| format!("{scheme}://{host}{port}{path}"))
 }
 
 #[cfg(all(unix, not(target_arch = "wasm32")))]
@@ -88,6 +125,18 @@ mod imp {
 
     pub fn linked() -> Option<bool> {
         Some(shared(&here()?, &drive()?))
+    }
+
+    pub fn local_name() -> Option<String> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let out = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "LocalHostName"])
+            .output()
+            .ok()?;
+        let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (out.status.success() && !name.is_empty()).then(|| format!("{name}.local"))
     }
 
     pub fn set(on: bool) -> Result<()> {
@@ -209,7 +258,41 @@ mod imp {
         None
     }
 
+    pub fn local_name() -> Option<String> {
+        None
+    }
+
     pub fn set(_: bool) -> Result<()> {
         anyhow::bail!("iCloud Drive is not available")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reach;
+
+    #[test]
+    fn local_shops_reach_the_mac() {
+        let mac = "Adils-MacBook-Pro.local";
+        assert_eq!(
+            reach("http://localhost:11434/v1", mac).as_deref(),
+            Some("http://Adils-MacBook-Pro.local:11434/v1")
+        );
+        assert_eq!(
+            reach("http://127.0.0.1:8899/v1", mac).as_deref(),
+            Some("http://Adils-MacBook-Pro.local:8899/v1")
+        );
+        assert_eq!(
+            reach("http://[::1]:14620", mac).as_deref(),
+            Some("http://Adils-MacBook-Pro.local:14620")
+        );
+        assert_eq!(reach("http://LOCALHOST/v1", mac).as_deref(), Some("http://Adils-MacBook-Pro.local/v1"));
+    }
+
+    #[test]
+    fn other_shops_stay_put() {
+        assert_eq!(reach("https://api.openai.com/v1", "mac.local"), None);
+        assert_eq!(reach("http://localhost.example.com/v1", "mac.local"), None);
+        assert_eq!(reach("", "mac.local"), None);
     }
 }

@@ -176,6 +176,17 @@ pub fn write_typeface(face: Typeface) -> Result<()> {
     write_pref("font", face.name())
 }
 
+pub fn host_pref() -> Option<String> {
+    prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("host")?.as_str().map(String::from))
+        .filter(|h| !h.is_empty())
+}
+
+pub fn write_host(name: &str) -> Result<()> {
+    write_pref("host", name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
