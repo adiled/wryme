@@ -54,7 +54,7 @@ struct Chord: Decodable, Hashable {
     }
 }
 
-struct Bind: Decodable, Identifiable {
+struct Binding: Decodable, Identifiable {
     let scope: Scope
     let chord: Chord
     let name: String
@@ -201,34 +201,39 @@ enum Editor {
         case .left, .right, .backspace, .delete: return false
         case .home, .end, .kill_to_start, .kill_to_end, .kill_word:
             if core.stage?.scope == .field {
-                (core.fieldText, core.fieldCaret) = apply(e, core.fieldText, core.fieldCaret)
+                (core.fieldText, core.fieldSelection) = apply(e, core.fieldText, core.fieldSelection)
             } else {
-                (core.draft, core.draftCaret) = apply(e, core.draft, core.draftCaret)
+                (core.draft, core.draftSelection) = apply(e, core.draft, core.draftSelection)
             }
             return true
         }
     }
 
-    static func apply(_ e: Edit, _ text: String, _ caret: Int) -> (String, Int) {
-        var units = Array(text.utf16)
-        var at = min(max(caret, 0), units.count)
-        let space = { (u: UInt16) in u == 32 || u == 9 || u == 10 }
+    static func apply(_ e: Edit, _ text: String, _ selection: TextSelection?) -> (String, TextSelection?) {
+        var chars = Array(text)
+        var caret = chars.count
+        if case .selection(let range)? = selection?.indices,
+            range.lowerBound == text.endIndex || text.indices.contains(range.lowerBound)
+        {
+            caret = text[..<range.lowerBound].count
+        }
         switch e {
-        case .home: at = 0
-        case .end: at = units.count
+        case .home: caret = 0
+        case .end: caret = chars.count
         case .kill_to_start:
-            units.removeSubrange(0..<at)
-            at = 0
-        case .kill_to_end: units.removeSubrange(at..<units.count)
+            chars.removeSubrange(0..<caret)
+            caret = 0
+        case .kill_to_end: chars.removeSubrange(caret..<chars.count)
         case .kill_word:
-            var start = at
-            while start > 0, space(units[start - 1]) { start -= 1 }
-            while start > 0, !space(units[start - 1]) { start -= 1 }
-            units.removeSubrange(start..<at)
-            at = start
+            var start = caret
+            while start > 0, chars[start - 1].isWhitespace { start -= 1 }
+            while start > 0, !chars[start - 1].isWhitespace { start -= 1 }
+            chars.removeSubrange(start..<caret)
+            caret = start
         case .send, .left, .right, .backspace, .delete: break
         }
-        return (String(decoding: units, as: UTF16.self), at)
+        let out = String(chars)
+        return (out, TextSelection(insertionPoint: out.index(out.startIndex, offsetBy: caret)))
     }
 }
 
