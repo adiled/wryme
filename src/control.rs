@@ -8,7 +8,7 @@ use crate::popup;
 
 pub enum Intent {
     Act(Action),
-    Submit(String),
+    Submit(String, Vec<String>),
     Search(char),
     Find(String),
     Tab(usize),
@@ -28,7 +28,7 @@ pub fn apply(
     match intent {
         Intent::Act(Action::Core(c)) => core(c, app, client, tx, in_flight),
         Intent::Act(Action::Edit(_) | Action::Pane(_)) | Intent::Reload => {}
-        Intent::Submit(text) => submit(text, app, client, tx, in_flight),
+        Intent::Submit(text, images) => submit(text, images, app, client, tx, in_flight),
         Intent::Search(c) => popup::type_search(app, c),
         Intent::Find(text) => popup::set_search(app, text),
         Intent::Tab(i) => popup::jump_tab(app, i),
@@ -88,11 +88,12 @@ fn interrupt(
             t.abort();
             app.finish_streaming();
             app.settle_wire();
-            if app.awaiting.is_empty() {
+            if app.awaiting.is_empty() && app.awaiting_images.is_empty() {
                 app.note("cancelled");
             } else {
                 let pending = std::mem::take(&mut app.awaiting);
-                start_turn(app, client, tx, in_flight, pending);
+                let images = std::mem::take(&mut app.awaiting_images);
+                start_turn(app, client, tx, in_flight, pending, images);
             }
         }
         None => {
@@ -105,6 +106,7 @@ fn interrupt(
 
 fn submit(
     text: String,
+    images: Vec<String>,
     app: &mut App,
     client: &Client,
     tx: &mpsc::UnboundedSender<StreamEvent>,
@@ -113,17 +115,18 @@ fn submit(
     match app.popup.mode {
         popup::Mode::Closed => {
             let text = text.trim().to_string();
-            if text.is_empty() {
+            if text.is_empty() && images.is_empty() {
                 return;
             }
             if !app.in_flight {
-                start_turn(app, client, tx, in_flight, text);
-            } else if app.awaiting.is_empty() {
-                app.awaiting = text;
-            } else {
-                app.awaiting.push('\n');
-                app.awaiting.push_str(&text);
+                start_turn(app, client, tx, in_flight, text, images);
+                return;
             }
+            if !app.awaiting.is_empty() && !text.is_empty() {
+                app.awaiting.push('\n');
+            }
+            app.awaiting.push_str(&text);
+            app.awaiting_images.extend(images);
         }
         popup::Mode::SaveAs => popup::commit_save_as(app, &text),
         popup::Mode::DialEdit => popup::commit_dial_edit(app, &text),
@@ -186,8 +189,9 @@ pub fn start_turn(
     tx: &mpsc::UnboundedSender<StreamEvent>,
     in_flight: &mut Option<crate::platform::Task>,
     text: String,
+    mut images: Vec<String>,
 ) {
-    let images = attached_images(&text);
+    images.extend(attached_images(&text));
     if app.messages.is_empty() {
         tracing::info!("window start");
     }

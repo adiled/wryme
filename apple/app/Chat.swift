@@ -110,28 +110,33 @@ struct Composer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("›").foregroundStyle(accent)
-                field
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...8)
-                    .focused($focused)
-                    .onChange(of: core.draft) { _, text in settle(text) }
-                #if os(iOS)
-                PhotosPicker(selection: $photo, matching: .images) {
-                    Image(systemName: "photo")
+            VStack(alignment: .leading, spacing: 10) {
+                if !core.attachments.isEmpty {
+                    Thumbs(paths: core.attachments, height: 56) { core.detach($0) }
                 }
-                .onChange(of: photo) { _, item in attach(item) }
-                ActionMenu()
-                #else
-                Button {
-                    core.act("settings")
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
+                HStack(alignment: .center, spacing: 8) {
+                    Text("›").foregroundStyle(accent)
+                    field
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...8)
+                        .focused($focused)
+                        .onChange(of: core.draft) { _, text in settle(text) }
+                    #if os(iOS)
+                    PhotosPicker(selection: $photo, matching: .images) {
+                        Image(systemName: "photo")
+                    }
+                    .onChange(of: photo) { _, item in attach(item) }
+                    ActionMenu()
+                    #else
+                    Button {
+                        core.act("settings")
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Settings")
+                    #endif
                 }
-                .buttonStyle(.plain)
-                .help("Settings")
-                #endif
             }
             .foregroundStyle(Theme.fg)
             .font(Theme.font(stage.font, size: 15))
@@ -145,9 +150,11 @@ struct Composer: View {
         .padding(.top, 8)
         .padding(.bottom, 4)
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first else { return false }
-            core.draft = url.path
-            return true
+            let paths = urls.map(\.path)
+            let pictures = paths.filter(Pictures.isPicture)
+            pictures.forEach(core.attach)
+            if let other = paths.first(where: { !Pictures.isPicture($0) }) { core.draft = other }
+            return !paths.isEmpty
         }
         .onAppear { focused = true }
         .onChange(of: stage.scope) { _, scope in
@@ -181,11 +188,9 @@ struct Composer: View {
             guard let data = try? await item.loadTransferable(type: Data.self),
                 let jpeg = UIImage(data: data)?.jpegData(compressionQuality: 0.9)
             else { return }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("wryme-\(UUID().uuidString).jpg")
-            guard (try? jpeg.write(to: url)) != nil else { return }
+            guard let path = Pictures.store(jpeg, ext: "jpg") else { return }
             await MainActor.run {
-                core.draft = url.path
+                core.attach(path)
                 photo = nil
             }
         }
@@ -280,7 +285,7 @@ struct BubbleView: View {
                 Text(bubble.time).foregroundStyle(Theme.faint).monospacedDigit()
             }
             if hasHead {
-                Blocks(lead: lead, rows: bubble.reply, face: face)
+                Blocks(lead: lead, rows: bubble.reply, face: face, images: bubble.images)
             }
             thought("brain", bubble.brain, after: hasHead)
             thought("heart", bubble.heart, after: hasHead || !bubble.brain.isEmpty)
@@ -298,20 +303,15 @@ struct BubbleView: View {
         }
     }
 
-    private var hasHead: Bool { !lead.characters.isEmpty || !bubble.reply.isEmpty }
+    private var hasHead: Bool {
+        !lead.characters.isEmpty || !bubble.reply.isEmpty || !bubble.images.isEmpty
+    }
 
     private var lead: AttributedString {
-        var lines: [AttributedString] = bubble.images.map {
-            Theme.plain("📷 attached: \($0)", Theme.faint, face: face)
-        }
-        if bubble.orphan { lines.append(Theme.plain("▌", Theme.faint, face: face)) }
         var out = AttributedString()
-        for (i, line) in lines.enumerated() {
-            if i > 0 { out += AttributedString("\n") }
-            out += line
-        }
+        if bubble.orphan { out += Theme.plain("▌", Theme.faint, face: face) }
         if !bubble.reply.isEmpty {
-            if !lines.isEmpty { out += AttributedString("\n") }
+            if bubble.orphan { out += AttributedString("\n") }
             if stage.nametags == .inlined, let guest = bubble.guest {
                 out += Theme.plain("@\(guest) ", ink, face: face)
             }
@@ -325,12 +325,13 @@ struct BubbleView: View {
         let blinks: Bool
         let lead: AttributedString
         let rows: [Row]
+        var images: [String] = []
     }
 
     private var parts: [Part] {
         var out: [Part] = []
         if hasHead {
-            out.append(Part(mark: bubble.mark, ink: ink, blinks: bubble.blinks, lead: lead, rows: bubble.reply))
+            out.append(Part(mark: bubble.mark, ink: ink, blinks: bubble.blinks, lead: lead, rows: bubble.reply, images: bubble.images))
         }
         for (rows, mark) in [(bubble.brain, stage.marks.brain), (bubble.heart, stage.marks.heart)] where !rows.isEmpty {
             out.append(Part(mark: mark, ink: Theme.faint, blinks: bubble.thinkingLive, lead: AttributedString(), rows: rows))
@@ -347,7 +348,7 @@ struct BubbleView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
                     Mark(text: part.mark, ink: part.ink, blinks: part.blinks)
                         .frame(width: Theme.size * 1.6, alignment: .leading)
-                    Blocks(lead: part.lead, rows: part.rows, face: face)
+                    Blocks(lead: part.lead, rows: part.rows, face: face, images: part.images)
                     if i == 0, let tool = bubble.tool {
                         Text(tool).fontWeight(.bold).foregroundStyle(accent).padding(.leading, 12)
                     }

@@ -49,6 +49,7 @@ struct Blocks: View {
     let lead: AttributedString
     let rows: [Row]
     let face: Typeface
+    var images: [String] = []
 
     var body: some View {
         let parts = chunks(rows)
@@ -61,13 +62,18 @@ struct Blocks: View {
                 switch part {
                 case .prose(let body):
                     Text((i == 0 ? lead : AttributedString()) + Theme.paint(body, face: face))
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .code(let lang, let body):
                     CodeCard(lang: lang, rows: body, face: face)
                 case .table(let body):
                     Text(Theme.paint(body, face: face))
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            }
+            if !images.isEmpty {
+                Thumbs(paths: images, height: 160)
             }
         }
     }

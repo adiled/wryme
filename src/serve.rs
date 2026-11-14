@@ -21,6 +21,7 @@ pub type Emit = Arc<dyn Fn(&str) + Send + Sync>;
 enum Inbound {
     Do(Core),
     Submit(String),
+    Send { text: String, images: Vec<String> },
     Search(char),
     Find(String),
     Tab(usize),
@@ -32,7 +33,8 @@ impl From<Inbound> for Intent {
     fn from(msg: Inbound) -> Self {
         match msg {
             Inbound::Do(c) => Intent::Act(Action::Core(c)),
-            Inbound::Submit(text) => Intent::Submit(text),
+            Inbound::Submit(text) => Intent::Submit(text, Vec::new()),
+            Inbound::Send { text, images } => Intent::Submit(text, images),
             Inbound::Search(c) => Intent::Search(c),
             Inbound::Find(text) => Intent::Find(text),
             Inbound::Tab(i) => Intent::Tab(i),
@@ -212,5 +214,7 @@ mod tests {
         assert!(matches!(parse(r#""reload""#), Some(Intent::Reload)));
         assert!(matches!(parse(r#"{"search":"q"}"#), Some(Intent::Search('q'))));
         assert!(parse("not json").is_none());
+        let sent = parse(r#"{"send":{"text":"look","images":["/tmp/a.png"]}}"#);
+        assert!(matches!(sent, Some(Intent::Submit(t, i)) if t == "look" && i == ["/tmp/a.png"]));
     }
 }

@@ -316,9 +316,10 @@ fn handle_stream_event(
             if let Some(t) = in_flight_task.take() {
                 drop(t);
             }
-            if !app.awaiting.is_empty() {
+            if !app.awaiting.is_empty() || !app.awaiting_images.is_empty() {
                 let pending = std::mem::take(&mut app.awaiting);
-                crate::control::start_turn(app, client, tx, in_flight_task, pending);
+                let images = std::mem::take(&mut app.awaiting_images);
+                crate::control::start_turn(app, client, tx, in_flight_task, pending, images);
             } else if !app.guest_queue.is_empty() {
                 let note = app.guest_queue.remove(0);
                 crate::control::start_guest_turn(app, client, tx, in_flight_task, note);

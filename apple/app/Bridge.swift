@@ -259,6 +259,7 @@ final class Core: ObservableObject {
     @Published var needsFolder = false
     @Published var draft = ""
     @Published var fieldText = ""
+    @Published var attachments: [String] = []
     @Published var ended = false
     #if os(iOS)
     @Published var draftSelection: TextSelection?
@@ -340,9 +341,18 @@ final class Core: ObservableObject {
             submit(fieldText)
             return
         }
-        let text = draft
+        let (text, images) = (draft, attachments)
         draft = ""
-        submit(text)
+        attachments = []
+        send(["send": ["text": text, "images": images]])
+    }
+
+    func attach(_ path: String) {
+        if !attachments.contains(path) { attachments.append(path) }
+    }
+
+    func detach(_ index: Int) {
+        if attachments.indices.contains(index) { attachments.remove(at: index) }
     }
 
     func reaches(_ b: Binding) -> Bool {

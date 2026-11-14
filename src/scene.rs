@@ -239,10 +239,10 @@ pub fn bubble(id: String, msg: &Message, thinking_live: bool) -> Bubble {
 }
 
 fn awaiting(app: &App) -> Option<Message> {
-    (!app.awaiting.is_empty()).then(|| Message {
+    (!app.awaiting.is_empty() || !app.awaiting_images.is_empty()).then(|| Message {
         role: Role::User,
         content: app.awaiting.clone(),
-        images: Vec::new(),
+        images: app.awaiting_images.clone(),
         guest: None,
         brain: String::new(),
         heart: String::new(),

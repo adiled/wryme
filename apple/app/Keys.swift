@@ -152,6 +152,9 @@ enum Keys {
         let chord = Chord(
             key: key, ctrl: flags.contains(.control), shift: flags.contains(.shift),
             cmd: flags.contains(.command))
+        if scope == .chat, chord.cmd, !chord.ctrl, key == "v", Pictures.paste(into: core) {
+            return true
+        }
         if let binding = core.lookup(chord) { return core.perform(binding) }
         guard scope == .sheet, !chord.ctrl, !chord.cmd, let c = event.characters?.first,
             c.isLetter || c.isNumber || c.isPunctuation || c.isSymbol || c == " "

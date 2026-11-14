@@ -29,7 +29,7 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 | Page mode | pins the start of a long reply, steps rows, then pages | snaps whole screens | snaps whole screens |
 | Position readout | rows | percent | percent |
 | Station search | type letters | type letters | search field |
-| Images | send a path as the whole message | drop a file | photo picker |
+| Images | send a path as the whole message; shown as a path | paste (Cmd-V) or drop, attached as chips; shown as thumbnails | photo picker; thumbnails |
 | Tools | all | all | none that run programs (shell, explore, job check) |
 | Quit (Ctrl-C) | quits | quits | not offered |
 | Another window | run `wme` again | File › New Window starts its own `wme`; no tabs | one window |

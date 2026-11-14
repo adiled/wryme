@@ -208,7 +208,7 @@ impl View {
                     Scope::Field => input.text.clone(),
                     _ => input.take(),
                 };
-                return vec![Intent::Submit(text)];
+                return vec![Intent::Submit(text, Vec::new())];
             }
             Edit::Left => input.move_left(),
             Edit::Right => input.move_right(),
