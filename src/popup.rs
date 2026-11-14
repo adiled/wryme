@@ -59,6 +59,7 @@ pub enum Row {
     PrefAccent,
     PrefNametags,
     PrefFont,
+    PrefSync,
     Blank,
 }
 
@@ -101,20 +102,24 @@ pub fn dial_metas() -> Vec<DialMeta> {
 pub fn rows(app: &App) -> Vec<Row> {
     match app.popup.tab {
         Tab::Station => station_rows(app),
-        Tab::Pref => pref_rows(),
+        Tab::Pref => pref_rows(app),
         Tab::Shops | Tab::Help => vec![],
     }
 }
 
-fn pref_rows() -> Vec<Row> {
-    vec![
+fn pref_rows(app: &App) -> Vec<Row> {
+    let mut rows = vec![
         Row::SectionHeader("preferences"),
         Row::PrefVoice,
         Row::PrefView,
         Row::PrefAccent,
         Row::PrefNametags,
         Row::PrefFont,
-    ]
+    ];
+    if app.sync.way.is_some() {
+        rows.push(Row::PrefSync);
+    }
+    rows
 }
 
 fn station_rows(app: &App) -> Vec<Row> {
@@ -274,6 +279,7 @@ pub fn adjust(app: &mut App, delta: i32) {
         Some(Row::PrefAccent) => cycle_accent(app, delta),
         Some(Row::PrefNametags) => cycle_nametags(app, delta),
         Some(Row::PrefFont) => cycle_typeface(app, delta),
+        Some(Row::PrefSync) => sync(app),
         _ => {}
     }
 }
@@ -318,6 +324,7 @@ fn activate_row(app: &mut App, row: Row) {
         Row::PrefAccent => cycle_accent(app, 1),
         Row::PrefNametags => cycle_nametags(app, 1),
         Row::PrefFont => cycle_typeface(app, 1),
+        Row::PrefSync => sync(app),
         _ => {}
     }
 }
@@ -343,6 +350,30 @@ fn cycle_nametags(app: &mut App, delta: i32) {
     app.nametags = mode;
     let _ = crate::config::write_nametags(mode);
     app.note(format!("nametags: {name}"));
+}
+
+fn sync(app: &mut App) {
+    match app.sync.way {
+        Some(crate::sync::Way::Link) => {
+            let on = app.sync.place == "off";
+            match crate::sync::link(on) {
+                Ok(()) => {
+                    app.sync.refresh();
+                    app.note(if on {
+                        "sync on: shops, stations and prefs now live in iCloud Drive › wryme"
+                    } else {
+                        "sync off: settings are local again"
+                    });
+                }
+                Err(e) => app.note(format!("error: sync {e:#}")),
+            }
+        }
+        Some(crate::sync::Way::Pick) => {
+            app.sync.pick += 1;
+            app.note("choose the folder that holds shops.toml and stations.toml");
+        }
+        None => {}
+    }
 }
 
 fn cycle_typeface(app: &mut App, delta: i32) {

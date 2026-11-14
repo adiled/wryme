@@ -23,6 +23,11 @@ enum ViewMode: String, Decodable { case page, scroll }
 enum Scope: String, Decodable { case any, chat, sheet, field }
 enum Typeface: String, Decodable { case system, serif, rounded, mono }
 
+struct SyncPlace: Decodable {
+    let place: String
+    let pick: Int
+}
+
 struct Marks: Decodable {
     let brain: String
     let heart: String
@@ -89,6 +94,7 @@ struct Stage: Decodable {
     let scope: Scope
     let turn: Int
     let marks: Marks
+    let sync: SyncPlace
     let bar: Bar
     let status: Status
     let error: String?
@@ -173,7 +179,7 @@ final class Core: ObservableObject {
     let readout = Readout()
 
     private var cache: [String: Bubble] = [:]
-    private var started = false
+    private(set) var started = false
 
     func start() {
         guard !started else { return }

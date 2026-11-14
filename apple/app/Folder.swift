@@ -48,12 +48,17 @@ enum Folder {
     }
 
     private static func open(_ url: URL) {
+        chosen?.stopAccessingSecurityScopedResource()
         chosen = url
+        UserDefaults.standard.set(false, forKey: demo)
         Core.shared.needsFolder = false
         setenv("WRYME_CONFIG_DIR", url.path, 1)
         DispatchQueue.global().async {
             fetch(url)
-            DispatchQueue.main.async { Core.shared.start() }
+            DispatchQueue.main.async {
+                let core = Core.shared
+                if core.started { core.reload() } else { core.start() }
+            }
         }
     }
 

@@ -82,6 +82,7 @@ pub struct App {
     pub accent: ratatui::style::Color,
     pub nametags: crate::config::NametagMode,
     pub typeface: crate::config::Typeface,
+    pub sync: crate::sync::Sync,
     pub shops: Vec<Shop>,
     pub stations: Vec<Station>,
     pub active_station: Station,
@@ -169,6 +170,7 @@ impl App {
             accent: crate::config::accent_pref(),
             nametags: crate::config::nametags_pref(),
             typeface: crate::config::typeface_pref(),
+            sync: crate::sync::Sync::now(),
             shops,
             stations,
             active_station,
@@ -217,6 +219,7 @@ impl App {
         self.accent = crate::config::accent_pref();
         self.nametags = crate::config::nametags_pref();
         self.typeface = crate::config::typeface_pref();
+        self.sync.refresh();
         self.last_response_id = None;
         self.forget_wire();
     }

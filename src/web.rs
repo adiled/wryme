@@ -114,6 +114,10 @@ fn log(msg: &str) {
     web_sys::console::log_1(&JsValue::from_str(msg));
 }
 
+pub fn pick_folder() {
+    call_global("wrymePickFolder");
+}
+
 pub fn announce_window(id: &str) {
     let global = js_sys::global();
     let Ok(f) = js_sys::Reflect::get(&global, &JsValue::from_str("wrymeSetWindowId")) else {

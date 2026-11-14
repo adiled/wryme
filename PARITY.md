@@ -30,9 +30,16 @@ One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/po
 | Tools | all | all | none that run programs (shell, explore, job check) |
 | Quit (Ctrl-C) | quits | quits | not offered |
 | Extras | | menu bar, Cmd-, settings | action menu |
-| Config | `~/.config/wryme` | `~/.config/wryme` | the iCloud Drive `wryme` folder, reread when the app comes to the front |
+| Sync row (Pref tab) | macOS: links the files into iCloud Drive › wryme; elsewhere hidden | same as the terminal on macOS | opens the Files folder picker |
 
-Shops, stations and prefs are shared through iCloud Drive once `apple/share-config.sh` has run on the Mac. Book memory and usage stats stay per device.
+## Sync
+
+Shops, stations and prefs can live in a shared folder. The Pref tab has one `sync` row everywhere it can work, backed by `src/sync.rs`, in one of two ways:
+
+- **Link**: the core moves the files into a cloud drive and leaves links behind. macOS (terminal and Mac app) uses iCloud Drive this way, since a terminal can't show a folder picker. Turning it off copies the files back and leaves the cloud copy for other devices.
+- **Pick**: the core asks the surface to open its own folder picker by bumping `scene.sync.pick`. The iPhone uses the Files picker, the browser uses its directory picker, and Android will use its document picker, which reaches Google Drive.
+
+The iPhone rereads the folder when the app comes to the front. Book memory and usage stats stay per device.
 
 ## Checks
 

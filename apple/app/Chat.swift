@@ -2,6 +2,7 @@ import SwiftUI
 
 #if os(iOS)
 import PhotosUI
+import UniformTypeIdentifiers
 #endif
 
 struct Root: View {
@@ -37,6 +38,9 @@ struct Root: View {
 
 struct Main: View {
     let stage: Stage
+    #if os(iOS)
+    @State private var picking = false
+    #endif
 
     var accent: Color { Theme.color(stage.accent) ?? Theme.fg }
 
@@ -58,6 +62,10 @@ struct Main: View {
         }
         #if os(iOS)
         .background(Shortcuts())
+        .onChange(of: stage.sync.pick) { _, _ in picking = true }
+        .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { Folder.choose(url) }
+        }
         #endif
     }
 }

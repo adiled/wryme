@@ -28,6 +28,7 @@ pub mod shop_memory;
 mod spec;
 pub mod station;
 pub mod station_save;
+pub mod sync;
 pub mod term;
 pub mod tools;
 pub mod ui;

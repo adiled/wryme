@@ -24,6 +24,7 @@ pub struct Scene {
     pub scope: Scope,
     pub turn: u64,
     pub marks: Marks,
+    pub sync: crate::sync::Sync,
     pub bar: Bar,
     pub bubbles: Vec<Bubble>,
     pub status: Status,
@@ -294,6 +295,7 @@ pub fn build(app: &App) -> Scene {
             brain: BRAIN_MARK,
             heart: HEART_MARK,
         },
+        sync: app.sync.clone(),
         bar: bar(app),
         bubbles,
         status: status(app),
@@ -657,6 +659,7 @@ fn sheet_row(app: &App, row: &popup::Row, style: Style) -> Line<'static> {
             "nametags",
             strong(format!("  {}", app.nametags.name()), accent),
         ),
+        popup::Row::PrefSync => pair(style, "sync", strong(format!("  {}", app.sync.place), accent)),
         popup::Row::PrefFont => pair(
             style,
             "font",
