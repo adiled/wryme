@@ -79,15 +79,27 @@ pub(crate) fn owns_tool(shop: &str, model: &str, name: &str) -> bool {
 
 pub(crate) type DueCall = (String, String, String, String);
 
+fn call_id(kind: &str, window: &str, stamp: u64, n: &str) -> String {
+    format!("{kind}_{window}_{stamp:x}_{n}")
+}
+
+fn fresh_call(kind: &str, n: &str) -> String {
+    let stamp = (crate::platform::unix_secs() * 1000.0) as u64;
+    call_id(kind, &crate::windows::current(), stamp, n)
+}
+
 pub(crate) fn due_calls(tx: &UnboundedSender<StreamEvent>) -> Vec<DueCall> {
     let check = crate::tools::check_name();
     let mut out: Vec<DueCall> = crate::jobs::claim_due()
         .into_iter()
-        .map(|(id, output)| (format!("check_{id}"), check.clone(), format!("{{\"id\":{id}}}"), output))
+        .map(|(id, output)| {
+            let call = fresh_call("check", &id.to_string());
+            (call, check.clone(), format!("{{\"id\":{id}}}"), output)
+        })
         .collect();
     if let Some(output) = crate::windows::claim_due() {
         out.push((
-            format!("resv_{}", crate::windows::next_msg_id()),
+            fresh_call("resv", &crate::windows::next_msg_id()),
             crate::tools::WRYME_MSG_RESV.to_string(),
             "{}".to_string(),
             output,
@@ -537,4 +549,19 @@ pub fn image_data_url(path: &str) -> Option<(String, String)> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some((mime.to_string(), b64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivered_call_ids_never_repeat_across_windows_or_time() {
+        let a = call_id("check", "8600", 1_000, "1");
+        let b = call_id("check", "1f2e", 1_000, "1");
+        let c = call_id("check", "8600", 2_000, "1");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert!(a.starts_with("check_8600_") && a.ends_with("_1"));
+    }
 }
