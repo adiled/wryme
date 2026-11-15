@@ -235,6 +235,7 @@ final class Child: Link {
         }
         process.executableURL = url
         process.arguments = ["--serve"]
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
@@ -288,7 +289,11 @@ final class Child: Link {
     }
 
     func stop() {
-        if process.isRunning { process.terminate() }
+        guard process.isRunning else { return }
+        try? input.fileHandleForWriting.close()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [process] in
+            if process.isRunning { process.terminate() }
+        }
     }
 }
 #else
@@ -309,6 +314,16 @@ final class Inline: Link {
 }
 #endif
 
+final class Typing: ObservableObject {
+    @Published var draft = ""
+    @Published var fieldText = ""
+    @Published var attachments: [String] = []
+    #if os(iOS)
+    @Published var draftSelection: TextSelection?
+    @Published var fieldSelection: TextSelection?
+    #endif
+}
+
 final class Core: ObservableObject {
     #if os(macOS)
     private static let open = NSHashTable<Core>.weakObjects()
@@ -326,18 +341,11 @@ final class Core: ObservableObject {
     @Published var bindings: [Binding] = []
     @Published var fatal: String?
     @Published var needsFolder = false
-    @Published var draft = ""
-    @Published var fieldText = ""
-    @Published var attachments: [String] = []
     @Published var ended = false
-    #if os(iOS)
-    @Published var draftSelection: TextSelection?
-    @Published var fieldSelection: TextSelection?
-    #endif
-
     let chatMoves = PassthroughSubject<Move, Never>()
     let sheetMoves = PassthroughSubject<Move, Never>()
     let readout = Readout()
+    let typing = Typing()
 
     private let link: Link
     private var cache: [String: Bubble] = [:]
@@ -401,7 +409,7 @@ final class Core: ObservableObject {
         bubbles = order.compactMap { cache[$0] }
         let old = self.stage
         if stage.scope == .field, old?.scope != .field {
-            fieldText = stage.sheet?.field?.text ?? ""
+            typing.fieldText = stage.sheet?.field?.text ?? ""
         }
         #if os(macOS)
         if let window, window.title != stage.window { window.title = stage.window }
@@ -430,21 +438,21 @@ final class Core: ObservableObject {
 
     func sendField() {
         if stage?.scope == .field {
-            submit(fieldText)
+            submit(typing.fieldText)
             return
         }
-        let (text, images) = (draft, attachments)
-        draft = ""
-        attachments = []
+        let (text, images) = (typing.draft, typing.attachments)
+        typing.draft = ""
+        typing.attachments = []
         send(["send": ["text": text, "images": images]])
     }
 
     func attach(_ path: String) {
-        if !attachments.contains(path) { attachments.append(path) }
+        if !typing.attachments.contains(path) { typing.attachments.append(path) }
     }
 
     func detach(_ index: Int) {
-        if attachments.indices.contains(index) { attachments.remove(at: index) }
+        if typing.attachments.indices.contains(index) { typing.attachments.remove(at: index) }
     }
 
     func reaches(_ b: Binding) -> Bool {

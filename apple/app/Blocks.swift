@@ -19,23 +19,20 @@ extension Row {
 
 func chunks(_ rows: [Row]) -> [Chunk] {
     var out: [Chunk] = []
-    for row in rows {
-        switch (row.kind, out.last) {
-        case (.head, _):
-            out.append(.code(row.text, []))
-        case (.code, .code(let lang, let body)?):
-            out[out.count - 1] = .code(lang, body + [row])
-        case (.code, _):
-            out.append(.code("", [row]))
-        case (.table, .table(let body)?):
-            out[out.count - 1] = .table(body + [row])
-        case (.table, _):
-            out.append(.table([row]))
-        case (.prose, .prose(let body)?):
-            out[out.count - 1] = .prose(body + [row])
-        case (.prose, _):
-            out.append(.prose([row]))
+    var i = 0
+    while i < rows.count {
+        let kind = rows[i].kind
+        let from = kind == .head ? i + 1 : i
+        var j = from
+        while j < rows.count, rows[j].kind == (kind == .head ? .code : kind) { j += 1 }
+        let run = Array(rows[from..<j])
+        switch kind {
+        case .head: out.append(.code(rows[i].text, run))
+        case .code: out.append(.code("", run))
+        case .table: out.append(.table(run))
+        case .prose: out.append(.prose(run))
         }
+        i = max(j, i + 1)
     }
     return out.compactMap { chunk in
         guard case .prose(var body) = chunk else { return chunk }

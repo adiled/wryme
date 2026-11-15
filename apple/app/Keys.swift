@@ -228,9 +228,9 @@ enum Editor {
             return true
         case .home, .end, .kill_to_start, .kill_to_end, .kill_word:
             if core.stage?.scope == .field {
-                (core.fieldText, core.fieldSelection) = apply(e, core.fieldText, core.fieldSelection)
+                (core.typing.fieldText, core.typing.fieldSelection) = apply(e, core.typing.fieldText, core.typing.fieldSelection)
             } else {
-                (core.draft, core.draftSelection) = apply(e, core.draft, core.draftSelection)
+                (core.typing.draft, core.typing.draftSelection) = apply(e, core.typing.draft, core.typing.draftSelection)
             }
             return true
         }

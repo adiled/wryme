@@ -5,6 +5,7 @@ struct Panel: View {
     let stage: Stage
     let accent: Color
     @EnvironmentObject var core: Core
+    @EnvironmentObject var typing: Typing
     @FocusState private var editing: Bool
     @State private var position = ScrollPosition(idType: Int.self)
     @State private var geo = GeoBox()
@@ -91,10 +92,10 @@ struct Panel: View {
     @ViewBuilder
     private var editor: some View {
         #if os(iOS)
-        TextField("", text: $core.fieldText, selection: $core.fieldSelection)
+        TextField("", text: $typing.fieldText, selection: $typing.fieldSelection)
             .onSubmit { core.sendField() }
         #else
-        TextField("", text: $core.fieldText)
+        TextField("", text: $typing.fieldText)
         #endif
     }
 

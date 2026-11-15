@@ -30,7 +30,7 @@ struct Root: View {
                 }
                 .padding(40)
             } else if let stage = core.stage {
-                Main(stage: stage)
+                Main(stage: stage).environmentObject(core.typing)
             } else if core.needsFolder {
                 #if os(iOS)
                 FolderSetup()
@@ -111,6 +111,7 @@ struct Composer: View {
     let stage: Stage
     let accent: Color
     @EnvironmentObject var core: Core
+    @EnvironmentObject var typing: Typing
     @FocusState private var focused: Bool
     #if os(iOS)
     @State private var photo: PhotosPickerItem?
@@ -119,8 +120,8 @@ struct Composer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 10) {
-                if !core.attachments.isEmpty {
-                    Thumbs(paths: core.attachments, height: 56) { core.detach($0) }
+                if !typing.attachments.isEmpty {
+                    Thumbs(paths: typing.attachments, height: 56) { core.detach($0) }
                 }
                 HStack(alignment: .center, spacing: 8) {
                     Text("›").foregroundStyle(accent)
@@ -128,7 +129,7 @@ struct Composer: View {
                         .textFieldStyle(.plain)
                         .lineLimit(1...8)
                         .focused($focused)
-                        .onChange(of: core.draft) { _, text in settle(text) }
+                        .onChange(of: typing.draft) { old, text in settle(old, text) }
                     #if os(iOS)
                     PhotosPicker(selection: $photo, matching: .images) {
                         Image(systemName: "photo")
@@ -161,7 +162,8 @@ struct Composer: View {
             let paths = urls.map(\.path)
             let pictures = paths.filter(Pictures.isPicture)
             pictures.forEach(core.attach)
-            if let other = paths.first(where: { !Pictures.isPicture($0) }) { core.draft = other }
+            let others = paths.filter { !Pictures.isPicture($0) }
+            if !others.isEmpty { typing.draft += (typing.draft.isEmpty ? "" : " ") + others.joined(separator: " ") }
             return !paths.isEmpty
         }
         .onAppear { focused = true }
@@ -173,19 +175,20 @@ struct Composer: View {
     @ViewBuilder
     private var field: some View {
         #if os(iOS)
-        TextField("", text: $core.draft, selection: $core.draftSelection, axis: .vertical)
+        TextField("", text: $typing.draft, selection: $typing.draftSelection, axis: .vertical)
         #else
-        TextField("", text: $core.draft, axis: .vertical)
+        TextField("", text: $typing.draft, axis: .vertical)
         #endif
     }
 
-    private func settle(_ text: String) {
+    private func settle(_ old: String, _ text: String) {
         guard text.contains("\n") else { return }
-        if text.hasSuffix("\n"), text.dropLast().contains("\n") == false {
-            core.draft = String(text.dropLast())
+        let typedReturn = text.count == old.count + 1 && text.filter { $0 == "\n" }.count == 1
+        if typedReturn {
+            typing.draft = text.replacingOccurrences(of: "\n", with: "")
             core.sendField()
         } else {
-            core.draft = text.replacingOccurrences(of: "\n", with: " ")
+            typing.draft = text.replacingOccurrences(of: "\n", with: " ")
         }
     }
 
