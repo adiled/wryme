@@ -46,16 +46,6 @@ struct Panel: View {
                 .onChange(of: sheet.selected) { _, row in
                     if let row { withAnimation { position.scrollTo(id: row) } }
                 }
-                if let field = sheet.field {
-                    HStack(spacing: 8) {
-                        Text("\(field.label):").foregroundStyle(accent)
-                        editor
-                            .textFieldStyle(.plain)
-                            .focused($editing)
-                            .onAppear { editing = true }
-                    }
-                    .font(Theme.font(stage.font, size: 13, mono: true))
-                }
                 Text(sheet.hint.trimmingCharacters(in: .whitespaces))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.faint)
@@ -101,13 +91,25 @@ struct Panel: View {
 
     @ViewBuilder
     private func line(_ i: Int, _ row: Row) -> some View {
-        let text = Text(Theme.paint([row], face: stage.font, size: 13, mono: true))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        if sheet.picks.contains(i) {
-            text.onTapGesture { core.pick(i) }
+        let label = Text(Theme.paint([row], face: stage.font, size: 13, mono: true))
+        if sheet.field?.row == i {
+            HStack(spacing: 0) {
+                label
+                editor
+                    .textFieldStyle(.plain)
+                    .font(Theme.font(stage.font, size: 13, mono: true))
+                    .focused($editing)
+                    .onAppear { editing = true }
+            }
         } else {
-            text
+            let text = label
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            if sheet.picks.contains(i) {
+                text.onTapGesture { core.pick(i) }
+            } else {
+                text
+            }
         }
     }
 }

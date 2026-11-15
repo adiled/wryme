@@ -102,6 +102,7 @@ struct Pill: Decodable {
 struct Field: Decodable {
     let label: String
     let text: String
+    let row: Int
 }
 
 struct Sheet: Decodable {

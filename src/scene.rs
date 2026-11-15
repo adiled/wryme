@@ -109,6 +109,7 @@ pub struct Pill {
 pub struct Field {
     pub label: String,
     pub text: String,
+    pub row: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -588,17 +589,16 @@ fn sheet(app: &App) -> Sheet {
         Tab::Station | Tab::Pref | Tab::Shops => {
             let rows = popup::rows(app);
             picks = popup::selectable_indices(&rows);
-            if browsing {
-                selected = Some(app.popup.selected);
-            }
+            selected = Some(app.popup.selected);
             for (i, row) in rows.iter().enumerate() {
                 let style = focus(browsing && i == app.popup.selected, accent);
                 lines.push(sheet_row(app, row, style));
             }
             field = match app.popup.mode {
                 popup::Mode::SaveAs => Some(Field {
-                    label: "name".into(),
+                    label: "new name".into(),
                     text: String::new(),
+                    row: app.popup.selected,
                 }),
                 popup::Mode::DialEdit => app
                     .popup
@@ -607,13 +607,20 @@ fn sheet(app: &App) -> Sheet {
                     .map(|meta| Field {
                         label: meta.name.to_string(),
                         text: (meta.label)(&app.active_station.dials),
+                        row: app.popup.selected,
                     }),
                 popup::Mode::ShopEdit => app.popup.knob.zip(app.popup.shop.as_ref()).map(|(knob, e)| Field {
                     label: knob.name().to_string(),
                     text: knob.text(&e.draft),
+                    row: app.popup.selected,
                 }),
                 _ => None,
             };
+            if let Some(f) = &field
+                && let Some(line) = lines.get_mut(f.row)
+            {
+                *line = Line::from(Span::styled(format!("  {:<13}", f.label), Style::default().fg(accent)));
+            }
             let editing = hint(Scope::Field, &[(&[E(Edit::Send)], "save"), (&[C(Core::Cancel)], "cancel")]);
             match app.popup.mode {
                 popup::Mode::SaveAs => editing,

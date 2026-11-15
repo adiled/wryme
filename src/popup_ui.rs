@@ -20,17 +20,6 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
     let area = f.area();
 
     let mut lines = sheet.lines.clone();
-    let mut caret = None;
-    if let (Some(field), Some(input)) = (&sheet.field, &view.field) {
-        let label = format!("  {}: ", field.label);
-        lines.push(Line::from(""));
-        caret = Some(label.len() as u16 + input.display_col());
-        lines.push(Line::from(vec![
-            Span::styled(label, Style::default().fg(accent)),
-            Span::raw(input.text.clone()),
-        ]));
-    }
-
     let modal_w = (area.width as f32 * MODAL_WIDTH_RATIO)
         .max(MODAL_MIN_WIDTH as f32)
         .min(area.width as f32) as u16;
@@ -43,6 +32,16 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
         width: modal_w,
         height: modal_h,
     };
+
+    let mut caret = None;
+    if let (Some(field), Some(input)) = (&sheet.field, &view.field)
+        && let Some(line) = lines.get_mut(field.row)
+    {
+        let at = line.width();
+        let skip = input.scroll_offset((modal_w as usize).saturating_sub(at + 4).max(1));
+        line.spans.push(Span::raw(from_col(&input.text, skip)));
+        caret = Some((field.row, (at + 1 + usize::from(input.display_col())).saturating_sub(skip) as u16));
+    }
 
     let body_h = modal_h.saturating_sub(BORDER_ROWS) as usize;
     let max_scroll = lines.len().saturating_sub(body_h);
@@ -116,13 +115,25 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
     };
     view.tab_hits = tab_hits(f, sheet, modal_area);
 
-    if let Some(col) = caret {
-        let row = lines.len().saturating_sub(1).saturating_sub(scroll) as u16;
+    if let Some((row, col)) = caret
+        && (scroll..scroll + body_h).contains(&row)
+    {
         f.set_cursor_position(Position {
             x: modal_area.x + col,
-            y: modal_area.y + 1 + row,
+            y: modal_area.y + 1 + (row - scroll) as u16,
         });
     }
+}
+
+fn from_col(text: &str, skip: usize) -> String {
+    let mut seen = 0;
+    text.chars()
+        .skip_while(|c| {
+            let before = seen < skip;
+            seen += unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0);
+            before
+        })
+        .collect()
 }
 
 fn tab_hits(f: &mut Frame, sheet: &Sheet, modal: Rect) -> Vec<(u16, u16, u16)> {
@@ -169,8 +180,9 @@ mod tests {
     fn screen(app: &mut App) -> Vec<String> {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 40)).unwrap();
         let scene = crate::scene::build(app);
-        let sheet = scene.sheet.expect("sheet open");
         let mut view = View::default();
+        view.sync(&scene);
+        let sheet = scene.sheet.expect("sheet open");
         term.draw(|f| draw(f, &sheet, &mut view, scene.accent)).unwrap();
         let buf = term.backend().buffer().clone();
         (0..buf.area.height)
@@ -252,6 +264,10 @@ mod tests {
         assert_eq!(app.popup.mode, popup::Mode::ShopEdit);
         let field = crate::scene::build(&app).sheet.unwrap().field.unwrap();
         assert_eq!((field.label.as_str(), field.text.as_str()), ("models", "deepseek-v4-flash"));
+        let lines = screen(&mut app);
+        let editing: Vec<&String> = lines.iter().filter(|l| l.contains("models")).collect();
+        assert_eq!(editing.len(), 1, "{}", lines.join("\n"));
+        assert!(editing[0].contains("models       deepseek-v4-flash"));
         popup::commit_shop_edit(&mut app, "deepseek-v4-flash, glm-5");
         let lines = screen(&mut app);
         for want in ["protocol     chat-completions", "models       deepseek-v4-flash, glm-5", "hum • in use • changed", "update 'hum'"] {
