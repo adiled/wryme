@@ -45,15 +45,18 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
 
     let body_h = modal_h.saturating_sub(BORDER_ROWS) as usize;
     let max_scroll = lines.len().saturating_sub(body_h);
-    view.sheet_scroll = view.sheet_scroll.min(max_scroll);
-    if let Some(sel) = sheet.selected {
-        if sel < view.sheet_scroll {
-            view.sheet_scroll = sel;
-        } else if sel >= view.sheet_scroll + body_h {
-            view.sheet_scroll = sel.saturating_sub(body_h).saturating_add(1);
+    if sheet.selected != view.seen_sel {
+        view.seen_sel = sheet.selected;
+        if let Some(sel) = sheet.selected {
+            if sel < view.sheet_scroll {
+                let lead = (0..sel).rev().take_while(|i| !sheet.picks.contains(i)).count();
+                view.sheet_scroll = sel - lead;
+            } else if sel >= view.sheet_scroll + body_h {
+                view.sheet_scroll = sel + 1 - body_h;
+            }
         }
-        view.sheet_scroll = view.sheet_scroll.min(max_scroll);
     }
+    view.sheet_scroll = view.sheet_scroll.min(max_scroll);
     let scroll = view.sheet_scroll;
 
     let visible: Vec<Line<'static>> = lines.iter().skip(scroll).take(body_h).cloned().collect();
@@ -227,6 +230,38 @@ mod tests {
         app.memory.insert("claude-opus-5-5".into(), "hum".into());
         assert!(screen(&mut app).iter().any(|l| l.contains("opus (claude-opus-5-5) • hum")));
     }
+    #[test]
+    fn the_wheel_reaches_the_end_and_wrapping_shows_the_header() {
+        use crate::platform::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+        let hum = shop("hum", &["m"]);
+        let stations = std::iter::once(Station::demo()).chain((0..30).map(|i| station(&format!("st{i:02}"), "m")));
+        let mut app = App::new(None, vec![hum.clone()], stations.collect(), Station::demo(), hum, None);
+        popup::toggle(&mut app);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut view = View::default();
+        let mut frame = |app: &App, view: &mut View| {
+            let scene = crate::scene::build(app);
+            view.sync(&scene);
+            term.draw(|f| draw(f, scene.sheet.as_ref().unwrap(), view, scene.accent)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let text = (0..24).map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>());
+            (scene, text.collect::<Vec<_>>().join("\n"))
+        };
+        let wheel = Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 0, row: 0, modifiers: KeyModifiers::NONE });
+        for _ in 0..40 {
+            let (scene, _) = frame(&app, &mut view);
+            view.feed(wheel.clone(), &scene);
+        }
+        let (_, text) = frame(&app, &mut view);
+        assert!(text.contains("save active as new…"), "{text}");
+        for _ in 0..popup::rows(&app).len() {
+            popup::move_selection(&mut app, 1);
+            frame(&app, &mut view);
+        }
+        let (_, text) = frame(&app, &mut view);
+        assert!(text.contains("active station"), "{text}");
+    }
+
     #[test]
     fn shops_edit_like_stations() {
         use crate::shop_edit::{Draft, Key, Knob};

@@ -28,6 +28,7 @@ pub struct View {
     pub selection: Option<Selection>,
     pub screen: Screen,
     pub sheet_scroll: usize,
+    pub seen_sel: Option<usize>,
     pub sheet_body: Rect,
     pub tab_hits: Vec<(u16, u16, u16)>,
     pub tip_hits: Vec<(u16, u16, u16, Core)>,
@@ -103,6 +104,7 @@ impl View {
         if tab != self.seen_tab {
             self.seen_tab = tab;
             self.sheet_scroll = 0;
+            self.seen_sel = None;
         }
         let field = scene.sheet.as_ref().and_then(|s| s.field.as_ref());
         match (field, self.field.is_some()) {
