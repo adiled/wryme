@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -673,19 +673,18 @@ fn flush_stream(book: &mut Book) -> Result<()> {
     }
     let _held = hold(&book.dir)?;
     let counter = book.dir.join("rows");
-    let mut next = match std::fs::read_to_string(&counter).ok().and_then(|t| t.trim().parse::<u64>().ok()) {
+    let first = match std::fs::read_to_string(&counter).ok().and_then(|t| t.trim().parse::<u64>().ok()) {
         Some(n) => n,
         None => read_stream_on_disk(&book.dir)?.last().map_or(0, |r| r.row_id + 1),
     };
-    let first = next;
-    for row in book.pending.iter_mut() {
-        row.row_id = next;
-        next += 1;
-    }
-    write_stream_segment(&book.dir, first, &book.pending)?;
+    let next = first + book.pending.len() as u64;
     let staged = book.dir.join(format!("rows.{}", std::process::id()));
     std::fs::write(&staged, next.to_string())?;
     std::fs::rename(&staged, &counter)?;
+    for (row, id) in book.pending.iter_mut().zip(first..) {
+        row.row_id = id;
+    }
+    write_stream_segment(&book.dir, first, &book.pending)?;
     book.mine.extend(book.pending.iter().map(|r| r.row_id));
     book.pending.clear();
     book.next_row = next;
@@ -699,8 +698,11 @@ fn read_stream_on_disk(dir: &Path) -> Result<Vec<StreamRow>> {
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|e| e == "parquet").unwrap_or(false) {
-                all.extend(read_stream_segment(&path)?);
+            if path.extension().is_some_and(|e| e == "parquet") {
+                match read_stream_segment(&path) {
+                    Ok(rows) => all.extend(rows),
+                    Err(e) => tracing::warn!(path = %path.display(), "skipping unreadable book segment: {e:#}"),
+                }
             }
         }
     }
@@ -839,31 +841,28 @@ fn read_index(path: &Path) -> Result<Vec<CompartmentMeta>> {
     let mut metas = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let opened = batch.column_by_name("opened_at").unwrap();
-        let last_inked = batch
-            .column_by_name("last_inked")
-            .or_else(|| batch.column_by_name("updated_at"))
-            .unwrap();
-        let topic = batch.column_by_name("topic").unwrap();
-        let tags = batch.column_by_name("tags").unwrap();
-        let people = batch.column_by_name("people").unwrap();
-        let facts = batch.column_by_name("facts").unwrap();
-        let plans = batch.column_by_name("plans").unwrap();
-        let open = batch.column_by_name("open").unwrap();
-        let spans = batch.column_by_name("spans").unwrap();
-        let tokens = batch.column_by_name("life_tokens").unwrap();
+        let opened = ints(&batch, "opened_at")?;
+        let last_inked = ints(&batch, "last_inked").or_else(|_| ints(&batch, "updated_at"))?;
+        let topic = strs(&batch, "topic")?;
+        let tags = strs(&batch, "tags")?;
+        let people = strs(&batch, "people")?;
+        let facts = strs(&batch, "facts")?;
+        let plans = strs(&batch, "plans")?;
+        let open = strs(&batch, "open")?;
+        let spans = strs(&batch, "spans")?;
+        let tokens = ints(&batch, "life_tokens")?;
         for i in 0..batch.num_rows() {
             metas.push(CompartmentMeta {
-                opened_at: as_i64(opened, i),
-                last_inked: as_i64(last_inked, i),
-                topic: as_str(topic, i),
-                tags: split(&as_str(tags, i)),
-                people: split(&as_str(people, i)),
-                facts: split(&as_str(facts, i)),
-                plans: split(&as_str(plans, i)),
-                open: split(&as_str(open, i)),
-                spans: split_spans(&as_str(spans, i)),
-                life_tokens: as_i64(tokens, i),
+                opened_at: opened.value(i),
+                last_inked: last_inked.value(i),
+                topic: topic.value(i).to_string(),
+                tags: split(tags.value(i)),
+                people: split(people.value(i)),
+                facts: split(facts.value(i)),
+                plans: split(plans.value(i)),
+                open: split(open.value(i)),
+                spans: split_spans(spans.value(i)),
+                life_tokens: tokens.value(i),
                 tail: String::new(),
             });
         }
@@ -891,11 +890,12 @@ fn write_stream_segment(book_dir: &Path, first: u64, rows: &[StreamRow]) -> Resu
         ],
     )?;
 
-    let file = std::fs::File::create(dir.join(format!("r{first:08}.parquet")))?;
-    let writer = ArrowWriter::try_new(file, stream_schema(), None)?;
-    let mut writer = writer;
+    let path = dir.join(format!("r{first:08}.parquet"));
+    let staged = path.with_extension(format!("parquet.{}", std::process::id()));
+    let mut writer = ArrowWriter::try_new(std::fs::File::create(&staged)?, stream_schema(), None)?;
     writer.write(&batch)?;
-    let _ = writer.close()?;
+    writer.into_inner()?.sync_all()?;
+    std::fs::rename(&staged, &path)?;
     Ok(())
 }
 
@@ -905,34 +905,36 @@ fn read_stream_segment(path: &Path) -> Result<Vec<StreamRow>> {
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let ids = batch.column_by_name("row_id").unwrap();
-        let role = batch.column_by_name("role").unwrap();
-        let content = batch.column_by_name("content").unwrap();
-        let ts = batch.column_by_name("ts").unwrap();
-        let window = batch.column_by_name("window");
+        let ids = ints(&batch, "row_id")?;
+        let role = strs(&batch, "role")?;
+        let content = strs(&batch, "content")?;
+        let ts = ints(&batch, "ts")?;
+        let window = strs(&batch, "window").ok();
         for i in 0..batch.num_rows() {
             rows.push(StreamRow {
-                row_id: as_i64(ids, i) as u64,
-                role: as_str(role, i),
-                content: as_str(content, i),
-                ts: as_i64(ts, i),
-                window: window.map(|w| as_str(w, i)).unwrap_or_default(),
+                row_id: ids.value(i) as u64,
+                role: role.value(i).to_string(),
+                content: content.value(i).to_string(),
+                ts: ts.value(i),
+                window: window.map(|w| w.value(i).to_string()).unwrap_or_default(),
             });
         }
     }
     Ok(rows)
 }
 
-fn as_i64(col: &arrow_array::ArrayRef, i: usize) -> i64 {
-    col.as_any().downcast_ref::<Int64Array>().unwrap().value(i)
+fn ints<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+        .with_context(|| format!("book column {name} is missing or not a number"))
 }
 
-fn as_str(col: &arrow_array::ArrayRef, i: usize) -> String {
-    col.as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(i)
-        .to_string()
+fn strs<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .with_context(|| format!("book column {name} is missing or not text"))
 }
 
 fn join(list: &[String]) -> String {
@@ -1327,6 +1329,23 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), 10);
         assert!(rows.iter().all(|r| r.content.starts_with(&r.window[..1])));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_turn_file_never_stops_a_window_opening() {
+        let dir = tmpdir("torn");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = open_engine(&dir, "aaaa").unwrap();
+        a.record_turn("user", "kept");
+        std::fs::write(dir.join("stream").join("r00000099.parquet"), b"PAR1 torn").unwrap();
+        let mut b = open_engine(&dir, "bbbb").unwrap();
+        b.record_turn("user", "after");
+        let rows = rows_on(&dir);
+        assert_eq!(rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(), ["kept", "after"]);
+        assert!(std::fs::read_dir(dir.join("stream")).unwrap().all(|e| {
+            e.unwrap().path().extension().is_some_and(|x| x == "parquet")
+        }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
