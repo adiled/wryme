@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 
 use crate::action::{self, Action, Chord, Core, Edit, Key, Pane, Scope};
 use crate::app::ViewMode;
-use crate::control::Intent;
+use crate::control::{Intent, Notice};
 use crate::input::Input;
 use crate::platform::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::scene::Scene;
@@ -217,7 +217,10 @@ impl View {
                             self.attachments.push(path);
                             Vec::new()
                         }
-                        Err(_) => vec![Intent::Say("no image on the clipboard".into())],
+                        Err(e) => {
+                            tracing::info!("clipboard picture: {e:#}");
+                            vec![Intent::Say(Notice::NoPicture)]
+                        }
                     };
                 }
                 Edit::Backspace if self.input.text.is_empty() && !self.attachments.is_empty() => {
@@ -267,7 +270,7 @@ impl View {
             return Vec::new();
         }
         crate::platform::copy(&text);
-        vec![Intent::Say("copied".into())]
+        vec![Intent::Say(Notice::Copied)]
     }
 
     fn step(&self) -> usize {

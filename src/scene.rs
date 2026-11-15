@@ -30,6 +30,7 @@ pub struct Scene {
     pub bubbles: Vec<Bubble>,
     pub status: Status,
     pub error: Option<String>,
+    pub empty: &'static str,
     pub sheet: Option<Sheet>,
 }
 
@@ -92,6 +93,7 @@ pub struct Sheet {
     pub picks: Vec<usize>,
     pub selected: Option<usize>,
     pub hint: &'static str,
+    pub search: Option<&'static str>,
     pub field: Option<Field>,
 }
 
@@ -354,6 +356,7 @@ pub fn build(app: &App) -> Scene {
         bubbles,
         status: status(app),
         error: is_error_status(&app.status).then(|| app.status.clone()),
+        empty: "no messages yet. type above and send",
         sheet: (app.popup.mode != popup::Mode::Closed).then(|| sheet(app)),
     }
 }
@@ -613,12 +616,14 @@ fn sheet(app: &App) -> Sheet {
             }
         }
     };
+    let search = (app.popup.tab == Tab::Station && field.is_none()).then_some("search stations");
     Sheet {
         tabs,
         lines,
         picks,
         selected,
         hint,
+        search,
         field,
     }
 }

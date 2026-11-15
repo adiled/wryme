@@ -20,8 +20,8 @@ struct Panel: View {
             VStack(alignment: .leading, spacing: 12) {
                 tabs
                 #if os(iOS)
-                if sheet.tabs.first?.on == true, sheet.field == nil {
-                    TextField("search stations", text: $query)
+                if let label = sheet.search {
+                    TextField(label, text: $query)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: query) { _, text in core.find(text) }
                 }

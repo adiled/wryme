@@ -177,7 +177,7 @@ enum Editor {
         case .kill_to_end: return run(#selector(NSResponder.deleteToEndOfParagraph(_:)))
         case .kill_word: return run(#selector(NSResponder.deleteWordBackward(_:)))
         case .picture:
-            if !Pictures.paste(into: core) { core.say("no image on the clipboard") }
+            if !Pictures.paste(into: core) { core.say(.no_picture) }
             return true
         }
     }
@@ -216,6 +216,8 @@ enum Editor {
         case .picture:
             if let png = UIPasteboard.general.image?.pngData(), let path = Pictures.store(png, ext: "png") {
                 core.attach(path)
+            } else {
+                core.say(.no_picture)
             }
             return true
         case .home, .end, .kill_to_start, .kill_to_end, .kill_word:

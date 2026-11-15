@@ -217,7 +217,7 @@ struct Transcript: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.size * 1.3) {
                 if core.bubbles.isEmpty {
-                    Text("no messages yet. type above and hit Return")
+                    Text(stage.empty)
                         .italic()
                         .foregroundStyle(Theme.faint)
                 }

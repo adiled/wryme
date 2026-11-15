@@ -126,7 +126,7 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "no messages yet. type above and hit Enter",
+            scene.empty,
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),

@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 
 use crate::action::{Action, Core};
-use crate::control::Intent;
+use crate::control::{Intent, Notice};
 use crate::scene::Scene;
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -26,7 +26,7 @@ enum Inbound {
     Find(String),
     Tab(usize),
     Pick(usize),
-    Say(String),
+    Say(Notice),
     Reload,
 }
 
@@ -40,7 +40,7 @@ impl From<Inbound> for Intent {
             Inbound::Find(text) => Intent::Find(text),
             Inbound::Tab(i) => Intent::Tab(i),
             Inbound::Pick(i) => Intent::Pick(i),
-            Inbound::Say(text) => Intent::Say(text),
+            Inbound::Say(notice) => Intent::Say(notice),
             Inbound::Reload => Intent::Reload,
         }
     }

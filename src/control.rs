@@ -13,9 +13,27 @@ pub enum Intent {
     Find(String),
     Tab(usize),
     Pick(usize),
-    Say(String),
+    Say(Notice),
     Note(crate::windows::Note),
     Reload,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Notice {
+    Copied,
+    NoPicture,
+}
+
+impl Notice {
+    pub const ALL: &[Notice] = &[Notice::Copied, Notice::NoPicture];
+
+    pub fn text(self) -> &'static str {
+        match self {
+            Notice::Copied => "copied",
+            Notice::NoPicture => "no image on the clipboard",
+        }
+    }
 }
 
 pub fn apply(
@@ -33,7 +51,7 @@ pub fn apply(
         Intent::Find(text) => popup::set_search(app, text),
         Intent::Tab(i) => popup::jump_tab(app, i),
         Intent::Pick(i) => popup::pick(app, i),
-        Intent::Say(note) => app.note(note),
+        Intent::Say(notice) => app.note(notice.text()),
         Intent::Note(note) => take_note(app, client, tx, in_flight, note),
     }
     start_shop_check(app, tx);

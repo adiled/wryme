@@ -29,6 +29,7 @@ enum Nametags: String, Decodable { case standout, inlined }
 enum ViewMode: String, Decodable { case page, scroll }
 enum Scope: String, Decodable { case any, chat, sheet, field }
 enum Typeface: String, Decodable { case system, serif, rounded, mono }
+enum Notice: String { case copied, no_picture }
 
 struct SyncPlace: Decodable {
     let place: String
@@ -91,6 +92,7 @@ struct Sheet: Decodable {
     let picks: [Int]
     let selected: Int?
     let hint: String
+    let search: String?
     let field: Field?
 }
 
@@ -107,6 +109,7 @@ struct Stage: Decodable {
     let bar: Bar
     let status: Status
     let error: String?
+    let empty: String
     let sheet: Sheet?
 }
 
@@ -381,7 +384,7 @@ final class Core: ObservableObject {
     func find(_ text: String) { send(["find": text]) }
     func tab(_ i: Int) { send(["tab": i]) }
     func pick(_ i: Int) { send(["pick": i]) }
-    func say(_ text: String) { send(["say": text]) }
+    func say(_ notice: Notice) { send(["say": notice.rawValue]) }
     func reload() { send("reload") }
 
     func sendField() {

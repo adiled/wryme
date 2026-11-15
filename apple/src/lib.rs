@@ -96,6 +96,7 @@ mod tests {
         wanted.extend(names(&[NametagMode::Standout, NametagMode::Inlined]));
         wanted.extend(TYPEFACES.iter().map(|(name, _)| name.to_string()));
         wanted.extend(names(wryme::md::Kind::ALL));
+        wanted.extend(names(wryme::control::Notice::ALL));
         let missing: Vec<&String> = wanted
             .iter()
             .filter(|name| !src.contains(&format!("case {name}")) && !src.contains(&format!(", {name}")))
