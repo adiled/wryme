@@ -83,7 +83,7 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
         .border_style(Style::default().fg(accent))
         .title(Line::from(tab_spans).right_aligned())
         .title_bottom(
-            Line::from(Span::styled(sheet.hint, Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(format!(" {} ", sheet.hint), Style::default().fg(Color::DarkGray)))
                 .right_aligned(),
         );
     let widget = Paragraph::new(Text::from(visible)).block(block);

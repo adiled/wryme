@@ -316,6 +316,21 @@ mod imp {
         read_or_seed("shops.toml", super::DEFAULT_SHOPS)
     }
 
+    pub fn shops_place() -> String {
+        let Some(dir) = dir() else {
+            return "shops.toml".into();
+        };
+        if std::env::var_os("WRYME_CONFIG_DIR").is_some() {
+            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return format!("shops.toml in the {name} folder");
+        }
+        let file = dir.join("shops.toml").display().to_string();
+        match std::env::var("HOME") {
+            Ok(home) if file.starts_with(&home) => file.replacen(&home, "~", 1),
+            _ => file,
+        }
+    }
+
     pub fn stations_text() -> Option<String> {
         read_or_seed("stations.toml", super::DEFAULT_STATIONS)
     }
@@ -399,6 +414,10 @@ mod imp {
         SHOPS.with(|c| c.borrow().clone())
     }
 
+    pub fn shops_place() -> String {
+        "shops.toml in the connected folder".into()
+    }
+
     pub fn stations_text() -> Option<String> {
         STATIONS.with(|c| c.borrow().clone())
     }
@@ -419,6 +438,10 @@ mod imp {
 
 pub fn shops_text() -> Option<String> {
     imp::shops_text()
+}
+
+pub fn shops_place() -> String {
+    imp::shops_place()
 }
 
 pub fn stations_text() -> Option<String> {

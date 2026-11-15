@@ -2,7 +2,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Serialize, Serializer};
 
-use crate::action::Scope;
+use crate::action::Action::{Core as C, Edit as E};
+use crate::action::{Core, Edit, Scope, hint, tips};
 use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::config::{Feelings, NametagMode, Typeface};
 use crate::popup::{self, Tab};
@@ -43,7 +44,7 @@ pub struct Marks {
 #[derive(Serialize)]
 pub struct Bar {
     pub state: &'static str,
-    pub esc: &'static str,
+    pub esc: String,
     pub busy: bool,
     pub tool: Option<String>,
 }
@@ -92,7 +93,7 @@ pub struct Sheet {
     pub lines: Vec<Line<'static>>,
     pub picks: Vec<usize>,
     pub selected: Option<usize>,
-    pub hint: &'static str,
+    pub hint: String,
     pub search: Option<&'static str>,
     pub field: Option<Field>,
 }
@@ -363,10 +364,14 @@ pub fn build(app: &App) -> Scene {
 
 fn bar(app: &App) -> Bar {
     let (state, esc) = match (app.in_flight, app.voice_is_active()) {
-        (true, true) => ("streaming + speaking…", "esc quiet"),
-        (true, false) => ("streaming…", "esc interrupt"),
-        (false, true) => ("speaking…", "esc quiet"),
+        (true, true) => ("streaming + speaking…", "quiet"),
+        (true, false) => ("streaming…", "interrupt"),
+        (false, true) => ("speaking…", "quiet"),
         (false, false) => ("", ""),
+    };
+    let esc = match esc {
+        "" => String::new(),
+        word => tips(Scope::Chat, &[(C(Core::Interrupt), word)]),
     };
     let tool = (app.nametags == NametagMode::Inlined)
         .then(|| {
@@ -566,7 +571,8 @@ fn sheet(app: &App) -> Sheet {
     let hint = match app.popup.tab {
         Tab::Shops => {
             lines = popup::shops_lines(app);
-            " read-only · edit ~/.config/wryme/shops.toml · Esc / Ctrl-S close "
+            let close = hint(Scope::Sheet, &[(&[C(Core::Close)], "close")]);
+            format!("read-only · edit {}  ·  {close}", crate::config::shops_place())
         }
         Tab::Help => {
             for (key, what) in crate::action::help() {
@@ -582,7 +588,7 @@ fn sheet(app: &App) -> Sheet {
                     ]));
                 }
             }
-            " Esc close  ·  Tab next tab "
+            hint(Scope::Sheet, &[(&[C(Core::Close)], "close"), (&[C(Core::NextTab)], "next tab")])
         }
         Tab::Station | Tab::Pref => {
             let rows = popup::rows(app);
@@ -609,10 +615,19 @@ fn sheet(app: &App) -> Sheet {
                     }),
                 _ => None,
             };
+            let editing = hint(Scope::Field, &[(&[E(Edit::Send)], "save"), (&[C(Core::Cancel)], "cancel")]);
             match app.popup.mode {
-                popup::Mode::SaveAs => " Enter save  ·  Esc cancel ",
-                popup::Mode::DialEdit => " Enter save  ·  Esc cancel  ·  all | 0 | 12 | 50% ",
-                _ => " ↑↓ select  ·  ←→ / Enter toggle or adjust  ·  Esc / Ctrl-S close ",
+                popup::Mode::SaveAs => editing,
+                popup::Mode::DialEdit => format!("{editing}  ·  all | 0 | 12 | 50%"),
+                _ => hint(
+                    Scope::Sheet,
+                    &[
+                        (&[C(Core::Up), C(Core::Down)], "select"),
+                        (&[C(Core::Less), C(Core::More)], "adjust"),
+                        (&[C(Core::Activate)], "toggle"),
+                        (&[C(Core::Close)], "close"),
+                    ],
+                ),
             }
         }
     };

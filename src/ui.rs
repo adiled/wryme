@@ -49,7 +49,7 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
             Style::default().fg(accent)
         })
         .title(label)
-        .title(Line::from(format!(" {esc}^s settings ^c exit ")).right_aligned());
+        .title(Line::from(format!(" {esc}{} ", chat_tips())).right_aligned());
     if let Some(tool) = &bar.tool {
         input_block = input_block.title_bottom(
             Line::from(Span::styled(
@@ -343,6 +343,11 @@ fn cut_at_width(s: &str, width: usize) -> &str {
         end = i + c.len_utf8();
     }
     &s[..end]
+}
+
+fn chat_tips() -> String {
+    use crate::action::{Action, Core, Scope, tips};
+    tips(Scope::Chat, &[(Action::Core(Core::Settings), "settings"), (Action::Core(Core::Quit), "exit")])
 }
 
 fn gutter(row: &md::Row) -> Line<'static> {

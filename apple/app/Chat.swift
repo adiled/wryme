@@ -137,7 +137,7 @@ struct Composer: View {
                     ActionMenu()
                     #else
                     Button {
-                        core.act("settings")
+                        core.act(.settings)
                     } label: {
                         Image(systemName: "slider.horizontal.3")
                     }

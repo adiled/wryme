@@ -14,6 +14,28 @@ struct Run: Decodable, Equatable {
     let d: Bool
     let u: Bool
     let x: Bool
+
+    private enum Keys: String, CodingKey { case t, fg, bg, b, i, d, u, x }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        t = try c.decode(String.self, forKey: .t)
+        fg = try Run.tint(c, .fg)
+        bg = try Run.tint(c, .bg)
+        b = try c.decode(Bool.self, forKey: .b)
+        i = try c.decode(Bool.self, forKey: .i)
+        d = try c.decode(Bool.self, forKey: .d)
+        u = try c.decode(Bool.self, forKey: .u)
+        x = try c.decode(Bool.self, forKey: .x)
+    }
+
+    private static func tint(_ c: KeyedDecodingContainer<Keys>, _ key: Keys) throws -> String? {
+        guard let name = try c.decodeIfPresent(String.self, forKey: key) else { return nil }
+        guard Theme.color(name) != nil else {
+            throw DecodingError.dataCorruptedError(forKey: key, in: c, debugDescription: "unknown colour \(name)")
+        }
+        return name
+    }
 }
 
 enum Kind: String, Decodable { case prose, head, code, table }
@@ -113,12 +135,26 @@ struct Stage: Decodable {
     let sheet: Sheet?
 }
 
-struct Envelope: Decodable {
-    let bindings: [Binding]?
-    let stage: Stage?
-    let order: [String]?
-    let bubbles: [String: Bubble]?
-    let fatal: String?
+enum Envelope: Decodable {
+    case bindings([Binding])
+    case frame(Stage, [String], [String: Bubble])
+    case fatal(String)
+
+    private enum Keys: String, CodingKey { case bindings, stage, order, bubbles, fatal }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        if let bindings = try c.decodeIfPresent([Binding].self, forKey: .bindings) {
+            self = .bindings(bindings)
+        } else if let fatal = try c.decodeIfPresent(String.self, forKey: .fatal) {
+            self = .fatal(fatal)
+        } else {
+            self = .frame(
+                try c.decode(Stage.self, forKey: .stage),
+                try c.decode([String].self, forKey: .order),
+                try c.decode([String: Bubble].self, forKey: .bubbles))
+        }
+    }
 }
 
 enum Move {
@@ -351,10 +387,15 @@ final class Core: ObservableObject {
     #endif
 
     private func apply(_ e: Envelope) {
-        if let bindings = e.bindings { self.bindings = bindings }
-        if let fatal = e.fatal { self.fatal = fatal }
-        guard let stage = e.stage, let order = e.order else { return }
-        for (id, bubble) in e.bubbles ?? [:] { cache[id] = bubble }
+        switch e {
+        case .bindings(let bindings): self.bindings = bindings
+        case .fatal(let fatal): self.fatal = fatal
+        case .frame(let stage, let order, let changed): show(stage, order, changed)
+        }
+    }
+
+    private func show(_ stage: Stage, _ order: [String], _ changed: [String: Bubble]) {
+        for (id, bubble) in changed { cache[id] = bubble }
         let keep = Set(order)
         cache = cache.filter { keep.contains($0.key) }
         bubbles = order.compactMap { cache[$0] }
@@ -378,7 +419,7 @@ final class Core: ObservableObject {
         link.send(text)
     }
 
-    func act(_ name: String) { send(["do": name]) }
+    func act(_ command: Command) { send(["do": command.rawValue]) }
     func submit(_ text: String) { send(["submit": text]) }
     func search(_ c: Character) { send(["search": String(c)]) }
     func find(_ text: String) { send(["find": text]) }
@@ -423,7 +464,7 @@ final class Core: ObservableObject {
     var menu: [Binding] {
         var seen = Set<String>()
         return bindings.filter { b in
-            guard case .core = b.act, Platform.allows(b.name), !seen.contains(b.name) else { return false }
+            guard case .core(let c) = b.act, Platform.allows(c), !seen.contains(b.name) else { return false }
             seen.insert(b.name)
             return true
         }
@@ -432,8 +473,8 @@ final class Core: ObservableObject {
     @discardableResult
     func perform(_ b: Binding) -> Bool {
         switch b.act {
-        case .core(let name):
-            if Platform.allows(name) { act(name) }
+        case .core(let command):
+            if Platform.allows(command) { act(command) }
             return true
         case .edit(let e):
             return Editor.perform(e, self)

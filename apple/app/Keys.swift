@@ -8,9 +8,12 @@ import UIKit
 
 enum Edit: String { case send, left, right, home, end, backspace, delete, kill_to_start, kill_to_end, kill_word, picture }
 enum Pane: String { case page_up, page_down, copy }
+enum Command: String {
+    case quit, help, voice, settings, view_mode, interrupt, close, cancel, next_tab, up, down, less, more, activate, search_back
+}
 
-enum Act {
-    case core(String)
+enum Act: Equatable {
+    case core(Command)
     case edit(Edit)
     case pane(Pane)
 }
@@ -82,7 +85,9 @@ struct Binding: Decodable, Identifiable {
         let unknown = DecodingError.dataCorruptedError(
             forKey: .action, in: c, debugDescription: "unknown \(owner) action \(name)")
         switch owner {
-        case "core": act = .core(name)
+        case "core":
+            guard let c = Command(rawValue: name) else { throw unknown }
+            act = .core(c)
         case "edit":
             guard let e = Edit(rawValue: name) else { throw unknown }
             act = .edit(e)
@@ -108,7 +113,7 @@ extension View {
 enum Platform {
     #if os(macOS)
     static let hovers = true
-    static func allows(_ action: String) -> Bool { true }
+    static func allows(_ command: Command) -> Bool { true }
     static func copy() { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
     static func copy(_ text: String) {
         NSPasteboard.general.clearContents()
@@ -117,7 +122,7 @@ enum Platform {
     #else
     static let hovers = false
     static func copy(_ text: String) { UIPasteboard.general.string = text }
-    static func allows(_ action: String) -> Bool { action != "quit" }
+    static func allows(_ command: Command) -> Bool { command != .quit }
     static func copy() {
         UIApplication.shared.sendAction(
             #selector(UIResponderStandardEditActions.copy(_:)), to: nil, from: nil, for: nil)
@@ -192,9 +197,10 @@ struct Menus: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
-            Button("Settings…") { core?.act("settings") }
-                .keyboardShortcut(",")
-                .disabled(core == nil)
+            if let b = core?.bindings.first(where: { $0.act == .core(.settings) && $0.chord.cmd }) {
+                Button("Settings…") { core?.perform(b) }
+                    .shortcut(b.chord)
+            }
         }
         CommandMenu("Chat") {
             ForEach(core?.menu ?? []) { b in

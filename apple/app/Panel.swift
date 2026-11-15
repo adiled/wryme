@@ -16,7 +16,7 @@ struct Panel: View {
         ZStack {
             Color.black.opacity(0.45)
                 .ignoresSafeArea()
-                .onTapGesture { core.act("close") }
+                .onTapGesture { core.act(.close) }
             VStack(alignment: .leading, spacing: 12) {
                 tabs
                 #if os(iOS)

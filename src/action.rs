@@ -52,6 +52,26 @@ pub enum Action {
     Pane(Pane),
 }
 
+impl Core {
+    pub const ALL: &[Core] = &[
+        Core::Quit,
+        Core::Help,
+        Core::Voice,
+        Core::Settings,
+        Core::ViewMode,
+        Core::Interrupt,
+        Core::Close,
+        Core::Cancel,
+        Core::NextTab,
+        Core::Up,
+        Core::Down,
+        Core::Less,
+        Core::More,
+        Core::Activate,
+        Core::SearchBack,
+    ];
+}
+
 impl Edit {
     pub const ALL: &[Edit] = &[
         Edit::Send,
@@ -236,6 +256,18 @@ impl Chord {
         out
     }
 
+    fn short(self) -> String {
+        let key = match self.key {
+            Key::Char(c) => c.to_ascii_lowercase().to_string(),
+            other => other.name(),
+        };
+        match (self.cmd, self.ctrl) {
+            (true, _) => format!("cmd-{key}"),
+            (false, true) => format!("^{key}"),
+            (false, false) => key,
+        }
+    }
+
     fn normal(self) -> Self {
         match self.key {
             Key::Char(c) => Self {
@@ -305,12 +337,14 @@ const COPY_SHIFT: Chord = Chord {
     cmd: false,
 };
 
-const COPY_CMD: Chord = Chord {
-    key: Key::Char('c'),
-    ctrl: false,
-    shift: false,
-    cmd: true,
-};
+const fn cmd(c: char) -> Chord {
+    Chord {
+        key: Key::Char(c),
+        ctrl: false,
+        shift: false,
+        cmd: true,
+    }
+}
 
 macro_rules! typing {
     ($scope:expr) => {
@@ -332,17 +366,18 @@ macro_rules! typing {
 
 const ANY: [Binding; 5] = [
     pane(Scope::Any, COPY_SHIFT, Pane::Copy),
-    pane(Scope::Any, COPY_CMD, Pane::Copy),
+    pane(Scope::Any, cmd('c'), Pane::Copy),
     core(Scope::Any, ctrl('c'), Core::Quit),
     core(Scope::Any, key(Key::F(1)), Core::Help),
     core(Scope::Any, ctrl('v'), Core::Voice),
 ];
 
-const CHAT: [Binding; 7] = [
+const CHAT: [Binding; 8] = [
     edit(Scope::Chat, key(Key::Enter), Edit::Send),
     edit(Scope::Chat, ctrl('y'), Edit::Picture),
     core(Scope::Chat, key(Key::Esc), Core::Interrupt),
     core(Scope::Chat, ctrl('s'), Core::Settings),
+    core(Scope::Chat, cmd(','), Core::Settings),
     core(Scope::Chat, ctrl('t'), Core::ViewMode),
     pane(Scope::Chat, key(Key::PageUp), Pane::PageUp),
     pane(Scope::Chat, key(Key::PageDown), Pane::PageDown),
@@ -424,6 +459,34 @@ pub fn help() -> Vec<(String, String)> {
     out
 }
 
+fn chords(scope: Scope, action: Action) -> impl Iterator<Item = Chord> {
+    bindings()
+        .filter(move |b| (b.scope == scope || b.scope == Scope::Any) && b.action == action)
+        .map(|b| b.chord)
+}
+
+pub fn hint(scope: Scope, items: &[(&[Action], &str)]) -> String {
+    items
+        .iter()
+        .map(|(acts, word)| {
+            let keys: Vec<String> = acts
+                .iter()
+                .map(|&a| chords(scope, a).map(Chord::label).collect::<Vec<_>>().join(" / "))
+                .collect();
+            format!("{} {word}", keys.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("  ·  ")
+}
+
+pub fn tips(scope: Scope, items: &[(Action, &str)]) -> String {
+    items
+        .iter()
+        .filter_map(|&(a, word)| chords(scope, a).next().map(|c| format!("{} {word}", c.short())))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn table() -> serde_json::Value {
     bindings()
         .map(|b| {
@@ -450,6 +513,21 @@ mod tests {
             shift,
             cmd: false,
         }
+    }
+
+    #[test]
+    fn hints_read_their_keys_from_the_table() {
+        let close = Action::Core(Core::Close);
+        let arrows: &[Action] = &[Action::Core(Core::Up), Action::Core(Core::Down)];
+        assert_eq!(
+            hint(Scope::Sheet, &[(arrows, "select"), (&[close], "close")]),
+            "↑ ↓ select  ·  Esc / Ctrl-S close"
+        );
+        let tips = tips(
+            Scope::Chat,
+            &[(Action::Core(Core::Interrupt), "interrupt"), (Action::Core(Core::Settings), "settings")],
+        );
+        assert_eq!(tips, "esc interrupt ^s settings");
     }
 
     #[test]

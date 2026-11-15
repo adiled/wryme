@@ -67,6 +67,8 @@ pub unsafe extern "C" fn wryme_send(msg: *const c_char) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     fn swift() -> String {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/app");
         std::fs::read_dir(dir)
@@ -77,30 +79,59 @@ mod tests {
             .collect()
     }
 
-    fn names<T: serde::Serialize>(all: &[T]) -> Vec<String> {
+    fn names<T: serde::Serialize>(all: &[T]) -> BTreeSet<String> {
         all.iter()
             .map(|v| serde_json::to_value(v).unwrap().as_str().unwrap().to_string())
             .collect()
     }
 
+    fn cases(src: &str, name: &str) -> BTreeSet<String> {
+        let at = src
+            .find(&format!("enum {name}: String"))
+            .unwrap_or_else(|| panic!("Swift has no enum {name}"));
+        let body = &src[at..];
+        let body = &body[body.find('{').unwrap() + 1..body.find('}').unwrap()];
+        body.split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|t| !t.is_empty() && *t != "case")
+            .map(String::from)
+            .collect()
+    }
+
     #[test]
-    fn swift_handles_every_shared_case() {
-        use wryme::action::{Edit, Pane, Scope};
+    fn swift_enums_match_the_core_both_ways() {
+        use wryme::action::{Core, Edit, Pane, Scope};
         use wryme::app::ViewMode;
-        use wryme::config::{NametagMode, TYPEFACES};
+        use wryme::config::{NAMETAG_MODES, TYPEFACES};
         let src = swift();
-        let mut wanted = names(Edit::ALL);
-        wanted.extend(names(Pane::ALL));
-        wanted.extend(names(Scope::ALL));
-        wanted.extend(names(&[ViewMode::Page, ViewMode::Scroll]));
-        wanted.extend(names(&[NametagMode::Standout, NametagMode::Inlined]));
-        wanted.extend(TYPEFACES.iter().map(|(name, _)| name.to_string()));
-        wanted.extend(names(wryme::md::Kind::ALL));
-        wanted.extend(names(wryme::control::Notice::ALL));
-        let missing: Vec<&String> = wanted
+        let pairs = [
+            ("Command", names(Core::ALL)),
+            ("Edit", names(Edit::ALL)),
+            ("Pane", names(Pane::ALL)),
+            ("Scope", names(Scope::ALL)),
+            ("ViewMode", names(ViewMode::ALL)),
+            ("Nametags", NAMETAG_MODES.iter().map(|(n, _)| n.to_string()).collect()),
+            ("Typeface", TYPEFACES.iter().map(|(n, _)| n.to_string()).collect()),
+            ("Kind", names(wryme::md::Kind::ALL)),
+            ("Notice", names(wryme::control::Notice::ALL)),
+        ];
+        for (swift_name, core) in pairs {
+            assert_eq!(cases(&src, swift_name), core, "Swift enum {swift_name} differs from the core");
+        }
+    }
+
+    #[test]
+    fn swift_paints_every_colour_the_core_names() {
+        use ratatui::style::Color::*;
+        let src = swift();
+        let named = [
+            Black, Red, Green, Yellow, Blue, Magenta, Cyan, Gray, DarkGray, LightRed, LightGreen,
+            LightYellow, LightBlue, LightMagenta, LightCyan, White,
+        ];
+        let missing: Vec<String> = named
             .iter()
-            .filter(|name| !src.contains(&format!("case {name}")) && !src.contains(&format!(", {name}")))
+            .map(|c| c.to_string())
+            .filter(|n| !src.contains(&format!("\"{n}\":")))
             .collect();
-        assert!(missing.is_empty(), "Swift has no case for {missing:?}");
+        assert!(missing.is_empty(), "Swift has no colour for {missing:?}");
     }
 }

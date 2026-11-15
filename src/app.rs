@@ -29,6 +29,10 @@ pub enum ViewMode {
     Scroll,
 }
 
+impl ViewMode {
+    pub const ALL: &[ViewMode] = &[ViewMode::Page, ViewMode::Scroll];
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolEvent {
     pub call_id: String,

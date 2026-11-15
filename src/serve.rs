@@ -47,7 +47,10 @@ impl From<Inbound> for Intent {
 }
 
 pub fn parse(line: &str) -> Option<Intent> {
-    serde_json::from_str::<Inbound>(line).ok().map(Intent::from)
+    serde_json::from_str::<Inbound>(line)
+        .inspect_err(|e| tracing::warn!("unreadable message from the app: {e}"))
+        .ok()
+        .map(Intent::from)
 }
 
 #[derive(Default)]
