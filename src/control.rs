@@ -100,12 +100,12 @@ fn interrupt(
         app.note("quiet");
         return;
     }
-    app.clearing = false;
     app.stop_voice();
     match in_flight.take() {
         Some(t) => {
             t.abort();
             app.finish_streaming();
+            app.clearing = false;
             app.settle_wire();
             if app.awaiting.is_empty() && app.awaiting_images.is_empty() {
                 app.note("cancelled");
@@ -116,6 +116,7 @@ fn interrupt(
             }
         }
         None => {
+            app.clearing = false;
             if !app.status.is_empty() {
                 app.note("");
             }
@@ -175,14 +176,12 @@ fn cls(
         app.note("cleared · the browser keeps no book");
         return;
     }
-    let unfiled = app.engine.lock().map(|e| e.unfiled()).unwrap_or(false);
+    let unfiled = crate::book::lock(&app.engine).unfiled();
     if !unfiled {
         settle_cls(app);
         return;
     }
-    if let Ok(mut engine) = app.engine.lock() {
-        engine.demand_filing();
-    }
+    crate::book::lock(&app.engine).demand_filing();
     app.clearing = true;
     app.note("filing this stretch into the book…");
     launch(app, client, tx, in_flight);
@@ -190,7 +189,7 @@ fn cls(
 
 pub(crate) fn settle_cls(app: &mut App) {
     app.clearing = false;
-    if app.engine.lock().map(|e| e.unfiled()).unwrap_or(false) {
+    if crate::book::lock(&app.engine).unfiled() {
         app.note("nothing was filed in the book, so the screen stays; /cls to try again");
         return;
     }
@@ -433,4 +432,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn esc_during_cls_never_files_the_partial_reply() {
+        let (mut app, dir) = window();
+        app.push_user("eggs and oil balloons".into(), Vec::new());
+        app.clearing = true;
+        app.begin_assistant();
+        let page = crate::book::Bookmark { topic: "egg rap".into(), ..Default::default() };
+        crate::book::lock(&app.engine).deem(&page).unwrap();
+        app.append_to_last_assistant("Saved to");
+        let client = Client::new().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut in_flight = Some(crate::platform::spawn(async {}));
+        interrupt(&mut app, &client, &tx, &mut in_flight);
+        assert!(!app.clearing);
+        assert!(!crate::book::lock(&app.engine).unfiled());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

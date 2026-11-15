@@ -356,9 +356,9 @@ impl App {
         });
         if let Some(last) = self.messages.last()
             && last.role == Role::User
-            && let Ok(mut e) = self.engine.lock()
         {
-            e.record_turn("user", &last.content);
+            let text = last.content.clone();
+            self.record("user", &text);
         }
     }
 
@@ -372,9 +372,7 @@ impl App {
             crate::windows::answer(&from, &reply_to, &text);
             format!("[from wryme#{from} re #{reply_to}]")
         };
-        if let Ok(mut e) = self.engine.lock() {
-            e.record_turn("user", &format!("{stamp} {text}"));
-        }
+        self.record("user", &format!("{stamp} {text}"));
         self.messages.push(Message {
             role: Role::User,
             content: text,
@@ -549,11 +547,8 @@ impl App {
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            if !joined.is_empty()
-                && !self.clearing
-                && let Ok(mut e) = self.engine.lock()
-            {
-                e.record_turn("assistant", &joined);
+            if !joined.is_empty() && !self.clearing {
+                self.record("assistant", &joined);
             }
 
             let user_text = self
@@ -614,7 +609,7 @@ impl App {
         self.usage_ctx = 0;
         self.usage_cached = 0;
         self.usage_out = 0;
-        self.engine.lock().ok()?.reopen_last()
+        crate::book::lock(&self.engine).reopen_last()
     }
 
     pub fn forget_wire(&mut self) {
@@ -659,15 +654,24 @@ impl App {
         }
     }
 
+    fn record(&mut self, role: &str, content: &str) {
+        let trouble = {
+            let mut e = crate::book::lock(&self.engine);
+            e.record_turn(role, content);
+            e.take_trouble()
+        };
+        if let Some(why) = trouble {
+            self.note(format!("the book couldn't save this turn: {why}"));
+        }
+    }
+
     pub fn api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if let Some(sys) = &self.system {
             out.push(system_message(sys.clone()));
         }
-        if let Ok(engine) = self.engine.lock() {
-            for preamble in engine.preamble() {
-                out.push(system_message(preamble));
-            }
+        for preamble in crate::book::lock(&self.engine).preamble() {
+            out.push(system_message(preamble));
         }
         let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
@@ -729,9 +733,7 @@ impl App {
                 }
             }
         }
-        if let Ok(mut engine) = self.engine.lock()
-            && let Some(prod) = engine.take_prod()
-        {
+        if let Some(prod) = crate::book::lock(&self.engine).take_prod() {
             out.push(system_message(prod));
         }
         out

@@ -70,6 +70,11 @@ pub struct Engine {
     demanding: bool,
     prod_delivered_row: u64,
     last_lookup_row: u64,
+    trouble: Option<String>,
+}
+
+pub fn lock(engine: &std::sync::Mutex<Engine>) -> std::sync::MutexGuard<'_, Engine> {
+    engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 mod prod {
@@ -134,10 +139,15 @@ pub fn open_engine(dir: &Path, window: &str) -> Result<Engine> {
         pending_prod: false,
         last_lookup_row: 0,
         prod_delivered_row: 0,
+        trouble: None,
     })
 }
 
 impl Engine {
+    pub fn take_trouble(&mut self) -> Option<String> {
+        self.trouble.take()
+    }
+
     pub fn preamble(&self) -> Vec<String> {
         self.established
             .iter()
@@ -185,7 +195,9 @@ impl Engine {
         if book.unattr_tail.len() > tail::ROWS {
             book.unattr_tail.remove(0);
         }
-        let _ = flush_stream(book);
+        if let Err(e) = flush_stream(book) {
+            self.trouble = Some(format!("{e:#}"));
+        }
         if !self.pending_prod
             && book.unattr_turns >= prod::MIN_TURNS
             && book.unattr_tokens >= prod::MIN_BYTES
@@ -668,7 +680,7 @@ pub fn match_compartments<'a>(book: &'a Book, query: &str) -> Vec<&'a Compartmen
 }
 
 fn flush_stream(book: &mut Book) -> Result<()> {
-    if book.pending.is_empty() {
+    if cfg!(target_arch = "wasm32") || book.pending.is_empty() {
         return Ok(());
     }
     let _held = hold(&book.dir)?;

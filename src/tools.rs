@@ -371,7 +371,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|q| q.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             e.refresh();
             e.note_lookup();
             let hits = book::match_compartments(&e.book, &query);
@@ -383,7 +383,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             match e.open(&topic) {
                 Ok(Some(text)) => text,
                 Ok(None) => format!("no page \"{topic}\""),
@@ -396,7 +396,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             e.refresh();
             match book::read_compartment(&e.book, &topic) {
                 Ok(Some(msgs)) if !msgs.is_empty() => book::render_compartment(&msgs),
@@ -406,7 +406,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
         }
         "deem" => {
             let bookmark = bookmark_from(&v);
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             match e.deem(&bookmark) {
                 Ok(out) => out,
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
@@ -418,7 +418,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             e.dismiss(&topic);
             format!("dropped \"{topic}\" from the preamble")
         }
