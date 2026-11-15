@@ -238,15 +238,6 @@ impl Engine {
         self.demanding = true;
     }
 
-    pub fn last_page_is_blank(&self) -> bool {
-        self.last_deemed
-            .as_deref()
-            .and_then(|topic| compartment(&self.book, topic))
-            .is_some_and(|m| {
-                m.facts.is_empty() && m.plans.is_empty() && m.open.is_empty() && m.people.is_empty()
-            })
-    }
-
     pub fn reopen_last(&mut self) -> Option<String> {
         let topic = self.last_deemed.clone()?;
         self.establish(&topic);
@@ -530,6 +521,9 @@ fn render_inked(meta: &CompartmentMeta, inked: String) -> String {
     }
     if !meta.tags.is_empty() {
         out.push_str(&format!("Tags: {}\n", meta.tags.join(", ")));
+    }
+    if !meta.tail.is_empty() {
+        out.push_str(&format!("Left off:\n{}\n", meta.tail));
     }
     out
 }
@@ -1439,10 +1433,25 @@ mod tests {
         e.record_turn("user", "plan the garden");
         e.deem(&Bookmark { topic: "garden".into(), facts: vec!["roses by the gate".into()], ..Default::default() })
             .unwrap();
-        assert!(!e.last_page_is_blank());
         e.record_turn("user", "more garden talk");
         e.deem(&Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
         assert_eq!(compartment(&e.book, "garden").unwrap().facts, vec!["roses by the gate"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_without_notes_still_says_where_it_left_off() {
+        let dir = tmpdir("left_off");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = open_engine(&dir, "w1").unwrap();
+        e.record_turn("user", "so whats the closest price we got to?");
+        e.record_turn("assistant", "eggs were about four a dozen");
+        e.deem(&Bookmark { topic: "egg rap".into(), ..Default::default() }).unwrap();
+        e.reopen_last();
+        let page = e.preamble().join("\n");
+        assert!(page.contains("# egg rap"));
+        assert!(page.contains("Left off:\nuser: so whats the closest price we got to?"));
+        assert!(page.contains("assistant: eggs were about four a dozen"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
