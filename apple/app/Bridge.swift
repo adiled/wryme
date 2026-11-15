@@ -19,9 +19,10 @@ struct Run: Decodable, Equatable {
 enum Kind: String, Decodable { case prose, head, code, table }
 
 struct Row: Decodable, Equatable {
-    let mono: Bool
     let kind: Kind
     let runs: [Run]
+
+    var mono: Bool { kind != .prose }
 }
 
 enum Nametags: String, Decodable { case standout, inlined }

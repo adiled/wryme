@@ -67,10 +67,10 @@ pub struct Bubble {
     pub images: Vec<String>,
     pub orphan: bool,
     #[serde(serialize_with = "rows")]
-    pub reply: Vec<Line<'static>>,
-    #[serde(serialize_with = "rows")]
+    pub reply: Vec<crate::md::Row>,
+    #[serde(serialize_with = "lines")]
     pub brain: Vec<Line<'static>>,
-    #[serde(serialize_with = "rows")]
+    #[serde(serialize_with = "lines")]
     pub heart: Vec<Line<'static>>,
 }
 
@@ -87,7 +87,7 @@ pub struct Status {
 #[derive(Serialize)]
 pub struct Sheet {
     pub tabs: Vec<Pill>,
-    #[serde(serialize_with = "rows")]
+    #[serde(serialize_with = "lines")]
     pub lines: Vec<Line<'static>>,
     pub picks: Vec<usize>,
     pub selected: Option<usize>,
@@ -240,7 +240,10 @@ pub fn bubble(id: String, msg: &Message, thinking_live: bool, feelings: Feelings
     let reply = match (replied, msg.role) {
         (false, _) => Vec::new(),
         (true, Role::Assistant) => crate::md::render(&msg.content, live),
-        (true, Role::User) => plain(&msg.content, Style::default(), live),
+        (true, Role::User) => plain(&msg.content, Style::default(), live)
+            .into_iter()
+            .map(crate::md::Row::prose)
+            .collect(),
     };
     let (mark, blinks) = mark(msg);
     Bubble {
@@ -766,17 +769,23 @@ impl<'a> Run<'a> {
 
 #[derive(Serialize)]
 struct Row<'a> {
-    mono: bool,
     kind: crate::md::Kind,
     runs: Vec<Run<'a>>,
 }
 
-fn rows<S: Serializer>(lines: &[Line<'static>], s: S) -> Result<S::Ok, S::Error> {
-    s.collect_seq(lines.iter().map(|line| Row {
-        mono: crate::md::mono(line),
-        kind: crate::md::kind(line),
-        runs: line.spans.iter().map(|span| Run::of(span, line.style)).collect(),
-    }))
+impl<'a> Row<'a> {
+    fn of(kind: crate::md::Kind, line: &'a Line<'static>) -> Self {
+        let runs = line.spans.iter().map(|span| Run::of(span, line.style)).collect();
+        Row { kind, runs }
+    }
+}
+
+fn rows<S: Serializer>(rows: &[crate::md::Row], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(rows.iter().map(|r| Row::of(r.kind, &r.line)))
+}
+
+fn lines<S: Serializer>(lines: &[Line<'static>], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(lines.iter().map(|l| Row::of(crate::md::Kind::Prose, l)))
 }
 
 fn runs<S: Serializer>(spans: &[Span<'static>], s: S) -> Result<S::Ok, S::Error> {
@@ -874,7 +883,7 @@ mod tests {
         assert_eq!(v["ink"], "Green");
         assert_eq!(v["mark"], USER_MARK);
         assert_eq!(v["reply"][0]["runs"][0]["t"], "hi");
-        assert_eq!(v["reply"][0]["mono"], false);
+        assert_eq!(v["reply"][0]["kind"], "prose");
         assert_eq!(v["raw"], "hi");
     }
 

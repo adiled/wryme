@@ -2,7 +2,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use tui_markdown::{Options, StyleSheet};
 
-const AZURE: Color = Color::Rgb(125, 185, 205);
+pub const AZURE: Color = Color::Rgb(125, 185, 205);
 
 #[derive(Clone)]
 struct Sheet;
@@ -11,45 +11,6 @@ impl StyleSheet for Sheet {
     fn code(&self) -> Style {
         Style::default().fg(AZURE)
     }
-}
-
-pub fn render(content: &str, append_cursor: bool) -> Vec<Line<'static>> {
-    let content = content.replace('\t', "    ");
-    let text = tui_markdown::from_str_with_options(&content, &Options::new(Sheet));
-    let mut out: Vec<Line<'static>> = text.lines.into_iter().map(line_to_static).collect();
-    out = gutter_fences(out);
-
-    if append_cursor {
-        let cursor = Span::styled("▌", Style::default().fg(Color::DarkGray));
-        if let Some(last) = out.last_mut() {
-            last.spans.push(cursor);
-        } else {
-            out.push(Line::from(cursor));
-        }
-    }
-    out
-}
-
-fn gutter_fences(inp: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    let azure = Style::default().fg(AZURE);
-    let mut out = Vec::with_capacity(inp.len());
-    let mut i = 0;
-    while i < inp.len() {
-        if let Some(lang) = fence_lang(&inp[i]) {
-            let mut body = Vec::new();
-            i += 1;
-            while i < inp.len() && fence_lang(&inp[i]).is_none() {
-                body.push(inp[i].clone());
-                i += 1;
-            }
-            i += 1;
-            out.extend(gutter_block(&body, &lang, azure));
-        } else {
-            out.push(inp[i].clone());
-            i += 1;
-        }
-    }
-    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -65,20 +26,51 @@ impl Kind {
     pub const ALL: &[Kind] = &[Kind::Prose, Kind::Head, Kind::Code, Kind::Table];
 }
 
-pub fn kind(line: &Line<'_>) -> Kind {
-    match line.spans.first().map(|s| s.content.as_ref()) {
-        Some("╭ ") => Kind::Head,
-        Some("│ ") => Kind::Code,
-        Some(s) if s.starts_with(['┌', '├', '└', '│']) => Kind::Table,
-        _ => Kind::Prose,
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub kind: Kind,
+    pub line: Line<'static>,
+}
+
+impl Row {
+    pub fn prose(line: Line<'static>) -> Self {
+        Row { kind: Kind::Prose, line }
     }
 }
 
-pub fn mono(line: &Line<'_>) -> bool {
+pub fn render(content: &str, append_cursor: bool) -> Vec<Row> {
+    let content = content.replace('\t', "    ");
+    let text = tui_markdown::from_str_with_options(&content, &Options::new(Sheet));
+    let mut out = rows(text.lines.into_iter().map(line_to_static));
+    if append_cursor {
+        let cursor = Span::styled("▌", Style::default().fg(Color::DarkGray));
+        match out.last_mut() {
+            Some(last) => last.line.spans.push(cursor),
+            None => out.push(Row::prose(Line::from(cursor))),
+        }
+    }
+    out
+}
+
+fn rows(mut lines: impl Iterator<Item = Line<'static>>) -> Vec<Row> {
+    let mut out = Vec::new();
+    while let Some(line) = lines.next() {
+        let Some(lang) = fence_lang(&line) else {
+            let kind = if table(&line) { Kind::Table } else { Kind::Prose };
+            out.push(Row { kind, line });
+            continue;
+        };
+        out.push(Row { kind: Kind::Head, line: Line::from(Span::styled(lang, Style::default().fg(AZURE))) });
+        let body = lines.by_ref().take_while(|l| fence_lang(l).is_none());
+        out.extend(body.map(|line| Row { kind: Kind::Code, line }));
+    }
+    out
+}
+
+fn table(line: &Line<'_>) -> bool {
     line.spans
         .first()
-        .and_then(|s| s.content.chars().next())
-        .is_some_and(|c| matches!(c, '│' | '╭' | '┌' | '├' | '└'))
+        .is_some_and(|s| s.content.starts_with(['┌', '├', '└', '│']))
 }
 
 fn fence_lang(line: &Line<'static>) -> Option<String> {
@@ -86,21 +78,6 @@ fn fence_lang(line: &Line<'static>) -> Option<String> {
         .first()
         .and_then(|s| s.content.strip_prefix("```"))
         .map(|l| l.trim().to_string())
-}
-
-fn gutter_block(body: &[Line<'static>], lang: &str, azure: Style) -> Vec<Line<'static>> {
-    let mut out = Vec::with_capacity(body.len() + 1);
-    let mut top = vec![Span::styled("╭ ", azure)];
-    if !lang.is_empty() {
-        top.push(Span::styled(lang.to_string(), azure));
-    }
-    out.push(Line::from(top));
-    for line in body {
-        let mut spans = vec![Span::styled("│ ", azure)];
-        spans.extend(line.spans.iter().cloned());
-        out.push(Line::from(spans));
-    }
-    out
 }
 
 fn line_to_static(line: Line<'_>) -> Line<'static> {
@@ -122,40 +99,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gutters_fenced_code() {
-        let out = render("```rust\nfn main() {}\n```", false);
-        assert_eq!(out[0].spans[0].content, "╭ ");
-        assert_eq!(out[0].spans[1].content, "rust");
-        for l in &out[1..] {
-            assert_eq!(l.spans[0].content, "│ ");
-        }
-        assert!(out.iter().all(|l| {
-            !l.spans
-                .iter()
-                .any(|s| s.content.starts_with("```") || s.content.contains('╰'))
-        }));
+    fn fenced_code_is_a_head_then_bare_code() {
+        let out = render("```rust\nfn main() {}\n```\nafter", false);
+        assert_eq!(out[0].kind, Kind::Head);
+        assert_eq!(out[0].line.to_string(), "rust");
+        assert_eq!(out[1].kind, Kind::Code);
+        assert_eq!(out[1].line.to_string(), "fn main() {}");
+        assert!(out.iter().all(|r| !r.line.to_string().contains("```")));
+        assert_eq!(out.last().map(|r| r.kind), Some(Kind::Prose));
     }
 
     #[test]
     fn expands_tabs_in_code() {
         let out = render("```go\nfunc f() {\n\tif x {\n\t\tfmt.Println(1)\n\t}\n}\n```", false);
-        for l in &out[1..] {
-            for s in &l.spans[1..] {
-                assert!(!s.content.contains('\t'));
-            }
-        }
-        assert!(out.iter().any(|l| l.to_string().contains("    if x {")));
+        assert!(out.iter().all(|r| !r.line.to_string().contains('\t')));
+        assert!(out.iter().any(|r| r.line.to_string().contains("    if x {")));
     }
 
     #[test]
     fn lines_know_what_they_are() {
         let out = render("say\n\n```rust\nlet x = 1;\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |", false);
-        let kinds: Vec<Kind> = out.iter().map(kind).collect();
+        let kinds: Vec<Kind> = out.iter().map(|r| r.kind).collect();
         assert_eq!(kinds[0], Kind::Prose);
         assert!(kinds.contains(&Kind::Head));
         assert!(kinds.contains(&Kind::Code));
         assert!(kinds.contains(&Kind::Table));
-        let head = out.iter().find(|l| kind(l) == Kind::Head).unwrap();
-        assert_eq!(head.to_string(), "╭ rust");
     }
 }

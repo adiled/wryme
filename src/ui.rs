@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::ViewMode;
 use crate::config::NametagMode;
+use crate::md;
 use crate::scene::{self, AWAITING, BRAIN_MARK, Bubble, HEART_MARK, Scene};
 use crate::term::View;
 
@@ -344,6 +345,17 @@ fn cut_at_width(s: &str, width: usize) -> &str {
     &s[..end]
 }
 
+fn gutter(row: &md::Row) -> Line<'static> {
+    let mark = match row.kind {
+        md::Kind::Head => "╭ ",
+        md::Kind::Code => "│ ",
+        md::Kind::Prose | md::Kind::Table => return row.line.clone(),
+    };
+    let mut line = row.line.clone();
+    line.spans.insert(0, Span::styled(mark, Style::default().fg(md::AZURE)));
+    line
+}
+
 fn thinking_block(out: &mut Vec<Line<'static>>, label: &str, body: &[Line<'static>], gap: bool) {
     if body.is_empty() {
         return;
@@ -414,7 +426,7 @@ fn push_message(
             scene::dim(),
         )));
     }
-    out.extend(b.reply.iter().cloned());
+    out.extend(b.reply.iter().map(gutter));
     let reply_rows = out.len() - start;
 
     thinking_block(out, "brain", &b.brain, !b.reply.is_empty());
@@ -444,8 +456,8 @@ fn push_message_inlined(out: &mut Vec<Line<'static>>, b: &Bubble, area_width: u1
         let line = Line::from(Span::styled(format!("📷 attached: {img}"), dim));
         rows.extend(wrap_line(line, text_w));
     }
-    for (i, line) in b.reply.iter().enumerate() {
-        let mut line = line.clone();
+    for (i, row) in b.reply.iter().enumerate() {
+        let mut line = gutter(row);
         if let (0, Some(from)) = (i, &b.guest) {
             line.spans
                 .insert(0, Span::styled(format!("@{from} "), Style::default().fg(b.ink)));

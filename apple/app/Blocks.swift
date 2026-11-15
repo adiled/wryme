@@ -14,7 +14,7 @@ enum Chunk {
 
 extension Row {
     var blank: Bool { runs.allSatisfy { $0.t.trimmingCharacters(in: .whitespaces).isEmpty } }
-    var body: Row { Row(mono: true, kind: kind, runs: Array(runs.dropFirst())) }
+    var text: String { runs.map(\.t).joined() }
 }
 
 func chunks(_ rows: [Row]) -> [Chunk] {
@@ -22,7 +22,7 @@ func chunks(_ rows: [Row]) -> [Chunk] {
     for row in rows {
         switch (row.kind, out.last) {
         case (.head, _):
-            out.append(.code(row.body.runs.map(\.t).joined(), []))
+            out.append(.code(row.text, []))
         case (.code, .code(let lang, let body)?):
             out[out.count - 1] = .code(lang, body + [row])
         case (.code, _):
@@ -141,7 +141,7 @@ struct CodeCard: View {
     @State private var copied = false
 
     private var code: String {
-        rows.map { $0.body.runs.map(\.t).joined() }
+        rows.map(\.text)
             .joined(separator: "\n")
             .replacingOccurrences(of: "▌", with: "")
     }
@@ -162,7 +162,7 @@ struct CodeCard: View {
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Theme.faint)
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(Theme.paint(rows.map(\.body), face: face))
+                Text(Theme.paint(rows, face: face))
                     .fixedSize(horizontal: true, vertical: false)
             }
         }
