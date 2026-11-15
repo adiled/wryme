@@ -238,6 +238,15 @@ impl Engine {
         self.demanding = true;
     }
 
+    pub fn last_page_is_blank(&self) -> bool {
+        self.last_deemed
+            .as_deref()
+            .and_then(|topic| compartment(&self.book, topic))
+            .is_some_and(|m| {
+                m.facts.is_empty() && m.plans.is_empty() && m.open.is_empty() && m.people.is_empty()
+            })
+    }
+
     pub fn reopen_last(&mut self) -> Option<String> {
         let topic = self.last_deemed.clone()?;
         self.establish(&topic);
@@ -333,11 +342,17 @@ pub fn deem_span(book: &mut Book, bookmark: &Bookmark) -> Result<String> {
         meta.spans.extend(spans.iter().copied());
         merge_spans(&mut meta.spans);
         meta.life_tokens += tokens;
-        meta.tags = bookmark.tags.clone();
-        meta.people = bookmark.people.clone();
-        meta.facts = bookmark.facts.clone();
-        meta.plans = bookmark.plans.clone();
-        meta.open = bookmark.open.clone();
+        for (field, fresh) in [
+            (&mut meta.tags, &bookmark.tags),
+            (&mut meta.people, &bookmark.people),
+            (&mut meta.facts, &bookmark.facts),
+            (&mut meta.plans, &bookmark.plans),
+            (&mut meta.open, &bookmark.open),
+        ] {
+            if !fresh.is_empty() {
+                *field = fresh.clone();
+            }
+        }
         meta.last_inked = now;
         meta.tail = tail.clone();
     })?;
@@ -1413,6 +1428,21 @@ mod tests {
         let first = e.take_prod().unwrap();
         assert!(first.contains("/cls") && first.contains("lost to you") && first.contains("deem"));
         assert_eq!(e.take_prod(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filing_with_empty_notes_keeps_the_page_notes() {
+        let dir = tmpdir("keep_notes");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = open_engine(&dir, "w1").unwrap();
+        e.record_turn("user", "plan the garden");
+        e.deem(&Bookmark { topic: "garden".into(), facts: vec!["roses by the gate".into()], ..Default::default() })
+            .unwrap();
+        assert!(!e.last_page_is_blank());
+        e.record_turn("user", "more garden talk");
+        e.deem(&Bookmark { topic: "garden".into(), ..Default::default() }).unwrap();
+        assert_eq!(compartment(&e.book, "garden").unwrap().facts, vec!["roses by the gate"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

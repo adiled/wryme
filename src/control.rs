@@ -166,9 +166,13 @@ fn cls(
 }
 
 pub(crate) fn settle_cls(app: &mut App) {
-    app.clearing = false;
+    let asked = std::mem::take(&mut app.clearing);
     if app.engine.lock().map(|e| e.unfiled()).unwrap_or(false) {
         app.note("nothing was filed in the book, so the screen stays; /cls to try again");
+        return;
+    }
+    if asked && app.engine.lock().map(|e| e.last_page_is_blank()).unwrap_or(false) {
+        app.note("filed, but with no notes to carry on from, so the screen stays; /cls again to clear anyway");
         return;
     }
     match app.clear_screen() {
@@ -366,7 +370,11 @@ mod tests {
             .engine
             .lock()
             .unwrap()
-            .deem(&crate::book::Bookmark { topic: "garden".into(), ..Default::default() })
+            .deem(&crate::book::Bookmark {
+                topic: "garden".into(),
+                facts: vec!["roses by the gate".into()],
+                ..Default::default()
+            })
             .unwrap();
         assert!(filed.contains("deemed rows"));
         app.clearing = true;
@@ -392,13 +400,35 @@ mod tests {
         app.engine
             .lock()
             .unwrap()
-            .deem(&crate::book::Bookmark { topic: "egg rap".into(), ..Default::default() })
+            .deem(&crate::book::Bookmark {
+                topic: "egg rap".into(),
+                facts: vec!["oil balloons are a joke".into()],
+                ..Default::default()
+            })
             .unwrap();
         app.append_to_last_assistant("Saved to egg rap.");
         app.finish_streaming();
         settle_cls(&mut app);
         assert!(app.messages.is_empty(), "screen should clear: {}", app.status);
         assert!(app.status.contains("carrying on from \"egg rap\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cls_keeps_the_screen_when_the_page_has_no_notes() {
+        let (mut app, dir) = window();
+        app.push_user("eggs".into(), Vec::new());
+        app.clearing = true;
+        app.engine
+            .lock()
+            .unwrap()
+            .deem(&crate::book::Bookmark { topic: "bare".into(), ..Default::default() })
+            .unwrap();
+        settle_cls(&mut app);
+        assert_eq!(app.messages.len(), 1);
+        assert!(app.status.contains("no notes"));
+        settle_cls(&mut app);
+        assert!(app.messages.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

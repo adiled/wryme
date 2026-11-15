@@ -470,14 +470,16 @@ fn bookmark_from(v: &serde_json::Value) -> Bookmark {
 }
 
 fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
-    v.get(key)
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    let items: Vec<String> = match v.get(key) {
+        Some(serde_json::Value::Array(a)) => a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect(),
+        Some(serde_json::Value::String(s)) => s.lines().map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    items
+        .into_iter()
+        .map(|s| s.trim().trim_start_matches(['-', '*', '•']).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 pub const SPAWNS: bool = !cfg!(target_os = "ios");
@@ -833,5 +835,13 @@ mod tests {
     async fn run_shell_empty_command() {
         let out = run_shell("  ").await;
         assert!(out.contains("no command given"));
+    }
+
+    #[test]
+    fn bookmark_lists_also_take_plain_text() {
+        let v = serde_json::json!({"facts": "eggs are pricey\n- oil balloons are a joke", "plans": ["check again"], "open": 3});
+        assert_eq!(str_list(&v, "facts"), vec!["eggs are pricey", "oil balloons are a joke"]);
+        assert_eq!(str_list(&v, "plans"), vec!["check again"]);
+        assert!(str_list(&v, "open").is_empty());
     }
 }
