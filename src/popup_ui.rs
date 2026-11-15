@@ -86,9 +86,12 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
             Line::from(Span::styled(sheet.hint, Style::default().fg(Color::DarkGray)))
                 .right_aligned(),
         );
-    let widget = Paragraph::new(Text::from(visible))
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let widget = Paragraph::new(Text::from(visible)).block(block);
+    let widget = if sheet.picks.is_empty() {
+        widget.wrap(Wrap { trim: false })
+    } else {
+        widget
+    };
     f.render_widget(widget, modal_area);
 
     if lines.len() > body_h {
