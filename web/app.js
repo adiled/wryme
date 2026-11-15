@@ -165,7 +165,10 @@
 
   async function pick() {
     if (!window.showDirectoryPicker) {
-      setStatus("this browser can't connect folders");
+      const here = location.protocol + "//localhost:" + location.port + location.pathname;
+      setStatus(window.isSecureContext
+        ? "this browser can't connect folders; Chrome and Edge can"
+        : "connecting folders needs https or localhost. open " + here + " on this machine");
       return;
     }
     const opts = { id: "wryme-config", mode: "readwrite" };
@@ -398,8 +401,10 @@
   }
 
   function build() {
-    if (TOUCH) touchKeys();
-    if (!window.showDirectoryPicker) return;
+    if (TOUCH) {
+      touchKeys();
+      return;
+    }
     wrap = document.createElement("div");
     wrap.id = "wryme-config";
     status = document.createElement("span");

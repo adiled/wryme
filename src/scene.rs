@@ -44,7 +44,7 @@ pub struct Marks {
 #[derive(Serialize)]
 pub struct Bar {
     pub state: &'static str,
-    pub esc: String,
+    pub tips: Vec<crate::action::Tip>,
     pub busy: bool,
     pub tool: Option<String>,
 }
@@ -361,16 +361,17 @@ pub fn build(app: &App) -> Scene {
 }
 
 fn bar(app: &App) -> Bar {
-    let (state, esc) = match (app.in_flight, app.voice_is_active()) {
-        (true, true) => ("streaming + speaking…", "quiet"),
-        (true, false) => ("streaming…", "interrupt"),
-        (false, true) => ("speaking…", "quiet"),
-        (false, false) => ("", ""),
+    let (state, stop) = match (app.in_flight, app.voice_is_active()) {
+        (true, true) => ("streaming + speaking…", Some("quiet")),
+        (true, false) => ("streaming…", Some("interrupt")),
+        (false, true) => ("speaking…", Some("quiet")),
+        (false, false) => ("", None),
     };
-    let esc = match esc {
-        "" => String::new(),
-        word => tips(Scope::Chat, &[(C(Core::Interrupt), word)]),
-    };
+    let mut asks: Vec<(Core, &str)> = stop.map(|word| (Core::Interrupt, word)).into_iter().collect();
+    asks.push((Core::Settings, "settings"));
+    if !cfg!(target_arch = "wasm32") {
+        asks.push((Core::Quit, "exit"));
+    }
     let tool = (app.nametags == NametagMode::Inlined)
         .then(|| {
             app.messages
@@ -384,7 +385,7 @@ fn bar(app: &App) -> Bar {
         .flatten();
     Bar {
         state,
-        esc,
+        tips: tips(Scope::Chat, &asks),
         busy: app.in_flight,
         tool,
     }

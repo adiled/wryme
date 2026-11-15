@@ -35,11 +35,7 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
     } else {
         format!(" wme. {} ", bar.state)
     };
-    let esc = if bar.esc.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", bar.esc)
-    };
+    let tips: Vec<&str> = bar.tips.iter().map(|t| t.label.as_str()).collect();
     let mut input_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -49,7 +45,7 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
             Style::default().fg(accent)
         })
         .title(label)
-        .title(Line::from(format!(" {esc}{} ", chat_tips())).right_aligned());
+        .title(Line::from(format!(" {} ", tips.join(" "))).right_aligned());
     if let Some(tool) = &bar.tool {
         input_block = input_block.title_bottom(
             Line::from(Span::styled(
@@ -90,6 +86,16 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
         Paragraph::new(Line::from("")).block(input_block),
         input_chunk,
     );
+    let mut from = input_chunk.x;
+    view.tip_hits = bar
+        .tips
+        .iter()
+        .filter_map(|t| {
+            let (x0, x1) = spot(f, input_chunk.y, from..input_chunk.right(), &t.label)?;
+            from = x1;
+            Some((input_chunk.y, x0, x1, t.act))
+        })
+        .collect();
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(prompt, Style::default().fg(accent)))),
         Rect {
@@ -345,9 +351,12 @@ fn cut_at_width(s: &str, width: usize) -> &str {
     &s[..end]
 }
 
-fn chat_tips() -> String {
-    use crate::action::{Action, Core, Scope, tips};
-    tips(Scope::Chat, &[(Action::Core(Core::Settings), "settings"), (Action::Core(Core::Quit), "exit")])
+pub(crate) fn spot(f: &mut Frame, y: u16, xs: std::ops::Range<u16>, text: &str) -> Option<(u16, u16)> {
+    let buf = f.buffer_mut();
+    let row: Vec<String> = xs.clone().map(|x| buf[(x, y)].symbol().to_string()).collect();
+    let needle: Vec<String> = text.chars().map(String::from).collect();
+    let at = row.windows(needle.len()).position(|w| w == needle.as_slice())? as u16;
+    Some((xs.start + at, xs.start + at + needle.len() as u16))
 }
 
 fn gutter(row: &md::Row) -> Line<'static> {

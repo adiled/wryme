@@ -104,6 +104,7 @@ web-sys = { version = "0.3", features = [
     "Performance",
     "CssStyleDeclaration",
     "DomTokenList",
+    "MediaQueryList",
 ] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 console_error_panic_hook = "0.1"

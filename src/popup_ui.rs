@@ -126,23 +126,13 @@ pub fn draw(f: &mut Frame, sheet: &Sheet, view: &mut View, accent: Color) {
 }
 
 fn tab_hits(f: &mut Frame, sheet: &Sheet, modal: Rect) -> Vec<(u16, u16, u16)> {
-    let buf = f.buffer_mut();
-    let row: Vec<String> = (modal.x..modal.x + modal.width)
-        .map(|x| buf[(x, modal.y)].symbol().to_string())
-        .collect();
     sheet
         .tabs
         .iter()
         .map(|pill| {
-            let needle: Vec<String> = format!(" {} ", pill.label)
-                .chars()
-                .map(String::from)
-                .collect();
-            let at = row
-                .windows(needle.len())
-                .position(|w| w == needle.as_slice())
-                .unwrap_or(0) as u16;
-            (modal.y, modal.x + at, modal.x + at + needle.len() as u16)
+            let (x0, x1) = crate::ui::spot(f, modal.y, modal.x..modal.right(), &format!(" {} ", pill.label))
+                .unwrap_or((modal.x, modal.x));
+            (modal.y, x0, x1)
         })
         .collect()
 }

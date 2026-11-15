@@ -35,7 +35,7 @@ pub fn way() -> Option<Way> {
         return Some(Way::Pick);
     }
     #[cfg(target_arch = "wasm32")]
-    return crate::platform::web::can_pick_folders().then_some(Way::Pick);
+    return (!crate::platform::web::touch_screen()).then_some(Way::Pick);
     #[cfg(not(target_arch = "wasm32"))]
     imp::linked().map(|_| Way::Link)
 }

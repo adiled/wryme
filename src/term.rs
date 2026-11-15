@@ -30,6 +30,7 @@ pub struct View {
     pub sheet_scroll: usize,
     pub sheet_body: Rect,
     pub tab_hits: Vec<(u16, u16, u16)>,
+    pub tip_hits: Vec<(u16, u16, u16, Core)>,
     seen: Option<(u64, ViewMode)>,
     seen_tab: Option<usize>,
 }
@@ -345,6 +346,14 @@ impl View {
             col: m.column,
             row: m.row,
         };
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(&(.., act)) = self
+                .tip_hits
+                .iter()
+                .find(|&&(y, x0, x1, _)| point.row == y && (x0..x1).contains(&point.col))
+        {
+            return vec![Intent::Do(act)];
+        }
         let up = matches!(m.kind, MouseEventKind::ScrollUp);
         let wheel = up || matches!(m.kind, MouseEventKind::ScrollDown);
         match (scene.scope, m.kind) {
@@ -446,5 +455,24 @@ mod tests {
         assert_eq!(view.page, 1);
         view.feed(key(KeyCode::PageUp), &scene);
         assert_eq!(view.page, 0);
+    }
+
+    #[test]
+    fn tapping_a_hint_on_the_input_border_does_it() {
+        let scene = scene(ViewMode::Scroll);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut view = View::default();
+        view.sync(&scene);
+        terminal.draw(|f| crate::ui::draw(f, &scene, &mut view)).unwrap();
+        let &(row, x0, x1, act) = view.tip_hits.iter().find(|h| h.3 == Core::Settings).unwrap();
+        let drawn: String = (x0..x1).map(|x| terminal.backend().buffer()[(x, row)].symbol().to_string()).collect();
+        assert_eq!(drawn, "^s settings");
+        let tap = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x0 + 4,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(view.feed(tap, &scene).as_slice(), [Intent::Do(c)] if *c == act));
     }
 }

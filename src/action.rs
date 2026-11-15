@@ -479,12 +479,20 @@ pub fn hint(scope: Scope, items: &[(&[Action], &str)]) -> String {
         .join("  ·  ")
 }
 
-pub fn tips(scope: Scope, items: &[(Action, &str)]) -> String {
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Tip {
+    pub label: String,
+    pub act: Core,
+}
+
+pub fn tips(scope: Scope, items: &[(Core, &str)]) -> Vec<Tip> {
     items
         .iter()
-        .filter_map(|&(a, word)| chords(scope, a).next().map(|c| format!("{} {word}", c.short())))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .filter_map(|&(act, word)| {
+            let chord = chords(scope, Action::Core(act)).next()?;
+            Some(Tip { label: format!("{} {word}", chord.short()), act })
+        })
+        .collect()
 }
 
 pub fn table() -> serde_json::Value {
@@ -523,11 +531,10 @@ mod tests {
             hint(Scope::Sheet, &[(arrows, "select"), (&[close], "close")]),
             "↑ ↓ select  ·  Esc / Ctrl-S close"
         );
-        let tips = tips(
-            Scope::Chat,
-            &[(Action::Core(Core::Interrupt), "interrupt"), (Action::Core(Core::Settings), "settings")],
-        );
-        assert_eq!(tips, "esc interrupt ^s settings");
+        let tips = tips(Scope::Chat, &[(Core::Interrupt, "interrupt"), (Core::Settings, "settings")]);
+        let labels: Vec<&str> = tips.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["esc interrupt", "^s settings"]);
+        assert_eq!(tips[1].act, Core::Settings);
     }
 
     #[test]

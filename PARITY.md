@@ -34,9 +34,9 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 | Images in the browser | none (no files to point at) | | |
 | Book in the browser | none: no book tool, and `/cls` just clears the screen | | |
 | Tools | all | all | none that run programs (shell, explore, job check) |
-| Quit (Ctrl-C) | quits | quits | not offered |
+| Quit (Ctrl-C) | quits; the browser doesn't offer it | quits | not offered |
 | Another window | run `wme` again | File › New Window starts its own `wme`; no tabs | one window |
-| Extras | | menu bar, Cmd-, settings | action menu |
+| Extras | the key hints on the input border are buttons: tap or click to stop a reply or open settings | menu bar, Cmd-, settings | action menu |
 | Streaming state | "streaming…" and "esc interrupt" in the input title | dimmed input border only | dimmed input border only |
 | Running tool, inlined | on the input border | before the time on the reply's first row | same as Mac |
 | Sync row (Pref tab) | macOS: links the files into iCloud Drive › wryme; elsewhere hidden | same as the terminal on macOS | opens the Files folder picker |
@@ -46,7 +46,7 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 Shops, stations and prefs can live in a shared folder. The Pref tab has one `sync` row everywhere it can work, backed by `src/sync.rs`, in one of two ways:
 
 - **Link**: the core moves the files into a cloud drive and leaves links behind. macOS (terminal and Mac app) uses iCloud Drive this way, since a terminal can't show a folder picker. Turning it off copies the files back and leaves the cloud copy for other devices.
-- **Pick**: the core asks the surface to open its own folder picker by bumping `scene.sync.pick`. The iPhone uses the Files picker, and Android will use its document picker, which reaches Google Drive. The browser uses its directory picker where it has one (desktop Chrome and Edge); elsewhere, phones included, the sync row and the connect button are hidden.
+- **Pick**: the core asks the surface to open its own folder picker by bumping `scene.sync.pick`. The iPhone uses the Files picker, and Android will use its document picker, which reaches Google Drive. The browser uses its directory picker on desktop (Chrome and Edge, over https or localhost). On phones the sync row and the connect button are hidden.
 
 The iPhone rereads the folder when the app comes to the front. Book memory and usage stats stay per device.
 

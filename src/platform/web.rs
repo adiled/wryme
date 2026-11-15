@@ -182,8 +182,10 @@ impl Stream for EventStream {
     }
 }
 
-pub fn can_pick_folders() -> bool {
-    js_sys::Reflect::has(&js_sys::global(), &"showDirectoryPicker".into()).unwrap_or(false)
+pub fn touch_screen() -> bool {
+    web_sys::window()
+        .and_then(|w| w.match_media("(pointer: coarse)").ok().flatten())
+        .is_some_and(|m| m.matches())
 }
 
 pub fn typed(text: &str) -> impl Iterator<Item = Event> + '_ {
