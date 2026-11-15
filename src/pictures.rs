@@ -83,7 +83,7 @@ fn grab(file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))]
 fn grab(file: &std::path::Path) -> Result<()> {
     let tries: [(&str, &[&str]); 2] = [
         ("wl-paste", &["--no-newline", "--type", "image/png"]),
@@ -101,7 +101,7 @@ fn grab(file: &std::path::Path) -> Result<()> {
     anyhow::bail!("no image on the clipboard")
 }
 
-#[cfg(not(any(unix, target_arch = "wasm32")))]
+#[cfg(any(target_os = "ios", target_os = "android", not(any(unix, target_arch = "wasm32"))))]
 fn grab(_: &std::path::Path) -> Result<()> {
     anyhow::bail!("clipboard images are not supported here yet")
 }

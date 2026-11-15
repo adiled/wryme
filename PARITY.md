@@ -50,7 +50,7 @@ Shops, stations and prefs can live in a shared folder. The Pref tab has one `syn
 
 The iPhone rereads the folder when the app comes to the front. Book memory and usage stats stay per device.
 
-With sync on, the Mac writes its network name (`<name>.local`) as `host` in prefs.json. The iPhone swaps that name in for any shop on `localhost` or `127.0.0.1`, so local models are reached on the Mac. Those services must listen on the network, not just 127.0.0.1. Set `host` to another name, such as a Tailscale one, and the Mac leaves it alone.
+With sync on, a Mac writes its network name (`<name>.local`) as `host` in prefs.json when no host is set yet. The iPhone swaps that name in for any shop on `localhost` or `127.0.0.1`, so local models are reached on that Mac. Those services must listen on the network, not just 127.0.0.1. To point the iPhone elsewhere, such as another Mac or a Tailscale name, change `host`; no Mac overwrites it.
 
 ## Checks
 

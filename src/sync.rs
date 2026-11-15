@@ -70,9 +70,7 @@ pub fn publish() {
     let Some(name) = imp::local_name() else {
         return;
     };
-    let mine = crate::config::host_pref();
-    let theirs = mine.as_deref().is_some_and(|h| !h.ends_with(".local"));
-    if mine.as_deref() != Some(name.as_str()) && !theirs {
+    if crate::config::host_pref().is_none() {
         let _ = crate::config::write_host(&name);
     }
 }
@@ -160,17 +158,24 @@ mod imp {
         for name in SHARED {
             let local = here.join(name);
             let remote = drive.join(name);
-            if std::fs::read_link(&local).is_ok() {
-                std::fs::remove_file(&local)?;
-            } else if local.exists() {
+            let link = std::fs::read_link(&local).ok();
+            if link.as_deref() == Some(remote.as_path()) {
+                continue;
+            }
+            if local.exists() {
                 let keep = if remote.exists() {
                     here.join(format!("{name}.bak-{stamp}"))
                 } else {
                     remote.clone()
                 };
-                std::fs::rename(&local, &keep)
-                    .or_else(|_| std::fs::copy(&local, &keep).and_then(|_| std::fs::remove_file(&local)))
-                    .with_context(|| format!("moving {}", local.display()))?;
+                let moved = match link {
+                    Some(_) => std::fs::copy(&local, &keep).and_then(|_| std::fs::remove_file(&local)),
+                    None => std::fs::rename(&local, &keep)
+                        .or_else(|_| std::fs::copy(&local, &keep).and_then(|_| std::fs::remove_file(&local))),
+                };
+                moved.with_context(|| format!("moving {}", local.display()))?;
+            } else if link.is_some() {
+                std::fs::remove_file(&local)?;
             }
             std::os::unix::fs::symlink(&remote, &local)
                 .with_context(|| format!("linking {}", local.display()))?;
@@ -233,6 +238,23 @@ mod imp {
                 std::fs::read_to_string(here.join("shops.toml.bak-7")).unwrap(),
                 "mine shops.toml"
             );
+        }
+
+        #[test]
+        fn sharing_keeps_what_a_dotfile_link_pointed_at() {
+            let (here, drive) = dirs("dotfile");
+            let dotfiles = here.parent().unwrap().join("dotfiles");
+            seed(&dotfiles, "stowed");
+            std::fs::create_dir_all(&here).unwrap();
+            for name in SHARED {
+                std::os::unix::fs::symlink(dotfiles.join(name), here.join(name)).unwrap();
+            }
+            share(&here, &drive, 3).unwrap();
+            assert!(shared(&here, &drive));
+            assert_eq!(std::fs::read_to_string(here.join("shops.toml")).unwrap(), "stowed shops.toml");
+            assert_eq!(std::fs::read_to_string(dotfiles.join("shops.toml")).unwrap(), "stowed shops.toml");
+            share(&here, &drive, 4).unwrap();
+            assert!(!here.join("shops.toml.bak-4").exists());
         }
 
         #[test]
