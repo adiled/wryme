@@ -168,7 +168,7 @@ final class Readout: ObservableObject {
 }
 
 protocol Link: AnyObject {
-    func start(_ receive: @escaping (Data) -> Void, ended: @escaping () -> Void)
+    func start(_ receive: @escaping (Data) -> Void, ended: @escaping (String?) -> Void)
     func send(_ text: String)
     func stop()
 }
@@ -182,9 +182,13 @@ final class Child: Link {
     private let process = Process()
     private let input = Pipe()
     private let output = Pipe()
+    private let errors = Pipe()
+    private let lock = NSLock()
+    private let drained = DispatchSemaphore(value: 0)
     private var buffer = Data()
+    private var tail = Data()
 
-    func start(_ receive: @escaping (Data) -> Void, ended: @escaping () -> Void) {
+    func start(_ receive: @escaping (Data) -> Void, ended: @escaping (String?) -> Void) {
         guard let url = Bundle.main.url(forAuxiliaryExecutable: "wme") else {
             receive(fatalLine("wme is missing from the app bundle"))
             return
@@ -193,7 +197,17 @@ final class Child: Link {
         process.arguments = ["--serve"]
         process.standardInput = input
         process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errors
+        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard let self else { return }
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                self.drained.signal()
+                return
+            }
+            self.lock.withLock { self.tail = (self.tail + chunk).suffix(4000) }
+        }
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard let self, !chunk.isEmpty else {
@@ -207,7 +221,10 @@ final class Child: Link {
                 if line.first == UInt8(ascii: "{") { receive(line) }
             }
         }
-        process.terminationHandler = { _ in DispatchQueue.main.async { ended() } }
+        process.terminationHandler = { [weak self] p in
+            let why = self?.why(p)
+            DispatchQueue.main.async { ended(why) }
+        }
         do {
             try process.run()
         } catch {
@@ -215,7 +232,18 @@ final class Child: Link {
         }
     }
 
+    private func why(_ p: Process) -> String? {
+        if p.terminationReason == .exit && p.terminationStatus == 0 { return nil }
+        _ = drained.wait(timeout: .now() + 0.5)
+        let how = p.terminationReason == .uncaughtSignal ? "signal" : "exit"
+        let said = lock.withLock { String(decoding: tail, as: UTF8.self) }
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let head = "wryme stopped (\(how) \(p.terminationStatus))"
+        return said.isEmpty ? head : "\(head)\n\n\(said)"
+    }
+
     func send(_ text: String) {
+        guard process.isRunning else { return }
         try? input.fileHandleForWriting.write(contentsOf: Data((text + "\n").utf8))
     }
 
@@ -227,7 +255,7 @@ final class Child: Link {
 final class Inline: Link {
     private static var receive: ((Data) -> Void)?
 
-    func start(_ receive: @escaping (Data) -> Void, ended: @escaping () -> Void) {
+    func start(_ receive: @escaping (Data) -> Void, ended: @escaping (String?) -> Void) {
         Inline.receive = receive
         wryme_start { text in
             guard let text else { return }
@@ -296,10 +324,27 @@ final class Core: ObservableObject {
                 case .failure(let error): self.fatal = "This app can't read what wryme sent: \(error)"
                 }
             }
-        }, ended: { [weak self] in self?.ended = true })
+        }, ended: { [weak self] why in
+            guard let self else { return }
+            guard let why else {
+                self.ended = true
+                return
+            }
+            if self.fatal == nil { self.fatal = why }
+        })
     }
 
     func stop() { link.stop() }
+
+    #if os(iOS)
+    func reset() {
+        fatal = nil
+        stage = nil
+        bubbles = []
+        cache = [:]
+        started = false
+    }
+    #endif
 
     private func apply(_ e: Envelope) {
         if let bindings = e.bindings { self.bindings = bindings }

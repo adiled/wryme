@@ -4,6 +4,7 @@ import SwiftUI
 struct WrymeApp: App {
     init() {
         #if os(macOS)
+        signal(SIGPIPE, SIG_IGN)
         NSWindow.allowsAutomaticWindowTabbing = false
         Keys.install()
         #else
