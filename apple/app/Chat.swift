@@ -251,7 +251,6 @@ struct BubbleView: View, Equatable {
     let bubble: Bubble
     let stage: Stage
     let accent: Color
-    @State private var hover = false
 
     static func == (a: BubbleView, b: BubbleView) -> Bool {
         a.bubble == b.bubble && a.accent == b.accent && a.stage.nametags == b.stage.nametags
@@ -271,9 +270,7 @@ struct BubbleView: View, Equatable {
         }
         .opacity(bubble.waiting ? 0.55 : 1)
         .textSelection(.enabled)
-        #if os(macOS)
-        .background(HoverArea { hover = $0 })
-        #endif
+
         #if os(iOS)
         .contextMenu {
             if !bubble.raw.isEmpty {
@@ -283,12 +280,6 @@ struct BubbleView: View, Equatable {
         #endif
     }
 
-    @ViewBuilder
-    private var copy: some View {
-        if Platform.hovers, hover, !bubble.live, !bubble.raw.isEmpty {
-            CopyButton(text: bubble.raw).padding(.trailing, 10)
-        }
-    }
 
     private var standout: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -305,11 +296,10 @@ struct BubbleView: View, Equatable {
                     Text(tool).fontWeight(.bold).foregroundStyle(accent)
                     Text("  ")
                 }
-                copy
                 Text(bubble.time).foregroundStyle(Theme.faint).monospacedDigit()
             }
             if hasHead {
-                Blocks(lead: lead, rows: bubble.reply, face: face, images: bubble.images)
+                Blocks(lead: lead, rows: bubble.reply, face: face, live: bubble.live, images: bubble.images)
             }
             thought("brain", bubble.brain, after: hasHead)
             thought("heart", bubble.heart, after: hasHead || !bubble.brain.isEmpty)
@@ -321,7 +311,7 @@ struct BubbleView: View, Equatable {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).italic().fontWeight(.bold).foregroundStyle(Theme.faint)
-                Lines(rows: rows, face: face)
+                Lines(rows: rows, face: face, live: bubble.live)
             }
             .padding(.top, after ? gap : 0)
         }
@@ -372,12 +362,11 @@ struct BubbleView: View, Equatable {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
                     Mark(text: part.mark, ink: part.ink, blinks: part.blinks)
                         .frame(width: Theme.size * 1.6, alignment: .leading)
-                    Blocks(lead: part.lead, rows: part.rows, face: face, images: part.images)
+                    Blocks(lead: part.lead, rows: part.rows, face: face, live: bubble.live, images: part.images)
                     if i == 0, let tool = bubble.tool {
                         Text(tool).fontWeight(.bold).foregroundStyle(accent).padding(.leading, 12)
                     }
                     if i == 0 {
-                        copy.padding(.leading, 12)
                         Text(bubble.waiting ? "waiting…" : bubble.time)
                             .foregroundStyle(Theme.faint)
                             .monospacedDigit()

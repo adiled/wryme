@@ -57,14 +57,35 @@ struct Para: View, Equatable {
     }
 }
 
+struct Whole: View, Equatable {
+    let rows: [Row]
+    let face: Typeface
+    let lead: AttributedString
+
+    var body: some View {
+        Text(lead + Theme.paint(rows, face: face))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct Lines: View {
     let rows: [Row]
     let face: Typeface
     var lead = AttributedString()
+    var live = false
 
     var body: some View {
+        if live {
+            streaming
+        } else {
+            Whole(rows: rows, face: face, lead: lead).equatable()
+        }
+    }
+
+    private var streaming: some View {
         let first = rows.firstIndex { !$0.blank }
-        LazyVStack(alignment: .leading, spacing: 2) {
+        return LazyVStack(alignment: .leading, spacing: 2) {
             ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
                 if row.blank {
                     Color.clear.frame(height: Theme.size * 0.5)
@@ -83,6 +104,7 @@ struct Blocks: View {
     let lead: AttributedString
     let rows: [Row]
     let face: Typeface
+    var live = false
     var images: [String] = []
 
     var body: some View {
@@ -95,7 +117,7 @@ struct Blocks: View {
             ForEach(Array(parts.enumerated()), id: \.offset) { i, part in
                 switch part {
                 case .prose(let body):
-                    Lines(rows: body, face: face, lead: i == 0 ? lead : AttributedString())
+                    Lines(rows: body, face: face, lead: i == 0 ? lead : AttributedString(), live: live)
                 case .code(let lang, let body):
                     CodeCard(lang: lang, rows: body, face: face)
                 case .table(let body):
@@ -108,25 +130,6 @@ struct Blocks: View {
                 Thumbs(paths: images, height: 160)
             }
         }
-    }
-}
-
-struct CopyButton: View {
-    let text: String
-    @State private var copied = false
-
-    var body: some View {
-        Button {
-            Platform.copy(text)
-            copied = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-        } label: {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.faint)
-        }
-        .buttonStyle(.plain)
-        .help("Copy message")
     }
 }
 
@@ -185,37 +188,6 @@ struct Backdrop: View {
 }
 
 #if os(macOS)
-struct HoverArea: NSViewRepresentable {
-    let changed: (Bool) -> Void
-
-    final class Area: NSView {
-        var changed: ((Bool) -> Void)?
-
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            trackingAreas.forEach(removeTrackingArea)
-            addTrackingArea(NSTrackingArea(
-                rect: .zero,
-                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-                owner: self))
-        }
-
-        override func mouseEntered(with event: NSEvent) { changed?(true) }
-        override func mouseExited(with event: NSEvent) { changed?(false) }
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-
-    func makeNSView(context: Context) -> Area {
-        let area = Area()
-        area.changed = changed
-        return area
-    }
-
-    func updateNSView(_ area: Area, context: Context) {
-        area.changed = changed
-    }
-}
-
 struct Blur: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
