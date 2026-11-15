@@ -12,7 +12,7 @@ use crate::action::{Action, Core};
 use crate::control::Intent;
 use crate::scene::Scene;
 
-const FRAME: Duration = Duration::from_millis(16);
+const FRAME: Duration = Duration::from_millis(33);
 
 pub type Emit = Arc<dyn Fn(&str) + Send + Sync>;
 

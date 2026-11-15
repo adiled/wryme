@@ -45,6 +45,40 @@ func chunks(_ rows: [Row]) -> [Chunk] {
     }
 }
 
+struct Para: View, Equatable {
+    let row: Row?
+    let face: Typeface
+    var lead = AttributedString()
+
+    var body: some View {
+        Text(lead + (row.map { Theme.paint([$0], face: face) } ?? AttributedString()))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct Lines: View {
+    let rows: [Row]
+    let face: Typeface
+    var lead = AttributedString()
+
+    var body: some View {
+        let first = rows.firstIndex { !$0.blank }
+        LazyVStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                if row.blank {
+                    Color.clear.frame(height: Theme.size * 0.5)
+                } else {
+                    Para(row: row, face: face, lead: i == first ? lead : AttributedString()).equatable()
+                }
+            }
+            if first == nil && !lead.characters.isEmpty {
+                Para(row: nil, face: face, lead: lead).equatable()
+            }
+        }
+    }
+}
+
 struct Blocks: View {
     let lead: AttributedString
     let rows: [Row]
@@ -61,9 +95,7 @@ struct Blocks: View {
             ForEach(Array(parts.enumerated()), id: \.offset) { i, part in
                 switch part {
                 case .prose(let body):
-                    Text((i == 0 ? lead : AttributedString()) + Theme.paint(body, face: face))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Lines(rows: body, face: face, lead: i == 0 ? lead : AttributedString())
                 case .code(let lang, let body):
                     CodeCard(lang: lang, rows: body, face: face)
                 case .table(let body):

@@ -214,7 +214,7 @@ struct Transcript: View {
                         .foregroundStyle(Theme.faint)
                 }
                 ForEach(core.bubbles) { bubble in
-                    BubbleView(bubble: bubble, stage: stage, accent: accent)
+                    BubbleView(bubble: bubble, stage: stage, accent: accent).equatable()
                 }
             }
             .font(Theme.font(stage.font))
@@ -247,10 +247,15 @@ struct Snap: ScrollTargetBehavior {
     }
 }
 
-struct BubbleView: View {
+struct BubbleView: View, Equatable {
     let bubble: Bubble
     let stage: Stage
     let accent: Color
+
+    static func == (a: BubbleView, b: BubbleView) -> Bool {
+        a.bubble == b.bubble && a.accent == b.accent && a.stage.nametags == b.stage.nametags
+            && a.stage.font == b.stage.font && a.stage.marks == b.stage.marks
+    }
 
     private var ink: Color { Theme.color(bubble.ink) ?? Theme.fg }
     private var face: Typeface { stage.font }
@@ -297,7 +302,7 @@ struct BubbleView: View {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).italic().fontWeight(.bold).foregroundStyle(Theme.faint)
-                Text(Theme.paint(rows, face: face)).frame(maxWidth: .infinity, alignment: .leading)
+                Lines(rows: rows, face: face)
             }
             .padding(.top, after ? gap : 0)
         }

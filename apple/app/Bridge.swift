@@ -5,7 +5,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-struct Run: Decodable {
+struct Run: Decodable, Equatable {
     let t: String
     let fg: String?
     let bg: String?
@@ -18,7 +18,7 @@ struct Run: Decodable {
 
 enum Kind: String, Decodable { case prose, head, code, table }
 
-struct Row: Decodable {
+struct Row: Decodable, Equatable {
     let mono: Bool
     let kind: Kind
     let runs: [Run]
@@ -34,7 +34,7 @@ struct SyncPlace: Decodable {
     let pick: Int
 }
 
-struct Marks: Decodable {
+struct Marks: Decodable, Equatable {
     let brain: String
     let heart: String
 }
@@ -46,7 +46,7 @@ struct Bar: Decodable {
     let tool: String?
 }
 
-struct Bubble: Decodable, Identifiable {
+struct Bubble: Decodable, Equatable, Identifiable {
     let id: String
     let user: Bool
     let name: String
