@@ -92,6 +92,7 @@ struct Panel: View {
     private var editor: some View {
         #if os(iOS)
         TextField("", text: $core.fieldText, selection: $core.fieldSelection)
+            .onSubmit { core.sendField() }
         #else
         TextField("", text: $core.fieldText)
         #endif
