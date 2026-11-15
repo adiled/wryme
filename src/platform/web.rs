@@ -182,6 +182,20 @@ impl Stream for EventStream {
     }
 }
 
+pub fn can_pick_folders() -> bool {
+    js_sys::Reflect::has(&js_sys::global(), &"showDirectoryPicker".into()).unwrap_or(false)
+}
+
+pub fn typed(text: &str) -> impl Iterator<Item = Event> + '_ {
+    text.chars().map(|c| {
+        Event::Key(KeyEvent {
+            code: if c == '\n' { KeyCode::Enter } else { KeyCode::Char(c) },
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+        })
+    })
+}
+
 pub fn install_listeners(tx: &UnboundedSender<Event>) {
     let doc = match web_sys::window().and_then(|w| w.document()) {
         Some(d) => d,

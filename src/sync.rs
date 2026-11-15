@@ -31,9 +31,12 @@ impl Sync {
 }
 
 pub fn way() -> Option<Way> {
-    if cfg!(any(target_os = "ios", target_os = "android", target_arch = "wasm32")) {
+    if cfg!(any(target_os = "ios", target_os = "android")) {
         return Some(Way::Pick);
     }
+    #[cfg(target_arch = "wasm32")]
+    return crate::platform::web::can_pick_folders().then_some(Way::Pick);
+    #[cfg(not(target_arch = "wasm32"))]
     imp::linked().map(|_| Way::Link)
 }
 

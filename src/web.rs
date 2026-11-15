@@ -82,6 +82,15 @@ pub fn start() {
     );
     guest_note.forget();
 
+    let type_tx = tx.clone();
+    let typed = Closure::<dyn Fn(String)>::new(move |text: String| {
+        for ev in platform::web::typed(&text) {
+            let _ = type_tx.send(ev);
+        }
+    });
+    let _ = js_sys::Reflect::set(&js_sys::global(), &JsValue::from_str("wrymeType"), typed.as_ref());
+    typed.forget();
+
     let set_roster = Closure::<dyn Fn(String)>::new(move |roster: String| {
         crate::windows::set_roster(&roster);
     });
