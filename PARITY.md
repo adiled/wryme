@@ -32,6 +32,7 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 | Station search | type letters | type letters | search field |
 | Images | Ctrl-Y attaches the clipboard image, dropped files attach; listed on the input border; shown as a path | Cmd-V or Ctrl-Y, or drop; chips above the input; thumbnails | photo picker or Ctrl-Y; thumbnails |
 | Images in the browser | none (no files to point at) | | |
+| Book in the browser | none: no book tool, and `/cls` just clears the screen | | |
 | Tools | all | all | none that run programs (shell, explore, job check) |
 | Quit (Ctrl-C) | quits | quits | not offered |
 | Another window | run `wme` again | File › New Window starts its own `wme`; no tabs | one window |

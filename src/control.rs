@@ -152,6 +152,11 @@ fn cls(
         app.note("let the reply finish, or Esc, then /cls");
         return;
     }
+    if !crate::api::client_runs_tools() {
+        app.clear_screen();
+        app.note("cleared · the browser keeps no book");
+        return;
+    }
     let unfiled = app.engine.lock().map(|e| e.unfiled()).unwrap_or(false);
     if !unfiled {
         settle_cls(app);
