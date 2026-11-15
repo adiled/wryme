@@ -9,6 +9,7 @@ Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/
 - `src/scene.rs` describes everything any surface shows. Painters read only the scene, never `App`.
 - `src/action.rs` holds every shortcut with its scope and help text. The Help tab, terminal keys, Mac menus and key handling, and iPhone hardware-keyboard shortcuts all come from this one table.
 - `src/control.rs` is what core actions do.
+- `src/proword.rs` holds the prowords, the slash words like `/cls`. They are typed into any window and handled by the core, so every surface has them.
 
 ## Each surface implements
 

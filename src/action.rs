@@ -416,6 +416,11 @@ pub fn help() -> Vec<(String, String)> {
             out.push(("letters".into(), "search saved stations".into()));
         }
     }
+    out.push((String::new(), String::new()));
+    out.push(("Prowords:".into(), String::new()));
+    for spec in crate::proword::PROWORDS {
+        out.push((format!("/{}", spec.word), spec.about.into()));
+    }
     out
 }
 

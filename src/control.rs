@@ -82,6 +82,7 @@ fn interrupt(
         app.note("quiet");
         return;
     }
+    app.clearing = false;
     app.stop_voice();
     match in_flight.take() {
         Some(t) => {
@@ -118,6 +119,13 @@ fn submit(
             if text.is_empty() && images.is_empty() {
                 return;
             }
+            if let Some(word) = crate::proword::parse(&text) {
+                match word {
+                    Ok(crate::proword::Proword::Cls) => cls(app, client, tx, in_flight),
+                    Err(w) => app.note(format!("unknown proword /{w}")),
+                }
+                return;
+            }
             if !app.in_flight {
                 start_turn(app, client, tx, in_flight, text, images);
                 return;
@@ -131,6 +139,41 @@ fn submit(
         popup::Mode::SaveAs => popup::commit_save_as(app, &text),
         popup::Mode::DialEdit => popup::commit_dial_edit(app, &text),
         popup::Mode::Browse => {}
+    }
+}
+
+fn cls(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<Task>,
+) {
+    if app.in_flight {
+        app.note("let the reply finish, or Esc, then /cls");
+        return;
+    }
+    let unfiled = app.engine.lock().map(|e| e.unfiled()).unwrap_or(false);
+    if !unfiled {
+        settle_cls(app);
+        return;
+    }
+    if let Ok(mut engine) = app.engine.lock() {
+        engine.force_prod();
+    }
+    app.clearing = true;
+    app.note("filing this stretch into the book…");
+    launch(app, client, tx, in_flight);
+}
+
+pub(crate) fn settle_cls(app: &mut App) {
+    app.clearing = false;
+    if app.engine.lock().map(|e| e.unfiled()).unwrap_or(false) {
+        app.note("the book wasn't updated, so the screen stays; /cls to try again");
+        return;
+    }
+    match app.clear_screen() {
+        Some(topic) => app.note(format!("cleared · carrying on from \"{topic}\"")),
+        None => app.note("cleared"),
     }
 }
 
@@ -196,12 +239,21 @@ pub fn start_turn(
         tracing::info!("window start");
     }
     app.push_user(text, images);
+    app.note("");
+    launch(app, client, tx, in_flight);
+}
+
+fn launch(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<crate::platform::Task>,
+) {
     let _ = app.reservoir.lock().map(|mut r| r.turn_started());
     app.begin_assistant();
     app.stop_voice();
     app.unmute_voice();
     app.in_flight = true;
-    app.note("");
 
     let msgs = app.api_messages();
     let prev_id = app.last_response_id.clone();
@@ -240,26 +292,8 @@ pub fn start_guest_turn(
     note: crate::windows::Note,
 ) {
     app.push_guest(note);
-    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-    app.begin_assistant();
-    app.stop_voice();
-    app.unmute_voice();
-    app.in_flight = true;
     app.note("");
-
-    let msgs = app.api_messages();
-    let prev_id = app.last_response_id.clone();
-    let wire = app.wire_for_turn();
-    let shops = app.turn_shops();
-    let station = app.active_station.clone();
-    let client = client.clone();
-    let engine = app.engine.clone();
-    let tx = tx.clone();
-    *in_flight = Some(crate::platform::spawn(async move {
-        client
-            .stream_completion(shops, station, msgs, prev_id, wire, engine, tx)
-            .await;
-    }));
+    launch(app, client, tx, in_flight);
 }
 
 #[cfg(test)]
@@ -300,5 +334,52 @@ mod tests {
             .unwrap();
         assert_eq!(&dec[..8], b"\x89PNG\r\n\x1a\n");
         std::fs::remove_file(&path).ok();
+    }
+
+    fn window() -> (App, std::path::PathBuf) {
+        use crate::shop::Shop;
+        use crate::station::Station;
+        let dir = std::env::temp_dir().join(format!("wryme_cls_{}_{}", std::process::id(), crate::windows::mint()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = App::new(None, vec![Shop::demo()], vec![Station::demo()], Station::demo(), Shop::demo(), None);
+        app.engine = std::sync::Arc::new(std::sync::Mutex::new(crate::book::open_engine(&dir, "t").unwrap()));
+        (app, dir)
+    }
+
+    #[test]
+    fn cls_keeps_the_screen_until_the_stretch_is_filed() {
+        let (mut app, dir) = window();
+        app.push_user("let us plan the garden".into(), Vec::new());
+        assert!(app.engine.lock().unwrap().unfiled());
+        app.clearing = true;
+        settle_cls(&mut app);
+        assert_eq!(app.messages.len(), 1);
+        assert!(app.status.contains("wasn't updated"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cls_clears_and_carries_on_from_the_page_it_filed() {
+        let (mut app, dir) = window();
+        app.push_user("let us plan the garden".into(), Vec::new());
+        let filed = app
+            .engine
+            .lock()
+            .unwrap()
+            .deem(&crate::book::Bookmark { topic: "garden".into(), ..Default::default() })
+            .unwrap();
+        assert!(filed.contains("deemed rows"));
+        app.clearing = true;
+        settle_cls(&mut app);
+        assert!(app.messages.is_empty());
+        assert!(!app.clearing);
+        assert!(app.status.contains("carrying on from \"garden\""));
+        assert_eq!(app.engine.lock().unwrap().preamble().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_prowords_say_so_and_send_nothing() {
+        assert!(matches!(crate::proword::parse("/nope"), Some(Err(w)) if w == "nope"));
     }
 }

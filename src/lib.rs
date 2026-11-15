@@ -15,6 +15,7 @@ pub mod platform;
 pub mod popup;
 pub mod pictures;
 pub mod popup_ui;
+pub mod proword;
 #[cfg(feature = "reservoir")]
 pub mod reservoir;
 #[cfg(not(feature = "reservoir"))]
@@ -302,6 +303,9 @@ fn handle_stream_event(
         StreamEvent::Done => {
             app.finish_streaming();
             app.settle_wire();
+            if app.clearing {
+                crate::control::settle_cls(app);
+            }
             if app.voice_on && !app.voice_muted {
                 let tail = app.voice_buffer.trim().to_string();
                 app.voice_buffer.clear();

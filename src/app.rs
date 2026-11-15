@@ -67,6 +67,7 @@ pub struct App {
     pub status: String,
     pub awaiting: String,
     pub awaiting_images: Vec<String>,
+    pub clearing: bool,
     pub should_quit: bool,
     pub view_mode: ViewMode,
     pub last_response_id: Option<String>,
@@ -159,6 +160,7 @@ impl App {
             status: String::new(),
             awaiting: String::new(),
             awaiting_images: Vec::new(),
+            clearing: false,
             should_quit: false,
             view_mode: ViewMode::Page,
             last_response_id: None,
@@ -573,6 +575,18 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn clear_screen(&mut self) -> Option<String> {
+        self.messages.clear();
+        self.wire = Some(Vec::new());
+        self.wire_upto = 0;
+        self.wire_pending = None;
+        self.last_response_id = None;
+        self.usage_ctx = 0;
+        self.usage_cached = 0;
+        self.usage_out = 0;
+        self.engine.lock().ok()?.reopen_last()
     }
 
     pub fn forget_wire(&mut self) {

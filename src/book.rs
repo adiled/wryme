@@ -65,6 +65,7 @@ pub struct Book {
 pub struct Engine {
     pub book: Book,
     pub established: Vec<String>,
+    last_deemed: Option<String>,
     pending_prod: bool,
     prod_delivered_row: u64,
     last_lookup_row: u64,
@@ -120,6 +121,7 @@ pub fn open_engine(dir: &Path, window: &str) -> Result<Engine> {
     Ok(Engine {
         book,
         established: vec![],
+        last_deemed: None,
         pending_prod: false,
         last_lookup_row: 0,
         prod_delivered_row: 0,
@@ -206,9 +208,27 @@ impl Engine {
     }
 
     pub fn deem(&mut self, bookmark: &Bookmark) -> Result<String> {
+        let had = self.unfiled();
         let out = deem_span(&mut self.book, bookmark)?;
         self.pending_prod = false;
+        if had && !self.unfiled() {
+            self.last_deemed = Some(bookmark.topic.trim().to_string());
+        }
         Ok(out)
+    }
+
+    pub fn unfiled(&self) -> bool {
+        !self.book.mine.is_empty() || !self.book.pending.is_empty()
+    }
+
+    pub fn force_prod(&mut self) {
+        self.pending_prod = true;
+    }
+
+    pub fn reopen_last(&mut self) -> Option<String> {
+        let topic = self.last_deemed.clone()?;
+        self.establish(&topic);
+        Some(topic)
     }
 
     fn establish(&mut self, topic: &str) {
