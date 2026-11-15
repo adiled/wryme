@@ -291,8 +291,8 @@ mod imp {
     use std::path::PathBuf;
 
     fn dir() -> Option<PathBuf> {
-        if let Some(shared) = std::env::var_os("WRYME_CONFIG_DIR") {
-            return Some(PathBuf::from(shared));
+        if let Some(shared) = super::shared_dir() {
+            return Some(shared);
         }
         std::env::var("HOME").ok().map(|h| {
             PathBuf::from(h)
@@ -320,7 +320,7 @@ mod imp {
         let Some(dir) = dir() else {
             return "shops.toml".into();
         };
-        if std::env::var_os("WRYME_CONFIG_DIR").is_some() {
+        if super::shared_dir().is_some() {
             let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             return format!("shops.toml in the {name} folder");
         }
@@ -434,6 +434,17 @@ mod imp {
     pub fn can_write() -> bool {
         CONNECTED.with(|c| *c.borrow())
     }
+}
+
+static SHARED: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+pub fn share_dir(path: std::path::PathBuf) {
+    *SHARED.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+}
+
+pub fn shared_dir() -> Option<std::path::PathBuf> {
+    let set = SHARED.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    set.or_else(|| std::env::var_os("WRYME_CONFIG_DIR").map(std::path::PathBuf::from))
 }
 
 pub fn shops_text() -> Option<String> {

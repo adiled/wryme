@@ -65,6 +65,16 @@ pub unsafe extern "C" fn wryme_send(msg: *const c_char) {
     }
 }
 
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wryme_set_folder(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    let path = unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned();
+    wryme::config::share_dir(path.into());
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

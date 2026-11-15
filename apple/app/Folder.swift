@@ -65,7 +65,7 @@ enum Folder {
         chosen = url
         UserDefaults.standard.set(false, forKey: demo)
         Core.phone.needsFolder = false
-        setenv("WRYME_CONFIG_DIR", url.path, 1)
+        wryme_set_folder(url.path)
         DispatchQueue.global().async {
             fetch(url)
             DispatchQueue.main.async {

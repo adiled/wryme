@@ -38,8 +38,7 @@ pub fn way() -> Option<Way> {
 }
 
 pub fn place() -> String {
-    if let Some(dir) = std::env::var_os("WRYME_CONFIG_DIR") {
-        let dir = std::path::PathBuf::from(dir);
+    if let Some(dir) = crate::config::shared_dir() {
         if dir.to_string_lossy().contains("com~apple~CloudDocs") {
             return "iCloud Drive".into();
         }
@@ -113,7 +112,7 @@ mod imp {
     }
 
     fn drive() -> Option<PathBuf> {
-        if !cfg!(target_os = "macos") || std::env::var_os("WRYME_CONFIG_DIR").is_some() {
+        if !cfg!(target_os = "macos") || crate::config::shared_dir().is_some() {
             return None;
         }
         let docs = home()?
