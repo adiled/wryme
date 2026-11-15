@@ -17,10 +17,18 @@ struct Root: View {
         ZStack {
             Backdrop()
             if let fatal = core.fatal {
-                Text(fatal)
-                    .foregroundStyle(Theme.color("Red") ?? .red)
-                    .textSelection(.enabled)
-                    .padding(40)
+                VStack(spacing: 18) {
+                    Text(fatal)
+                        .foregroundStyle(Theme.color("Red") ?? .red)
+                        .textSelection(.enabled)
+                    #if os(iOS)
+                    Button("Try again") { Folder.retry() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Choose another folder") { Folder.change() }
+                        .foregroundStyle(Theme.faint)
+                    #endif
+                }
+                .padding(40)
             } else if let stage = core.stage {
                 Main(stage: stage)
             } else if core.needsFolder {

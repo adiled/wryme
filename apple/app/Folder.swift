@@ -22,7 +22,20 @@ enum Folder {
             Core.phone.needsFolder = true
             return
         }
+        if stale, let fresh = try? url.bookmarkData() {
+            defaults.set(fresh, forKey: mark)
+        }
         open(url)
+    }
+
+    static func retry() {
+        Core.phone.reset()
+        boot()
+    }
+
+    static func change() {
+        Core.phone.reset()
+        Core.phone.needsFolder = true
     }
 
     static func choose(_ url: URL) {

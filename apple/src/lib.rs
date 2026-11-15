@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString, c_char};
-use std::sync::{Arc, OnceLock};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::mpsc;
 use wryme::control::Intent;
@@ -7,13 +8,21 @@ use wryme::serve::Emit;
 
 type Callback = extern "C" fn(*const c_char);
 
-static INBOX: OnceLock<mpsc::UnboundedSender<Intent>> = OnceLock::new();
+static INBOX: Mutex<Option<mpsc::UnboundedSender<Intent>>> = Mutex::new(None);
+
+fn inbox() -> MutexGuard<'static, Option<mpsc::UnboundedSender<Intent>>> {
+    INBOX.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn wryme_start(callback: Callback) {
     let (tx, rx) = mpsc::unbounded_channel();
-    if INBOX.set(tx).is_err() {
-        return;
+    {
+        let mut inbox = inbox();
+        if inbox.as_ref().is_some_and(|t| !t.is_closed()) {
+            return;
+        }
+        *inbox = Some(tx);
     }
     let emit: Emit = Arc::new(move |line: &str| {
         if let Ok(line) = CString::new(line) {
@@ -22,14 +31,24 @@ pub extern "C" fn wryme_start(callback: Callback) {
     });
     std::thread::spawn(move || {
         let _sentry = wryme::instrument();
-        let ended = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(anyhow::Error::from)
-            .and_then(|rt| rt.block_on(wryme::serve::serve(emit.clone(), rx)));
+        let ended = catch_unwind(AssertUnwindSafe(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| rt.block_on(wryme::serve::serve(emit.clone(), rx)))
+        }));
         match ended {
-            Ok(()) => std::process::exit(0),
-            Err(e) => wryme::serve::fatal(&emit, &e),
+            Ok(Ok(())) => std::process::exit(0),
+            Ok(Err(e)) => wryme::serve::fatal(&emit, &e),
+            Err(panic) => {
+                let said = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown");
+                wryme::serve::fatal(&emit, &anyhow::anyhow!("wryme stopped: {said}"));
+            }
         }
     });
 }
@@ -41,7 +60,7 @@ pub unsafe extern "C" fn wryme_send(msg: *const c_char) {
         return;
     }
     let text = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
-    if let (Some(intent), Some(tx)) = (wryme::serve::parse(&text), INBOX.get()) {
+    if let (Some(intent), Some(tx)) = (wryme::serve::parse(&text), inbox().as_ref()) {
         let _ = tx.send(intent);
     }
 }
