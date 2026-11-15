@@ -251,6 +251,7 @@ struct BubbleView: View, Equatable {
     let bubble: Bubble
     let stage: Stage
     let accent: Color
+    @State private var hover = false
 
     static func == (a: BubbleView, b: BubbleView) -> Bool {
         a.bubble == b.bubble && a.accent == b.accent && a.stage.nametags == b.stage.nametags
@@ -270,6 +271,21 @@ struct BubbleView: View, Equatable {
         }
         .opacity(bubble.waiting ? 0.55 : 1)
         .textSelection(.enabled)
+        .onHover { hover = $0 }
+        #if os(iOS)
+        .contextMenu {
+            if !bubble.raw.isEmpty {
+                Button("Copy") { Platform.copy(bubble.raw) }
+            }
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var copy: some View {
+        if Platform.hovers, hover, !bubble.live, !bubble.raw.isEmpty {
+            CopyButton(text: bubble.raw).padding(.trailing, 10)
+        }
     }
 
     private var standout: some View {
@@ -287,6 +303,7 @@ struct BubbleView: View, Equatable {
                     Text(tool).fontWeight(.bold).foregroundStyle(accent)
                     Text("  ")
                 }
+                copy
                 Text(bubble.time).foregroundStyle(Theme.faint).monospacedDigit()
             }
             if hasHead {
@@ -358,6 +375,7 @@ struct BubbleView: View, Equatable {
                         Text(tool).fontWeight(.bold).foregroundStyle(accent).padding(.leading, 12)
                     }
                     if i == 0 {
+                        copy.padding(.leading, 12)
                         Text(bubble.waiting ? "waiting…" : bubble.time)
                             .foregroundStyle(Theme.faint)
                             .monospacedDigit()

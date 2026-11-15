@@ -111,6 +111,25 @@ struct Blocks: View {
     }
 }
 
+struct CopyButton: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            Platform.copy(text)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.faint)
+        }
+        .buttonStyle(.plain)
+        .help("Copy message")
+    }
+}
+
 struct CodeCard: View {
     let lang: String
     let rows: [Row]

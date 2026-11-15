@@ -63,6 +63,7 @@ pub struct Bubble {
     pub waiting: bool,
     pub live: bool,
     pub time: String,
+    pub raw: String,
     pub images: Vec<String>,
     pub orphan: bool,
     #[serde(serialize_with = "rows")]
@@ -226,6 +227,7 @@ pub fn bubble(id: String, msg: &Message, thinking_live: bool) -> Bubble {
         waiting: msg.waiting,
         live,
         time: msg.timestamp.clone(),
+        raw: msg.content.clone(),
         images: if msg.role == Role::User {
             msg.images.clone()
         } else {
@@ -820,5 +822,6 @@ mod tests {
         assert_eq!(v["mark"], USER_MARK);
         assert_eq!(v["reply"][0]["runs"][0]["t"], "hi");
         assert_eq!(v["reply"][0]["mono"], false);
+        assert_eq!(v["raw"], "hi");
     }
 }

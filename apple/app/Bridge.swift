@@ -60,6 +60,7 @@ struct Bubble: Decodable, Equatable, Identifiable {
     let waiting: Bool
     let live: Bool
     let time: String
+    let raw: String
     let images: [String]
     let orphan: Bool
     let reply: [Row]
