@@ -271,7 +271,9 @@ struct BubbleView: View, Equatable {
         }
         .opacity(bubble.waiting ? 0.55 : 1)
         .textSelection(.enabled)
-        .onHover { hover = $0 }
+        #if os(macOS)
+        .background(HoverArea { hover = $0 })
+        #endif
         #if os(iOS)
         .contextMenu {
             if !bubble.raw.isEmpty {

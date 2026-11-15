@@ -185,6 +185,37 @@ struct Backdrop: View {
 }
 
 #if os(macOS)
+struct HoverArea: NSViewRepresentable {
+    let changed: (Bool) -> Void
+
+    final class Area: NSView {
+        var changed: ((Bool) -> Void)?
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self))
+        }
+
+        override func mouseEntered(with event: NSEvent) { changed?(true) }
+        override func mouseExited(with event: NSEvent) { changed?(false) }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> Area {
+        let area = Area()
+        area.changed = changed
+        return area
+    }
+
+    func updateNSView(_ area: Area, context: Context) {
+        area.changed = changed
+    }
+}
+
 struct Blur: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
