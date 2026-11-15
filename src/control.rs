@@ -382,4 +382,23 @@ mod tests {
     fn unknown_prowords_say_so_and_send_nothing() {
         assert!(matches!(crate::proword::parse("/nope"), Some(Err(w)) if w == "nope"));
     }
+
+    #[test]
+    fn the_filing_reply_does_not_count_as_a_new_unfiled_turn() {
+        let (mut app, dir) = window();
+        app.push_user("eggs and oil balloons".into(), Vec::new());
+        app.clearing = true;
+        app.begin_assistant();
+        app.engine
+            .lock()
+            .unwrap()
+            .deem(&crate::book::Bookmark { topic: "egg rap".into(), ..Default::default() })
+            .unwrap();
+        app.append_to_last_assistant("Saved to egg rap.");
+        app.finish_streaming();
+        settle_cls(&mut app);
+        assert!(app.messages.is_empty(), "screen should clear: {}", app.status);
+        assert!(app.status.contains("carrying on from \"egg rap\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

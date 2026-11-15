@@ -523,6 +523,7 @@ impl App {
                 .collect::<Vec<_>>()
                 .join("\n");
             if !joined.is_empty()
+                && !self.clearing
                 && let Ok(mut e) = self.engine.lock()
             {
                 e.record_turn("assistant", &joined);
