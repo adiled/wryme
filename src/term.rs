@@ -32,7 +32,6 @@ pub struct View {
     pub tab_hits: Vec<(u16, u16, u16)>,
     seen: Option<(u64, ViewMode)>,
     seen_tab: Option<usize>,
-    seen_pick: Option<u64>,
 }
 
 pub struct Term<B: Backend> {
@@ -104,11 +103,6 @@ impl View {
             self.seen_tab = tab;
             self.sheet_scroll = 0;
         }
-        if self.seen_pick.is_some_and(|p| p != scene.sync.pick) {
-            #[cfg(target_arch = "wasm32")]
-            crate::web::pick_folder();
-        }
-        self.seen_pick = Some(scene.sync.pick);
         let field = scene.sheet.as_ref().and_then(|s| s.field.as_ref());
         match (field, self.field.is_some()) {
             (Some(f), false) => {
@@ -137,10 +131,6 @@ impl View {
                 }
                 Vec::new()
             }
-            #[cfg(target_arch = "wasm32")]
-            Event::GuestNote(note) => vec![Intent::Note(note)],
-            #[cfg(target_arch = "wasm32")]
-            Event::ReloadConfig => vec![Intent::Reload],
             _ => Vec::new(),
         }
     }

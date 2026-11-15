@@ -1,6 +1,6 @@
 # Parity
 
-One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/popup_ui.rs`), the browser (the same terminal surface on a web backend), and the Mac and iPhone apps (`apple/`).
+One core drives every surface: the terminal (`src/term.rs`, `src/ui.rs`, `src/popup_ui.rs`), the browser (`src/web.rs`: the terminal surface on a web backend, plus the folder picker and browser events), and the Mac and iPhone apps (`apple/`).
 
 Every Mac window is its own `wme --serve`, talking to the app over a pipe (`src/serve.rs`), so windows behave exactly like separate terminal windows: their own id, notes between them, Ctrl-C closes one. The iPhone runs its one window inside the app through the same code.
 
