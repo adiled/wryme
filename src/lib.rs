@@ -93,8 +93,8 @@ pub trait Surface {
     fn feed(&mut self, ev: Self::Event, scene: &Scene) -> Vec<Intent>;
 }
 
-async fn reload(app: &mut App) {
-    match boot(None).await {
+fn reconfigure(app: &mut App, booted: Result<Boot>) {
+    match booted {
         Ok(b) => {
             let unavailable = station::unavailable_note(&b.stations, &b.shops);
             app.reconfigure(
@@ -143,6 +143,7 @@ where
         app.note(note);
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
+    let (booted_tx, mut booted_rx) = mpsc::unbounded_channel::<Result<Boot>>();
     let mut in_flight_task: Option<Task> = None;
     let window_id = app.window_id.clone();
     crate::windows::register(&window_id);
@@ -168,15 +169,23 @@ where
 
         tokio::select! {
             maybe_ev = events.next() => {
-                if let Some(ev) = maybe_ev {
-                    for intent in surface.feed(ev, &scene) {
-                        match intent {
-                            Intent::Reload => reload(&mut app).await,
-                            intent => control::apply(intent, &mut app, &client, &tx, &mut in_flight_task),
+                let intents = match maybe_ev {
+                    Some(ev) => surface.feed(ev, &scene),
+                    None => vec![Intent::Act(crate::action::Action::Core(crate::action::Core::Quit))],
+                };
+                for intent in intents {
+                    match intent {
+                        Intent::Reload => {
+                            let booted_tx = booted_tx.clone();
+                            platform::spawn(async move {
+                                let _ = booted_tx.send(boot(None).await);
+                            });
                         }
+                        intent => control::apply(intent, &mut app, &client, &tx, &mut in_flight_task),
                     }
                 }
             }
+            Some(booted) = booted_rx.recv() => reconfigure(&mut app, booted),
             Some(stream_ev) = rx.recv() => {
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
@@ -195,22 +204,7 @@ where
                     }
                 }
                 if (jobs::has_due() || crate::windows::has_due()) && !app.in_flight {
-                    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-                    app.begin_assistant();
-                    app.in_flight = true;
-                    let msgs = app.api_messages();
-                    let prev_id = app.last_response_id.clone();
-                    let wire = app.wire_for_turn();
-                    let shops = app.turn_shops();
-                    let station = app.active_station.clone();
-                    let client = client.clone();
-                    let engine = app.engine.clone();
-                    let tx = tx.clone();
-                    in_flight_task = Some(platform::spawn(async move {
-                        client
-                            .stream_completion(shops, station, msgs, prev_id, wire, engine, tx)
-                            .await;
-                    }));
+                    control::begin(&mut app, &client, &tx, &mut in_flight_task);
                 }
             }
         }

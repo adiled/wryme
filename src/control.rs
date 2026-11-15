@@ -271,10 +271,19 @@ fn launch(
     tx: &mpsc::UnboundedSender<StreamEvent>,
     in_flight: &mut Option<crate::platform::Task>,
 ) {
-    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-    app.begin_assistant();
     app.stop_voice();
     app.unmute_voice();
+    begin(app, client, tx, in_flight);
+}
+
+pub(crate) fn begin(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    in_flight: &mut Option<crate::platform::Task>,
+) {
+    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
+    app.begin_assistant();
     app.in_flight = true;
 
     let msgs = app.api_messages();
