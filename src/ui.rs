@@ -660,12 +660,13 @@ mod tests {
             current_tool: None,
             turn_id: 1,
             tool_events: Vec::new(),
+            felt: Default::default(),
         }
     }
 
     fn paint(msg: &Message, width: u16, mode: NametagMode) -> (usize, Vec<Line<'static>>) {
         let mut out = Vec::new();
-        let b = scene::bubble("0".into(), msg, false);
+        let b = scene::bubble("0".into(), msg, false, crate::config::Feelings::Full);
         let reply_rows = push_message(&mut out, &b, width, Color::Cyan, mode);
         (reply_rows, out)
     }

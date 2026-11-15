@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 
 use crate::action::Scope;
 use crate::app::{App, Message, Phase, Role, ViewMode};
-use crate::config::{NametagMode, Typeface};
+use crate::config::{Feelings, NametagMode, Typeface};
 use crate::popup::{self, Tab};
 use crate::shop::Protocol;
 
@@ -185,14 +185,54 @@ fn plain(text: &str, style: Style, live: bool) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn thought(text: &str, live: bool) -> Vec<Line<'static>> {
+fn latest(text: &str) -> String {
+    let t = text.trim_end();
+    let cut = t
+        .char_indices()
+        .filter(|&(i, c)| matches!(c, '.' | '!' | '?' | '\n') && i + c.len_utf8() < t.len())
+        .map(|(i, c)| i + c.len_utf8())
+        .next_back()
+        .unwrap_or(0);
+    let tail = t[cut..].trim();
+    if tail.is_empty() { t.to_string() } else { tail.to_string() }
+}
+
+fn took(secs: f64) -> String {
+    let secs = secs.max(1.0).round() as u64;
+    match secs {
+        0..=59 => format!("{secs}s"),
+        _ => format!("{}m {}s", secs / 60, secs % 60),
+    }
+}
+
+fn feel(
+    text: &str,
+    span: Option<(f64, f64)>,
+    live: bool,
+    feelings: Feelings,
+    words: (&str, &str),
+) -> Vec<Line<'static>> {
     if text.is_empty() {
         return Vec::new();
     }
-    plain(text, dim().add_modifier(Modifier::ITALIC), live)
+    let style = dim().add_modifier(Modifier::ITALIC);
+    match feelings {
+        Feelings::Hidden => Vec::new(),
+        Feelings::Full => plain(text, style, live),
+        Feelings::Latest => plain(&latest(text), style, live),
+        Feelings::Hint => {
+            let (since, until) = span.unwrap_or_default();
+            let end = if live { crate::platform::unix_secs() } else { until };
+            let line = match live {
+                true => format!("{}… {}", words.0, took(end - since)),
+                false => format!("{} for {}", words.1, took(end - since)),
+            };
+            vec![Line::from(Span::styled(line, style))]
+        }
+    }
 }
 
-pub fn bubble(id: String, msg: &Message, thinking_live: bool) -> Bubble {
+pub fn bubble(id: String, msg: &Message, thinking_live: bool, feelings: Feelings) -> Bubble {
     let replied = !msg.content.is_empty();
     let brained = !msg.brain.is_empty();
     let hearted = !msg.heart.is_empty();
@@ -235,8 +275,14 @@ pub fn bubble(id: String, msg: &Message, thinking_live: bool) -> Bubble {
         },
         orphan: live && !replied && !brained && !hearted,
         reply,
-        brain: thought(&msg.brain, live && !replied),
-        heart: thought(&msg.heart, live && !replied && !brained),
+        brain: feel(&msg.brain, msg.felt.brain, live && !replied, feelings, ("thinking", "thought")),
+        heart: feel(
+            &msg.heart,
+            msg.felt.heart,
+            live && !replied && !brained,
+            feelings,
+            ("pumping", "pumped"),
+        ),
     }
 }
 
@@ -255,6 +301,7 @@ fn awaiting(app: &App) -> Option<Message> {
         current_tool: None,
         turn_id: 0,
         tool_events: Vec::new(),
+        felt: Default::default(),
     })
 }
 
@@ -277,14 +324,14 @@ pub fn scope(app: &App) -> Scope {
 pub fn build(app: &App) -> Scene {
     let live = thinking_turn(&app.messages);
     let bubbles = awaiting(app)
-        .map(|m| bubble(AWAITING.to_string(), &m, false))
+        .map(|m| bubble(AWAITING.to_string(), &m, false, app.feelings))
         .into_iter()
         .chain(
             app.messages
                 .iter()
                 .enumerate()
                 .rev()
-                .map(|(i, m)| bubble(i.to_string(), m, live == Some(m.turn_id))),
+                .map(|(i, m)| bubble(i.to_string(), m, live == Some(m.turn_id), app.feelings)),
         )
         .collect();
     Scene {
@@ -664,6 +711,11 @@ fn sheet_row(app: &App, row: &popup::Row, style: Style) -> Line<'static> {
             strong(format!("  {}", app.nametags.name()), accent),
         ),
         popup::Row::PrefSync => pair(style, "sync", strong(format!("  {}", app.sync.place), accent)),
+        popup::Row::PrefFeelings => pair(
+            style,
+            "feelings",
+            strong(format!("  {}", app.feelings.name()), accent),
+        ),
         popup::Row::PrefFont => pair(
             style,
             "font",
@@ -755,6 +807,7 @@ mod tests {
             current_tool: None,
             turn_id: 1,
             tool_events: Vec::new(),
+            felt: Default::default(),
         }
     }
 
@@ -815,7 +868,7 @@ mod tests {
 
     #[test]
     fn bubble_wire_carries_styles_and_marks() {
-        let b = bubble("3".into(), &message(Role::User), false);
+        let b = bubble("3".into(), &message(Role::User), false, Feelings::Full);
         let v = serde_json::to_value(&b).unwrap();
         assert_eq!(v["id"], "3");
         assert_eq!(v["ink"], "Green");
@@ -823,5 +876,28 @@ mod tests {
         assert_eq!(v["reply"][0]["runs"][0]["t"], "hi");
         assert_eq!(v["reply"][0]["mono"], false);
         assert_eq!(v["raw"], "hi");
+    }
+
+    #[test]
+    fn feelings_shape_the_thinking() {
+        let msg = Message {
+            brain: "First I check prices. Then suppliers. Then I compare".into(),
+            felt: crate::app::Felt { brain: Some((100.0, 112.4)), heart: None },
+            ..message(Role::Assistant)
+        };
+        let text = |f| {
+            bubble("1".into(), &msg, false, f)
+                .brain
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(text(Feelings::Hidden), "");
+        assert_eq!(text(Feelings::Hint), "thought for 12s");
+        assert_eq!(text(Feelings::Latest), "Then I compare");
+        assert!(text(Feelings::Full).starts_with("First I check prices."));
+        assert_eq!(latest("One. Two!\nThree?"), "Three?");
+        assert_eq!(took(75.0), "1m 15s");
     }
 }

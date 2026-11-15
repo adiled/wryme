@@ -37,6 +37,20 @@ pub struct ToolEvent {
     pub result: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Felt {
+    pub brain: Option<(f64, f64)>,
+    pub heart: Option<(f64, f64)>,
+}
+
+fn felt_now(span: &mut Option<(f64, f64)>) {
+    let now = crate::platform::unix_secs();
+    match span {
+        Some((_, end)) => *end = now,
+        None => *span = Some((now, now)),
+    }
+}
+
 #[derive(Debug)]
 pub struct Message {
     pub role: Role,
@@ -52,6 +66,7 @@ pub struct Message {
     pub current_tool: Option<String>,
     pub turn_id: u64,
     pub tool_events: Vec<ToolEvent>,
+    pub felt: Felt,
 }
 
 fn now_hhmm() -> String {
@@ -84,6 +99,7 @@ pub struct App {
     pub accent: ratatui::style::Color,
     pub nametags: crate::config::NametagMode,
     pub typeface: crate::config::Typeface,
+    pub feelings: crate::config::Feelings,
     pub sync: crate::sync::Sync,
     pub shops: Vec<Shop>,
     pub stations: Vec<Station>,
@@ -177,6 +193,7 @@ impl App {
             accent: crate::config::accent_pref(),
             nametags: crate::config::nametags_pref(),
             typeface: crate::config::typeface_pref(),
+            feelings: crate::config::feelings_pref(),
             sync: crate::sync::Sync::now(),
             shops,
             stations,
@@ -224,6 +241,7 @@ impl App {
         self.accent = crate::config::accent_pref();
         self.nametags = crate::config::nametags_pref();
         self.typeface = crate::config::typeface_pref();
+        self.feelings = crate::config::feelings_pref();
         self.sync.refresh();
         self.last_response_id = None;
         self.forget_wire();
@@ -330,6 +348,7 @@ impl App {
             current_tool: None,
             turn_id: 0,
             tool_events: Vec::new(),
+            felt: Felt::default(),
         });
         if let Some(last) = self.messages.last()
             && last.role == Role::User
@@ -366,6 +385,7 @@ impl App {
             current_tool: None,
             turn_id: 0,
             tool_events: Vec::new(),
+            felt: Felt::default(),
         });
     }
 
@@ -391,6 +411,7 @@ impl App {
             current_tool: None,
             turn_id,
             tool_events: Vec::new(),
+            felt: Felt::default(),
         }
     }
 
@@ -442,6 +463,7 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.turn_id == tid)
         {
             m.brain.push_str(delta);
+            felt_now(&mut m.felt.brain);
         }
         if let Some(m) = self.streaming_assistant() {
             m.phase = Phase::Thinking;
@@ -460,6 +482,7 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.turn_id == tid)
         {
             m.heart.push_str(delta);
+            felt_now(&mut m.felt.heart);
         }
         if let Some(m) = self.streaming_assistant() {
             m.phase = Phase::Thinking;

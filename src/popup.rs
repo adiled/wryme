@@ -59,6 +59,7 @@ pub enum Row {
     PrefAccent,
     PrefNametags,
     PrefFont,
+    PrefFeelings,
     PrefSync,
     Blank,
 }
@@ -114,6 +115,7 @@ fn pref_rows(app: &App) -> Vec<Row> {
         Row::PrefView,
         Row::PrefAccent,
         Row::PrefNametags,
+        Row::PrefFeelings,
         Row::PrefFont,
     ];
     if app.sync.way.is_some() {
@@ -279,6 +281,7 @@ pub fn adjust(app: &mut App, delta: i32) {
         Some(Row::PrefAccent) => cycle_accent(app, delta),
         Some(Row::PrefNametags) => cycle_nametags(app, delta),
         Some(Row::PrefFont) => cycle_typeface(app, delta),
+        Some(Row::PrefFeelings) => cycle_feelings(app, delta),
         Some(Row::PrefSync) => sync(app),
         _ => {}
     }
@@ -324,6 +327,7 @@ fn activate_row(app: &mut App, row: Row) {
         Row::PrefAccent => cycle_accent(app, 1),
         Row::PrefNametags => cycle_nametags(app, 1),
         Row::PrefFont => cycle_typeface(app, 1),
+        Row::PrefFeelings => cycle_feelings(app, 1),
         Row::PrefSync => sync(app),
         _ => {}
     }
@@ -374,6 +378,16 @@ fn sync(app: &mut App) {
         }
         None => {}
     }
+}
+
+fn cycle_feelings(app: &mut App, delta: i32) {
+    let all = crate::config::FEELINGS;
+    let n = all.len() as i32;
+    let cur = all.iter().position(|(_, f)| *f == app.feelings).unwrap_or(0) as i32;
+    let (name, feelings) = all[(cur + delta).rem_euclid(n) as usize];
+    app.feelings = feelings;
+    let _ = crate::config::write_feelings(feelings);
+    app.note(format!("feelings: {name}"));
 }
 
 fn cycle_typeface(app: &mut App, delta: i32) {

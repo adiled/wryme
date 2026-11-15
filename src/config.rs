@@ -176,6 +176,41 @@ pub fn write_typeface(face: Typeface) -> Result<()> {
     write_pref("font", face.name())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feelings {
+    Hidden,
+    Hint,
+    Latest,
+    Full,
+}
+
+pub const FEELINGS: &[(&str, Feelings)] = &[
+    ("hidden", Feelings::Hidden),
+    ("hint", Feelings::Hint),
+    ("latest", Feelings::Latest),
+    ("full", Feelings::Full),
+];
+
+impl Feelings {
+    pub fn name(self) -> &'static str {
+        FEELINGS.iter().find(|(_, f)| *f == self).map_or("full", |(n, _)| *n)
+    }
+}
+
+pub fn feelings_pref() -> Feelings {
+    let name = prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("feelings")?.as_str().map(String::from));
+    FEELINGS
+        .iter()
+        .find(|(n, _)| Some(*n) == name.as_deref())
+        .map_or(Feelings::Full, |(_, f)| *f)
+}
+
+pub fn write_feelings(feelings: Feelings) -> Result<()> {
+    write_pref("feelings", feelings.name())
+}
+
 pub fn host_pref() -> Option<String> {
     prefs_text()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -205,6 +240,14 @@ mod tests {
         let after: serde_json::Value =
             serde_json::from_str(&merged_prefs(Some("not json"), "nametags", "inlined")).unwrap();
         assert_eq!(after, serde_json::json!({ "nametags": "inlined" }));
+    }
+
+    #[test]
+    fn feelings_names_round_trip() {
+        for (name, feelings) in FEELINGS {
+            assert_eq!(feelings.name(), *name);
+        }
+        assert_eq!(FEELINGS[0], ("hidden", Feelings::Hidden));
     }
 
     #[test]
