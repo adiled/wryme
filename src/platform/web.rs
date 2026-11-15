@@ -9,7 +9,7 @@ use futures_util::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{ClipboardEvent, KeyboardEvent, MouseEvent as WebMouseEvent, WheelEvent};
+use web_sys::{ClipboardEvent, KeyboardEvent, MouseEvent as WebMouseEvent, TouchEvent, WheelEvent};
 
 pub const TERM_ID: &str = "wryme-term";
 
@@ -257,6 +257,49 @@ pub fn install_listeners(tx: &UnboundedSender<Event>) {
         );
     }
     on_wheel.forget();
+
+    if let Some(term) = doc.get_element_by_id(TERM_ID) {
+        let finger = std::rc::Rc::new(std::cell::Cell::new(None::<(f64, f64)>));
+        let at = |ev: &TouchEvent| ev.touches().get(0).map(|t| f64::from(t.client_y()));
+        let start = finger.clone();
+        let on_start: Closure<dyn FnMut(TouchEvent)> =
+            Closure::new(move |ev: TouchEvent| start.set(at(&ev).map(|y| (y, 0.0))));
+        let _ = term.add_event_listener_with_callback("touchstart", on_start.as_ref().unchecked_ref());
+        on_start.forget();
+
+        let swipe_tx = tx.clone();
+        let step = metrics(&doc).1 * 2.0;
+        let on_move: Closure<dyn FnMut(TouchEvent)> = Closure::new(move |ev: TouchEvent| {
+            ev.prevent_default();
+            let (Some((was, mut swiped)), Some(now)) = (finger.get(), at(&ev)) else {
+                return;
+            };
+            swiped += was - now;
+            while swiped.abs() >= step {
+                let kind = if swiped > 0.0 {
+                    MouseEventKind::ScrollDown
+                } else {
+                    MouseEventKind::ScrollUp
+                };
+                swiped -= step.copysign(swiped);
+                let _ = swipe_tx.send(Event::Mouse(MouseEvent {
+                    kind,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                }));
+            }
+            finger.set(Some((now, swiped)));
+        });
+        let opts = web_sys::AddEventListenerOptions::new();
+        opts.set_passive(false);
+        let _ = term.add_event_listener_with_callback_and_add_event_listener_options(
+            "touchmove",
+            on_move.as_ref().unchecked_ref(),
+            &opts,
+        );
+        on_move.forget();
+    }
 
     let paste_tx = tx.clone();
     let on_paste: Closure<dyn FnMut(ClipboardEvent)> = Closure::new(move |ev: ClipboardEvent| {
