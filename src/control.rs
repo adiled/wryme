@@ -158,7 +158,7 @@ fn cls(
         return;
     }
     if let Ok(mut engine) = app.engine.lock() {
-        engine.force_prod();
+        engine.demand_filing();
     }
     app.clearing = true;
     app.note("filing this stretch into the book…");
@@ -168,7 +168,7 @@ fn cls(
 pub(crate) fn settle_cls(app: &mut App) {
     app.clearing = false;
     if app.engine.lock().map(|e| e.unfiled()).unwrap_or(false) {
-        app.note("the book wasn't updated, so the screen stays; /cls to try again");
+        app.note("nothing was filed in the book, so the screen stays; /cls to try again");
         return;
     }
     match app.clear_screen() {
@@ -354,7 +354,7 @@ mod tests {
         app.clearing = true;
         settle_cls(&mut app);
         assert_eq!(app.messages.len(), 1);
-        assert!(app.status.contains("wasn't updated"));
+        assert!(app.status.contains("nothing was filed"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

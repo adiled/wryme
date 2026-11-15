@@ -67,6 +67,7 @@ pub struct Engine {
     pub established: Vec<String>,
     last_deemed: Option<String>,
     pending_prod: bool,
+    demanding: bool,
     prod_delivered_row: u64,
     last_lookup_row: u64,
 }
@@ -115,6 +116,13 @@ mod term {
 
 pub const FIND_SHOW: usize = 6;
 
+const DEMAND: &str = "\n[bookkeeping] /cls: this conversation is about to leave your \
+context. Whatever is not filed in the book now is lost to you. Call the `book` tool with \
+action \"deem\" before anything else: choose the page this conversation belongs to (an \
+existing one if it fits, otherwise a new topic) and write its tags, people, facts, plans and \
+open threads in full, because afterwards you carry on from that page alone. Then reply with \
+one short line naming the page.";
+
 pub fn open_engine(dir: &Path, window: &str) -> Result<Engine> {
     let mut book = open_book(dir)?;
     book.window = window.to_string();
@@ -122,6 +130,7 @@ pub fn open_engine(dir: &Path, window: &str) -> Result<Engine> {
         book,
         established: vec![],
         last_deemed: None,
+        demanding: false,
         pending_prod: false,
         last_lookup_row: 0,
         prod_delivered_row: 0,
@@ -143,6 +152,9 @@ impl Engine {
         }
         self.pending_prod = false;
         self.prod_delivered_row = self.book.next_row;
+        if std::mem::take(&mut self.demanding) {
+            return Some(DEMAND.to_string());
+        }
         Some(
             "\n[bookkeeping] This stretch of conversation has accumulated \
              enough shape to be written into the book. Look back over it and \
@@ -221,8 +233,9 @@ impl Engine {
         !self.book.mine.is_empty() || !self.book.pending.is_empty()
     }
 
-    pub fn force_prod(&mut self) {
+    pub fn demand_filing(&mut self) {
         self.pending_prod = true;
+        self.demanding = true;
     }
 
     pub fn reopen_last(&mut self) -> Option<String> {
@@ -1387,6 +1400,19 @@ mod tests {
         assert_eq!(rows[0].window, "");
         assert_eq!(rows[1].row_id, 42);
         assert_eq!(rows[1].window, "aaaa");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cls_demands_filing_once_then_the_gentle_prod_returns() {
+        let dir = tmpdir("demand");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = open_engine(&dir, "w1").unwrap();
+        e.record_turn("user", "plan the garden");
+        e.demand_filing();
+        let first = e.take_prod().unwrap();
+        assert!(first.contains("/cls") && first.contains("lost to you") && first.contains("deem"));
+        assert_eq!(e.take_prod(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
