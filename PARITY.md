@@ -54,4 +54,4 @@ With sync on, a Mac writes its network name (`<name>.local`) as `host` in prefs.
 
 ## Checks
 
-`cargo test --lib` · `cargo test -p wryme-apple` · `sh apple/build.sh mac` · `sh apple/build.sh ios-sim`
+`cargo test --lib` · `cargo test -p wryme-apple` · `sh apple/build.sh mac` · `sh apple/build.sh ios-sim`. CI runs all of them on every PR (`.github/workflows/checks.yml`).

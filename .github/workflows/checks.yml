@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --lib --quiet
+      - run: cargo clippy --quiet --all-targets -- -D warnings
+      - run: cargo check -p wryme-web --target wasm32-unknown-unknown --quiet
+
+  apple:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p wryme-apple --quiet
+      - run: sh apple/build.sh mac
+      - run: sh apple/build.sh ios-sim

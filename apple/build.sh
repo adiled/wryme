@@ -5,8 +5,14 @@ cd "$(dirname "$0")/.."
 TARGET="${1:-mac}"
 PROFILE="${2:-release}"
 export CARGO_TARGET_DIR=target/apple
-FLAG=""
-[ "$PROFILE" = release ] && FLAG="--release"
+case "$PROFILE" in
+release) FLAG="--release" OPT="-O" ;;
+debug) FLAG="" OPT="-Onone" ;;
+*)
+    echo "usage: apple/build.sh [mac|ios-sim] [release|debug]" >&2
+    exit 2
+    ;;
+esac
 
 case "$TARGET" in
 mac)
@@ -57,7 +63,7 @@ else
     /usr/libexec/PlistBuddy -c "Merge $CARGO_TARGET_DIR/icon.plist" "$PLIST" > /dev/null
 fi
 
-xcrun --sdk "$SDK" swiftc -O -swift-version 5 -parse-as-library \
+xcrun --sdk "$SDK" swiftc $OPT -swift-version 5 -parse-as-library \
     -target "$SWIFT_TARGET" \
     -import-objc-header apple/wryme.h \
     apple/app/*.swift \
