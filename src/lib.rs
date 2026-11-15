@@ -171,7 +171,7 @@ where
             maybe_ev = events.next() => {
                 let intents = match maybe_ev {
                     Some(ev) => surface.feed(ev, &scene),
-                    None => vec![Intent::Act(crate::action::Action::Core(crate::action::Core::Quit))],
+                    None => vec![Intent::Do(crate::action::Core::Quit)],
                 };
                 for intent in intents {
                     match intent {
@@ -216,7 +216,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_stream_event(
     stream_ev: StreamEvent,
     app: &mut App,

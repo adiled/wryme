@@ -277,7 +277,7 @@ pub fn adjust(app: &mut App, delta: i32) {
             }
         }
         Some(Row::PrefVoice) => toggle_voice(app),
-        Some(Row::PrefView) => crate::control::toggle_view_mode(app),
+        Some(Row::PrefView) => toggle_view_mode(app),
         Some(Row::PrefAccent) => cycle_accent(app, delta),
         Some(Row::PrefNametags) => cycle_nametags(app, delta),
         Some(Row::PrefFont) => cycle_typeface(app, delta),
@@ -323,7 +323,7 @@ fn activate_row(app: &mut App, row: Row) {
             adjust(app, 1);
         }
         Row::PrefVoice => toggle_voice(app),
-        Row::PrefView => crate::control::toggle_view_mode(app),
+        Row::PrefView => toggle_view_mode(app),
         Row::PrefAccent => cycle_accent(app, 1),
         Row::PrefNametags => cycle_nametags(app, 1),
         Row::PrefFont => cycle_typeface(app, 1),
@@ -501,7 +501,7 @@ pub fn commit_save_as(app: &mut App, text: &str) {
 
 pub fn commit_update(app: &mut App) {
     let Some(origin) = app.active_origin.clone() else {
-        app.note("nothing to update; this is an untitled session");
+        app.note("nothing to update; this is an untitled station");
         return;
     };
     if !crate::config::can_write() {
@@ -851,3 +851,14 @@ fn window_label(w: WindowMode) -> &'static str {
         WindowMode::Warm => "warm",
     }
 }
+pub(crate) fn toggle_view_mode(app: &mut App) {
+    app.view_mode = match app.view_mode {
+        crate::app::ViewMode::Page => crate::app::ViewMode::Scroll,
+        crate::app::ViewMode::Scroll => crate::app::ViewMode::Page,
+    };
+    app.note(match app.view_mode {
+        crate::app::ViewMode::Page => "view: page",
+        crate::app::ViewMode::Scroll => "view: scroll",
+    });
+}
+

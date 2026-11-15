@@ -43,13 +43,16 @@ pub fn render(content: &str, append_cursor: bool) -> Vec<Row> {
     let text = tui_markdown::from_str_with_options(&content, &Options::new(Sheet));
     let mut out = rows(text.lines.into_iter().map(line_to_static));
     if append_cursor {
-        let cursor = Span::styled("▌", Style::default().fg(Color::DarkGray));
         match out.last_mut() {
-            Some(last) => last.line.spans.push(cursor),
-            None => out.push(Row::prose(Line::from(cursor))),
+            Some(last) => last.line.spans.push(cursor()),
+            None => out.push(Row::prose(Line::from(cursor()))),
         }
     }
     out
+}
+
+pub fn cursor() -> Span<'static> {
+    Span::styled("▌", Style::default().fg(Color::DarkGray))
 }
 
 fn rows(mut lines: impl Iterator<Item = Line<'static>>) -> Vec<Row> {

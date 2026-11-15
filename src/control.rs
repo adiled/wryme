@@ -1,13 +1,13 @@
 use tokio::sync::mpsc;
 
-use crate::action::{Action, Core};
+use crate::action::Core;
 use crate::api::{Client, StreamEvent};
-use crate::app::{App, ViewMode};
+use crate::app::App;
 use crate::platform::Task;
 use crate::popup;
 
 pub enum Intent {
-    Act(Action),
+    Do(Core),
     Submit(String, Vec<String>),
     Search(char),
     Find(String),
@@ -44,8 +44,8 @@ pub fn apply(
     in_flight: &mut Option<Task>,
 ) {
     match intent {
-        Intent::Act(Action::Core(c)) => core(c, app, client, tx, in_flight),
-        Intent::Act(Action::Edit(_) | Action::Pane(_)) | Intent::Reload => {}
+        Intent::Do(c) => core(c, app, client, tx, in_flight),
+        Intent::Reload => {}
         Intent::Submit(text, images) => submit(text, images, app, client, tx, in_flight),
         Intent::Search(c) => popup::type_search(app, c),
         Intent::Find(text) => popup::set_search(app, text),
@@ -75,7 +75,7 @@ fn core(
         Core::Help => popup::open_help(app),
         Core::Voice => popup::toggle_voice(app),
         Core::Settings => popup::toggle(app),
-        Core::ViewMode => toggle_view_mode(app),
+        Core::ViewMode => popup::toggle_view_mode(app),
         Core::Interrupt => interrupt(app, client, tx, in_flight),
         Core::Close => popup::close(app),
         Core::Cancel => popup::cancel_field(app),
@@ -202,17 +202,6 @@ pub(crate) fn settle_cls(app: &mut App) {
         Some(topic) => app.note(format!("cleared · carrying on from \"{topic}\"")),
         None => app.note("cleared"),
     }
-}
-
-pub(crate) fn toggle_view_mode(app: &mut App) {
-    app.view_mode = match app.view_mode {
-        ViewMode::Page => ViewMode::Scroll,
-        ViewMode::Scroll => ViewMode::Page,
-    };
-    app.note(match app.view_mode {
-        ViewMode::Page => "view: page",
-        ViewMode::Scroll => "view: scroll",
-    });
 }
 
 fn attached_images(text: &str) -> Vec<String> {

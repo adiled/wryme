@@ -188,7 +188,7 @@ impl View {
     fn act(&mut self, action: Action, scene: &Scene) -> Vec<Intent> {
         match action {
             Action::Core(Core::Interrupt) if self.selection.take().is_some() => Vec::new(),
-            Action::Core(_) => vec![Intent::Act(action)],
+            Action::Core(c) => vec![Intent::Do(c)],
             Action::Edit(e) => self.edit(e, scene.scope),
             Action::Pane(p) => self.pane(p, scene),
         }

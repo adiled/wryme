@@ -12,6 +12,13 @@ enum Chunk {
     case table([Row])
 }
 
+extension Chunk {
+    var prose: Bool {
+        if case .prose = self { return true }
+        return false
+    }
+}
+
 extension Row {
     var blank: Bool { runs.allSatisfy { $0.t.trimmingCharacters(in: .whitespaces).isEmpty } }
     var text: String { runs.map(\.t).joined() }
@@ -107,8 +114,7 @@ struct Blocks: View {
     var body: some View {
         let parts = chunks(rows)
         VStack(alignment: .leading, spacing: Theme.size * 0.8) {
-            if case .prose? = parts.first {
-            } else if !lead.characters.isEmpty {
+            if parts.first?.prose != true, !lead.characters.isEmpty {
                 Text(lead).frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(Array(parts.enumerated()), id: \.offset) { i, part in

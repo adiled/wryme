@@ -64,11 +64,9 @@ enum Theme {
         return out
     }
 
-    static func plain(_ text: String, _ ink: Color, face: Typeface, size: CGFloat = size, bold: Bool = false) -> AttributedString {
+    static func plain(_ text: String, _ ink: Color, face: Typeface, size: CGFloat = size) -> AttributedString {
         var out = AttributedString(text)
-        var font = Theme.font(face, size: size)
-        if bold { font = font.bold() }
-        out.font = font
+        out.font = Theme.font(face, size: size)
         out.foregroundColor = ink
         return out
     }

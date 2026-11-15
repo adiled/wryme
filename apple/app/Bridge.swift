@@ -64,15 +64,11 @@ struct Marks: Decodable, Equatable {
 }
 
 struct Bar: Decodable {
-    let state: String
-    let esc: String
     let busy: Bool
-    let tool: String?
 }
 
 struct Bubble: Decodable, Equatable, Identifiable {
     let id: String
-    let user: Bool
     let name: String
     let guest: String?
     let ink: String?
@@ -428,7 +424,7 @@ final class Core: ObservableObject {
     }
 
     func act(_ command: Command) { send(["do": command.rawValue]) }
-    func submit(_ text: String) { send(["submit": text]) }
+    func submit(_ text: String) { send(["send": ["text": text]]) }
     func search(_ c: Character) { send(["search": String(c)]) }
     func find(_ text: String) { send(["find": text]) }
     func tab(_ i: Int) { send(["tab": i]) }

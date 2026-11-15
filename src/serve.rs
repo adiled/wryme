@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 
-use crate::action::{Action, Core};
+use crate::action::Core;
 use crate::control::{Intent, Notice};
 use crate::scene::Scene;
 
@@ -20,8 +20,11 @@ pub type Emit = Arc<dyn Fn(&str) + Send + Sync>;
 #[serde(rename_all = "snake_case")]
 enum Inbound {
     Do(Core),
-    Submit(String),
-    Send { text: String, images: Vec<String> },
+    Send {
+        text: String,
+        #[serde(default)]
+        images: Vec<String>,
+    },
     Search(char),
     Find(String),
     Tab(usize),
@@ -33,8 +36,7 @@ enum Inbound {
 impl From<Inbound> for Intent {
     fn from(msg: Inbound) -> Self {
         match msg {
-            Inbound::Do(c) => Intent::Act(Action::Core(c)),
-            Inbound::Submit(text) => Intent::Submit(text, Vec::new()),
+            Inbound::Do(c) => Intent::Do(c),
             Inbound::Send { text, images } => Intent::Submit(text, images),
             Inbound::Search(c) => Intent::Search(c),
             Inbound::Find(text) => Intent::Find(text),
@@ -176,7 +178,7 @@ pub fn stdio() -> Result<()> {
                 return;
             }
         }
-        let _ = tx.send(Intent::Act(Action::Core(Core::Quit)));
+        let _ = tx.send(Intent::Do(Core::Quit));
     });
     let emit: Emit = Arc::new(|line: &str| {
         let mut out = std::io::stdout().lock();
@@ -214,7 +216,8 @@ mod tests {
 
     #[test]
     fn inbound_maps_to_intents() {
-        assert!(matches!(parse(r#"{"do":"settings"}"#), Some(Intent::Act(Action::Core(Core::Settings)))));
+        assert!(matches!(parse(r#"{"do":"settings"}"#), Some(Intent::Do(Core::Settings))));
+        assert!(matches!(parse(r#"{"send":{"text":"hi"}}"#), Some(Intent::Submit(t, i)) if t == "hi" && i.is_empty()));
         assert!(matches!(parse(r#"{"pick":4}"#), Some(Intent::Pick(4))));
         assert!(matches!(parse(r#""reload""#), Some(Intent::Reload)));
         assert!(matches!(parse(r#"{"search":"q"}"#), Some(Intent::Search('q'))));

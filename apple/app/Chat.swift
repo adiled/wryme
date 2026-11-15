@@ -291,7 +291,6 @@ struct BubbleView: View, Equatable {
         #endif
     }
 
-
     private var standout: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 0) {

@@ -13,7 +13,7 @@ pub const BRAIN_MARK: &str = "✶";
 pub const HEART_MARK: &str = "\u{2764}\u{FE0E}";
 pub const USER_MARK: &str = "\u{23F9}\u{FE0E}";
 pub const DOT: &str = " • ";
-pub const AWAITING: &str = "awaiting";
+const AWAITING: &str = "awaiting";
 
 #[derive(Serialize)]
 pub struct Scene {
@@ -170,9 +170,7 @@ pub fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-pub fn cursor() -> Span<'static> {
-    Span::styled("▌", dim())
-}
+pub use crate::md::cursor;
 
 fn plain(text: &str, style: Style, live: bool) -> Vec<Line<'static>> {
     let last = text.split('\n').count().saturating_sub(1);

@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::ViewMode;
 use crate::config::NametagMode;
 use crate::md;
-use crate::scene::{self, AWAITING, BRAIN_MARK, Bubble, HEART_MARK, Scene};
+use crate::scene::{self, BRAIN_MARK, Bubble, HEART_MARK, Scene};
 use crate::term::View;
 
 const ERROR_BOX_MAX_ROWS: usize = 8;
@@ -179,7 +179,7 @@ pub fn draw(f: &mut Frame, scene: &Scene, view: &mut View) {
 
     let status = &scene.status;
     let mut pieces = status.left.clone();
-    if scene.bubbles.iter().any(|b| b.id != AWAITING) {
+    if scene.bubbles.iter().any(|b| !b.waiting) {
         pieces.push(Span::raw(scene::DOT));
         match scene.view {
             ViewMode::Page => {
@@ -606,7 +606,7 @@ fn assistant_base(scene: &Scene, width: u16, viewport_h: usize) -> usize {
     }
     let mut bubbles = scene.bubbles.iter().peekable();
     let mut prefix: Vec<Line<'static>> = Vec::new();
-    if let Some(waiting) = bubbles.next_if(|b| b.id == AWAITING) {
+    if let Some(waiting) = bubbles.next_if(|b| b.waiting) {
         push_message(&mut prefix, waiting, width, scene.accent, scene.nametags);
         prefix.push(Line::from(""));
     }
