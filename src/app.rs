@@ -661,7 +661,7 @@ impl App {
             e.take_trouble()
         };
         if let Some(why) = trouble {
-            self.note(format!("the book couldn't save this turn: {why}"));
+            self.note(format!("save failed: the book couldn't keep this turn ({why})"));
         }
     }
 

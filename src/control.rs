@@ -190,7 +190,12 @@ fn cls(
 pub(crate) fn settle_cls(app: &mut App) {
     app.clearing = false;
     if crate::book::lock(&app.engine).unfiled() {
-        app.note("nothing was filed in the book, so the screen stays; /cls to try again");
+        let refusal = "nothing was filed in the book, so the screen stays; /cls to try again";
+        let said = match crate::scene::is_error_status(&app.status) {
+            true => format!("{} · {refusal}", app.status),
+            false => refusal.to_string(),
+        };
+        app.note(said);
         return;
     }
     match app.clear_screen() {
