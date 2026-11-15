@@ -359,13 +359,36 @@ mod tests {
     }
 
     fn window() -> (App, std::path::PathBuf) {
-        use crate::shop::Shop;
-        use crate::station::Station;
         let dir = std::env::temp_dir().join(format!("wryme_cls_{}_{}", std::process::id(), crate::windows::mint()));
         let _ = std::fs::remove_dir_all(&dir);
+        (window_on(&dir, "t"), dir)
+    }
+
+    fn window_on(dir: &std::path::Path, id: &str) -> App {
+        use crate::shop::Shop;
+        use crate::station::Station;
         let mut app = App::new(None, vec![Shop::demo()], vec![Station::demo()], Station::demo(), Shop::demo(), None);
-        app.engine = std::sync::Arc::new(std::sync::Mutex::new(crate::book::open_engine(&dir, "t").unwrap()));
-        (app, dir)
+        app.engine = std::sync::Arc::new(std::sync::Mutex::new(crate::book::open_engine(dir, id).unwrap()));
+        app
+    }
+
+    #[test]
+    fn a_window_reads_notes_another_window_filed_since() {
+        let (mut a, dir) = window();
+        let b = window_on(&dir, "b");
+        let page = |facts: &[&str]| crate::book::Bookmark {
+            topic: "garden".into(),
+            facts: facts.iter().map(|f| f.to_string()).collect(),
+            ..Default::default()
+        };
+        a.push_user("roses".into(), Vec::new());
+        crate::book::lock(&a.engine).deem(&page(&["roses by the gate"])).unwrap();
+        crate::book::lock(&b.engine).open("garden").unwrap();
+        a.push_user("tulips too".into(), Vec::new());
+        crate::book::lock(&a.engine).deem(&page(&["roses by the gate", "tulips by the wall"])).unwrap();
+        let said: String = b.api_messages().into_iter().filter(|m| m.role == "system").map(|m| m.content).collect();
+        assert!(said.contains("tulips by the wall"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

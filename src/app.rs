@@ -670,8 +670,10 @@ impl App {
         if let Some(sys) = &self.system {
             out.push(system_message(sys.clone()));
         }
-        for preamble in crate::book::lock(&self.engine).preamble() {
-            out.push(system_message(preamble));
+        {
+            let mut engine = crate::book::lock(&self.engine);
+            engine.refresh();
+            out.extend(engine.preamble().into_iter().map(system_message));
         }
         let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
