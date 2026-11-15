@@ -215,4 +215,50 @@ mod tests {
         app.memory.insert("claude-opus-5-5".into(), "hum".into());
         assert!(screen(&mut app).iter().any(|l| l.contains("opus (claude-opus-5-5) • hum")));
     }
+    #[test]
+    fn shops_edit_like_stations() {
+        use crate::shop_edit::{Draft, Key, Knob};
+        let hum = shop("hum", &["deepseek-v4-flash"]);
+        let mut app = App::new(None, vec![hum.clone()], vec![Station::demo()], Station::demo(), hum, None);
+        let saved = |name: &str| Draft {
+            name: name.into(),
+            url: format!("http://{name}/v1"),
+            key: Key::Env("HUM_KEY".into()),
+            models: vec!["deepseek-v4-flash".into()],
+            ..Draft::blank()
+        };
+        app.popup.saved_shops = vec![saved("hum"), saved("ollama")];
+        app.popup.shop = Some(popup::Editing {
+            draft: saved("hum"),
+            base: saved("hum"),
+            origin: Some("hum".into()),
+        });
+        app.popup.mode = popup::Mode::Browse;
+        app.popup.tab = popup::Tab::Shops;
+        let lines = screen(&mut app);
+        let has = |lines: &[String], want: &str| lines.iter().any(|l| l.contains(want));
+        for want in ["editing shop", "hum • in use", "url          http://hum/v1", "key          $HUM_KEY", "saved shops", "ollama (responses)", "save as new shop…"] {
+            assert!(has(&lines, want), "missing {want:?} in:\n{}", lines.join("\n"));
+        }
+        assert!(!has(&lines, "update 'hum'"));
+
+        let row = |app: &App, want: popup::Row| {
+            popup::rows(app).iter().position(|r| format!("{r:?}") == format!("{want:?}")).unwrap()
+        };
+        let at = row(&app, popup::Row::ShopKnob(Knob::Protocol));
+        popup::pick(&mut app, at);
+        let at = row(&app, popup::Row::ShopKnob(Knob::Models));
+        popup::pick(&mut app, at);
+        assert_eq!(app.popup.mode, popup::Mode::ShopEdit);
+        let field = crate::scene::build(&app).sheet.unwrap().field.unwrap();
+        assert_eq!((field.label.as_str(), field.text.as_str()), ("models", "deepseek-v4-flash"));
+        popup::commit_shop_edit(&mut app, "deepseek-v4-flash, glm-5");
+        let lines = screen(&mut app);
+        for want in ["protocol     chat-completions", "models       deepseek-v4-flash, glm-5", "hum • in use • changed", "update 'hum'"] {
+            assert!(has(&lines, want), "missing {want:?} in:\n{}", lines.join("\n"));
+        }
+        let at = row(&app, popup::Row::SavedShop(1));
+        popup::pick(&mut app, at);
+        assert_eq!(app.popup.shop.as_ref().unwrap().origin.as_deref(), Some("ollama"));
+    }
 }

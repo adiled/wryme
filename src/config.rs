@@ -344,6 +344,11 @@ mod imp {
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 
+    pub fn write_shops(text: &str) -> Result<()> {
+        let path = dir().context("no $HOME")?.join("shops.toml");
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    }
+
     pub fn prefs_text() -> Option<String> {
         read_or_seed("prefs.json", super::DEFAULT_PREFS)
     }
@@ -422,6 +427,12 @@ mod imp {
         STATIONS.with(|c| c.borrow().clone())
     }
 
+    pub fn write_shops(text: &str) -> Result<()> {
+        SHOPS.with(|c| *c.borrow_mut() = Some(text.to_string()));
+        call_global("wrymeWriteFile", &[JsValue::from_str("shops.toml"), JsValue::from_str(text)]);
+        Ok(())
+    }
+
     pub fn write_stations(text: &str) -> Result<()> {
         STATIONS.with(|c| *c.borrow_mut() = Some(text.to_string()));
         call_global(
@@ -461,6 +472,10 @@ pub fn stations_text() -> Option<String> {
 
 pub fn write_stations(text: &str) -> Result<()> {
     imp::write_stations(text)
+}
+
+pub fn write_shops(text: &str) -> Result<()> {
+    imp::write_shops(text)
 }
 
 pub fn prefs_text() -> Option<String> {

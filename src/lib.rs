@@ -27,6 +27,7 @@ pub mod select;
 pub mod serve;
 pub mod shell_env;
 pub mod shop;
+pub mod shop_edit;
 pub mod shop_memory;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod spec;

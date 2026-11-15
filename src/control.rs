@@ -155,8 +155,10 @@ fn submit(
             app.awaiting.push_str(&text);
             app.awaiting_images.extend(images);
         }
+        popup::Mode::SaveAs if app.popup.tab == popup::Tab::Shops => popup::commit_shop_save_as(app, &text),
         popup::Mode::SaveAs => popup::commit_save_as(app, &text),
         popup::Mode::DialEdit => popup::commit_dial_edit(app, &text),
+        popup::Mode::ShopEdit => popup::commit_shop_edit(app, &text),
         popup::Mode::Browse => {}
     }
 }

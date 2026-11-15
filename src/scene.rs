@@ -8,6 +8,7 @@ use crate::app::{App, Message, Phase, Role, ViewMode};
 use crate::config::{Feelings, NametagMode, Typeface};
 use crate::popup::{self, Tab};
 use crate::shop::Protocol;
+use crate::shop_edit::Knob;
 
 pub const BRAIN_MARK: &str = "✶";
 pub const HEART_MARK: &str = "\u{2764}\u{FE0E}";
@@ -321,7 +322,7 @@ pub fn scope(app: &App) -> Scope {
     match app.popup.mode {
         popup::Mode::Closed => Scope::Chat,
         popup::Mode::Browse => Scope::Sheet,
-        popup::Mode::SaveAs | popup::Mode::DialEdit => Scope::Field,
+        popup::Mode::SaveAs | popup::Mode::DialEdit | popup::Mode::ShopEdit => Scope::Field,
     }
 }
 
@@ -568,11 +569,6 @@ fn sheet(app: &App) -> Sheet {
     let mut selected = None;
     let mut field = None;
     let hint = match app.popup.tab {
-        Tab::Shops => {
-            lines = popup::shops_lines(app);
-            let close = hint(Scope::Sheet, &[(&[C(Core::Close)], "close")]);
-            format!("read-only · edit {}  ·  {close}", crate::config::shops_place())
-        }
         Tab::Help => {
             for (key, what) in crate::action::help() {
                 if what.is_empty() {
@@ -589,7 +585,7 @@ fn sheet(app: &App) -> Sheet {
             }
             hint(Scope::Sheet, &[(&[C(Core::Close)], "close"), (&[C(Core::NextTab)], "next tab")])
         }
-        Tab::Station | Tab::Pref => {
+        Tab::Station | Tab::Pref | Tab::Shops => {
             let rows = popup::rows(app);
             picks = popup::selectable_indices(&rows);
             if browsing {
@@ -612,12 +608,33 @@ fn sheet(app: &App) -> Sheet {
                         label: meta.name.to_string(),
                         text: (meta.label)(&app.active_station.dials),
                     }),
+                popup::Mode::ShopEdit => app.popup.knob.zip(app.popup.shop.as_ref()).map(|(knob, e)| Field {
+                    label: knob.name().to_string(),
+                    text: knob.text(&e.draft),
+                }),
                 _ => None,
             };
             let editing = hint(Scope::Field, &[(&[E(Edit::Send)], "save"), (&[C(Core::Cancel)], "cancel")]);
             match app.popup.mode {
                 popup::Mode::SaveAs => editing,
                 popup::Mode::DialEdit => format!("{editing}  ·  all | 0 | 12 | 50%"),
+                popup::Mode::ShopEdit => match app.popup.knob {
+                    Some(Knob::Key) => format!("{editing}  ·  $NAME reads an environment variable"),
+                    Some(Knob::Models) => format!("{editing}  ·  separate with commas"),
+                    _ => editing,
+                },
+                _ if app.popup.tab == Tab::Shops => {
+                    let browse = hint(
+                        Scope::Sheet,
+                        &[
+                            (&[C(Core::Up), C(Core::Down)], "select"),
+                            (&[C(Core::Less), C(Core::More)], "adjust"),
+                            (&[C(Core::Activate)], "edit"),
+                            (&[C(Core::Close)], "close"),
+                        ],
+                    );
+                    format!("{browse}  ·  saves to {}", crate::config::shops_place())
+                }
                 _ => hint(
                     Scope::Sheet,
                     &[
@@ -703,6 +720,42 @@ fn sheet_row(app: &App, row: &popup::Row, style: Style) -> Line<'static> {
         popup::Row::SaveAsAction => Line::from(vec![
             Span::styled("  ", style),
             Span::styled("save active as new…", style),
+        ]),
+        popup::Row::ShopName => {
+            let e = app.popup.shop.as_ref();
+            let name = e.and_then(|e| e.origin.clone()).unwrap_or_else(|| "new shop".into());
+            let mut spans = vec![Span::raw("  "), Span::raw(name.clone())];
+            if name == app.active_shop.name {
+                spans.push(faint(" • in use".into()));
+            }
+            if e.is_some_and(popup::Editing::changed) {
+                spans.push(faint(" • changed".into()));
+            }
+            Line::from(spans)
+        }
+        popup::Row::ShopKnob(knob) => match app.popup.shop.as_ref() {
+            Some(e) => pair(style, &format!("{:<13}", knob.name()), Span::styled(knob.shown(&e.draft), style)),
+            None => Line::from(""),
+        },
+        popup::Row::SavedShop(idx) => {
+            let d = &app.popup.saved_shops[*idx];
+            let mut spans = vec![
+                Span::styled("  ", style),
+                Span::styled(d.name.clone(), style),
+                faint(format!(" ({})", crate::shop_edit::protocol_name(d.protocol))),
+            ];
+            if d.name == app.active_shop.name {
+                spans.push(faint(" • in use".into()));
+            }
+            Line::from(spans)
+        }
+        popup::Row::ShopUpdate => {
+            let origin = app.popup.shop.as_ref().and_then(|e| e.origin.clone()).unwrap_or_default();
+            Line::from(vec![Span::styled("  ", style), Span::styled(format!("update '{origin}'"), style)])
+        }
+        popup::Row::ShopSaveAs => Line::from(vec![
+            Span::styled("  ", style),
+            Span::styled("save as new shop…", style),
         ]),
         popup::Row::PrefVoice => pair(
             style,

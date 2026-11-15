@@ -4499,6 +4499,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
  "tui-markdown",

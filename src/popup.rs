@@ -1,8 +1,7 @@
 use crate::app::App;
-use crate::shop::{Protocol, Shop, WindowMode};
+use crate::shop::{Protocol, Shop};
+use crate::shop_edit::{self, Draft, Knob};
 use crate::station::{Brainy, Dials, Patience, Station};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
 
 #[derive(Debug, Default)]
 pub struct Popup {
@@ -11,6 +10,27 @@ pub struct Popup {
     pub selected: usize,
     pub dial_idx: Option<usize>,
     pub search: String,
+    pub shop: Option<Editing>,
+    pub saved_shops: Vec<Draft>,
+    pub knob: Option<Knob>,
+    pub refreshing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Editing {
+    pub draft: Draft,
+    pub base: Draft,
+    pub origin: Option<String>,
+}
+
+impl Editing {
+    fn of(draft: Draft, origin: Option<String>) -> Self {
+        Editing { base: draft.clone(), draft, origin }
+    }
+
+    pub fn changed(&self) -> bool {
+        self.draft != self.base
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -42,6 +62,7 @@ pub enum Mode {
     Browse,
     SaveAs,
     DialEdit,
+    ShopEdit,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +82,11 @@ pub enum Row {
     PrefFont,
     PrefFeelings,
     PrefSync,
+    ShopName,
+    ShopKnob(Knob),
+    SavedShop(usize),
+    ShopUpdate,
+    ShopSaveAs,
     Blank,
 }
 
@@ -104,7 +130,8 @@ pub fn rows(app: &App) -> Vec<Row> {
     match app.popup.tab {
         Tab::Station => station_rows(app),
         Tab::Pref => pref_rows(app),
-        Tab::Shops | Tab::Help => vec![],
+        Tab::Shops => shop_rows(app),
+        Tab::Help => vec![],
     }
 }
 
@@ -122,6 +149,26 @@ fn pref_rows(app: &App) -> Vec<Row> {
         rows.push(Row::PrefSync);
     }
     rows
+}
+
+fn shop_rows(app: &App) -> Vec<Row> {
+    let mut out = vec![Row::SectionHeader("editing shop")];
+    let editing = app.popup.shop.as_ref();
+    if editing.is_some() {
+        out.push(Row::ShopName);
+        out.extend(Knob::ALL.map(Row::ShopKnob));
+    }
+    out.push(Row::Blank);
+    out.push(Row::SectionHeader("saved shops"));
+    out.extend((0..app.popup.saved_shops.len()).map(Row::SavedShop));
+    out.push(Row::Blank);
+    if editing.is_some_and(|e| e.origin.is_some() && e.changed()) {
+        out.push(Row::ShopUpdate);
+    }
+    if editing.is_some() {
+        out.push(Row::ShopSaveAs);
+    }
+    out
 }
 
 fn station_rows(app: &App) -> Vec<Row> {
@@ -205,7 +252,7 @@ pub fn active_shop_label(app: &App) -> String {
 pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank | Row::ActiveStation))
+        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank | Row::ActiveStation | Row::ShopName))
         .map(|(i, _)| i)
         .collect()
 }
@@ -218,7 +265,7 @@ pub fn toggle(app: &mut App) {
             app.popup.tab = Tab::Station;
             app.popup.selected = first_selectable(app);
         }
-        Mode::Browse | Mode::SaveAs | Mode::DialEdit => {
+        Mode::Browse | Mode::SaveAs | Mode::DialEdit | Mode::ShopEdit => {
             close(app);
         }
     }
@@ -233,9 +280,10 @@ pub fn close(app: &mut App) {
 }
 
 pub fn cancel_field(app: &mut App) {
-    if matches!(app.popup.mode, Mode::SaveAs | Mode::DialEdit) {
+    if matches!(app.popup.mode, Mode::SaveAs | Mode::DialEdit | Mode::ShopEdit) {
         app.popup.mode = Mode::Browse;
         app.popup.dial_idx = None;
+        app.popup.knob = None;
     }
 }
 
@@ -283,6 +331,11 @@ pub fn adjust(app: &mut App, delta: i32) {
         Some(Row::PrefFont) => cycle_typeface(app, delta),
         Some(Row::PrefFeelings) => cycle_feelings(app, delta),
         Some(Row::PrefSync) => sync(app),
+        Some(Row::ShopKnob(knob)) if !knob.typed() => {
+            if let Some(e) = app.popup.shop.as_mut() {
+                knob.cycle(&mut e.draft);
+            }
+        }
         _ => {}
     }
 }
@@ -329,8 +382,105 @@ fn activate_row(app: &mut App, row: Row) {
         Row::PrefFont => cycle_typeface(app, 1),
         Row::PrefFeelings => cycle_feelings(app, 1),
         Row::PrefSync => sync(app),
+        Row::SavedShop(idx) => {
+            if let Some(d) = app.popup.saved_shops.get(idx).cloned() {
+                app.note(format!("editing shop '{}'", d.name));
+                app.popup.shop = Some(Editing::of(d.clone(), Some(d.name)));
+            }
+        }
+        Row::ShopKnob(knob) if knob.typed() => {
+            app.popup.knob = Some(knob);
+            app.popup.mode = Mode::ShopEdit;
+        }
+        Row::ShopKnob(_) => adjust(app, 1),
+        Row::ShopUpdate => commit_shop_update(app),
+        Row::ShopSaveAs => app.popup.mode = Mode::SaveAs,
         _ => {}
     }
+}
+
+fn open_shops(app: &mut App) {
+    let text = crate::config::shops_text().unwrap_or_default();
+    app.popup.saved_shops = match shop_edit::saved(&text) {
+        Ok(shops) => shops,
+        Err(e) => {
+            app.note(format!("shops.toml: {e:#}"));
+            Vec::new()
+        }
+    };
+    if app.popup.shop.is_some() {
+        return;
+    }
+    let saved = &app.popup.saved_shops;
+    let pick = saved.iter().find(|d| d.name == app.active_shop.name).or(saved.first());
+    app.popup.shop = Some(match pick {
+        Some(d) => Editing::of(d.clone(), Some(d.name.clone())),
+        None => Editing::of(Draft::blank(), None),
+    });
+}
+
+pub fn commit_shop_edit(app: &mut App, text: &str) {
+    if let (Some(knob), Some(e)) = (app.popup.knob, app.popup.shop.as_mut()) {
+        knob.set(&mut e.draft, text);
+    }
+    app.popup.mode = Mode::Browse;
+    app.popup.knob = None;
+}
+
+pub fn commit_shop_update(app: &mut App) {
+    let Some((origin, draft)) = app.popup.shop.as_ref().and_then(|e| Some((e.origin.clone()?, e.draft.clone()))) else {
+        return;
+    };
+    let text = crate::config::shops_text().unwrap_or_default();
+    match write_shops(app, shop_edit::update(&text, &origin, &draft)) {
+        Ok(()) => {
+            app.popup.shop = Some(Editing::of(draft, Some(origin.clone())));
+            app.note(format!("updated shop '{origin}'"));
+        }
+        Err(e) => app.note(format!("update failed: {e:#}")),
+    }
+}
+
+pub fn commit_shop_save_as(app: &mut App, text: &str) {
+    let name = text.trim().to_string();
+    if name.is_empty() {
+        app.note("name can't be empty");
+        return;
+    }
+    let Some(mut draft) = app.popup.shop.as_ref().map(|e| e.draft.clone()) else {
+        return;
+    };
+    draft.name = name.clone();
+    let file = crate::config::shops_text().unwrap_or_default();
+    match write_shops(app, shop_edit::add(&file, &draft)) {
+        Ok(()) => {
+            app.popup.shop = Some(Editing::of(draft, Some(name.clone())));
+            app.popup.mode = Mode::Browse;
+            app.note(format!("saved shop '{name}'"));
+        }
+        Err(e) => app.note(format!("save failed: {e:#}")),
+    }
+}
+
+fn write_shops(app: &mut App, text: anyhow::Result<String>) -> anyhow::Result<()> {
+    if !crate::config::can_write() {
+        anyhow::bail!("no config folder connected");
+    }
+    crate::config::write_shops(&text?)?;
+    open_shops(app);
+    let fresh = crate::shop::load_all()?;
+    if let Some(s) = fresh.iter().find(|s| s.name == app.active_shop.name) {
+        let was = &app.active_shop;
+        if s.url != was.url || s.key != was.key || s.protocol != was.protocol {
+            app.last_response_id = None;
+            app.forget_wire();
+        }
+        app.active_shop = s.clone();
+    }
+    app.shops = fresh;
+    app.popup.refreshing = true;
+    app.shop_check = Some((app.active_station.clone(), app.active_origin.clone()));
+    Ok(())
 }
 
 fn cycle_accent(app: &mut App, delta: i32) {
@@ -560,6 +710,9 @@ pub fn finish_shop_check(app: &mut App, shops: Vec<Shop>, st: Station, origin: O
             s.models = fresh.models;
         }
     }
+    if std::mem::take(&mut app.popup.refreshing) {
+        return;
+    }
     let current = app.active_shop.name.clone();
     match crate::shop::choose(&app.shops, &app.memory, &st.model, &current) {
         Some(shop) => apply_station(app, st, origin, shop),
@@ -738,6 +891,9 @@ pub fn jump_tab(app: &mut App, idx: usize) {
 }
 
 fn enter_tab(app: &mut App, tab: Tab) {
+    if tab == Tab::Shops {
+        open_shops(app);
+    }
     app.popup.tab = tab;
     app.popup.mode = Mode::Browse;
     app.popup.dial_idx = None;
@@ -785,72 +941,6 @@ pub fn open_help(app: &mut App) {
     enter_tab(app, Tab::Help);
 }
 
-pub fn shops_lines(app: &App) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    for (i, s) in app.shops.iter().enumerate() {
-        let active = s.name == app.active_shop.name;
-        let tag = if active { "▶ " } else { "  " };
-        let name_style = if active {
-            Style::default().fg(app.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.accent)
-        };
-        out.push(Line::from(vec![
-            Span::styled(format!("{tag}{}", s.name), name_style),
-            Span::styled(
-                format!("   {}/{}", protocol_label(s.protocol), window_label(s.window)),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-        let url = if s.url.is_empty() {
-            "local (no network)".to_string()
-        } else {
-            s.url.clone()
-        };
-        out.push(Line::from(Span::styled(
-            format!("    url     {url}"),
-            Style::default().fg(Color::DarkGray),
-        )));
-        out.push(Line::from(Span::styled(
-            format!("    models  {}", s.models.join(", ")),
-            Style::default().fg(Color::DarkGray),
-        )));
-        let key = if s.key.is_empty() {
-            "(none)"
-        } else {
-            "(set)"
-        };
-        out.push(Line::from(Span::styled(
-            format!("    key     {key}"),
-            Style::default().fg(Color::DarkGray),
-        )));
-        if i + 1 < app.shops.len() {
-            out.push(Line::from(""));
-        }
-    }
-    if app.shops.is_empty() {
-        out.push(Line::from(Span::styled(
-            "  no shops configured",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    out
-}
-
-fn protocol_label(p: Protocol) -> &'static str {
-    match p {
-        Protocol::Demo => "demo",
-        Protocol::ChatCompletions => "chat",
-        Protocol::Responses => "responses",
-    }
-}
-
-fn window_label(w: WindowMode) -> &'static str {
-    match w {
-        WindowMode::Full => "full",
-        WindowMode::Warm => "warm",
-    }
-}
 pub(crate) fn toggle_view_mode(app: &mut App) {
     app.view_mode = match app.view_mode {
         crate::app::ViewMode::Page => crate::app::ViewMode::Scroll,
