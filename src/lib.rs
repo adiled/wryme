@@ -6,26 +6,35 @@ pub mod book;
 pub mod config;
 pub mod demo;
 pub mod explore;
+pub mod action;
+pub mod control;
 pub mod input;
 pub mod jobs;
-pub mod keys;
 pub mod md;
 pub mod platform;
 pub mod popup;
+pub mod pictures;
 pub mod popup_ui;
+pub mod proword;
 #[cfg(feature = "reservoir")]
 pub mod reservoir;
 #[cfg(not(feature = "reservoir"))]
 #[path = "reservoir_stub.rs"]
 pub mod reservoir;
+pub mod scene;
 pub mod select;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod serve;
 pub mod shell_env;
 pub mod shop;
+pub mod shop_edit;
 pub mod shop_memory;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod spec;
 pub mod station;
 pub mod station_save;
+pub mod sync;
+pub mod term;
 pub mod tools;
 pub mod ui;
 pub mod voice;
@@ -36,13 +45,13 @@ pub mod web;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use ratatui::{Terminal, backend::Backend};
 use tokio::sync::mpsc;
 
 use api::{Client, StreamEvent};
 use app::App;
-use input::Input;
-use platform::{Event, Task};
+use control::Intent;
+use platform::Task;
+use scene::Scene;
 
 pub struct Boot {
     pub client: Client,
@@ -79,9 +88,35 @@ pub async fn boot(station_arg: Option<&str>) -> Result<Boot> {
     })
 }
 
+pub trait Surface {
+    type Event;
+    fn present(&mut self, scene: &Scene) -> Result<()>;
+    fn feed(&mut self, ev: Self::Event, scene: &Scene) -> Vec<Intent>;
+}
+
+fn reconfigure(app: &mut App, booted: Result<Boot>) {
+    match booted {
+        Ok(b) => {
+            let unavailable = station::unavailable_note(&b.stations, &b.shops);
+            app.reconfigure(
+                b.shops,
+                b.stations,
+                b.active_station,
+                b.active_shop,
+                b.active_origin,
+            );
+            app.note(match unavailable {
+                Some(n) => format!("config connected · {n}"),
+                None => "config connected".to_string(),
+            });
+        }
+        Err(e) => app.note(format!("config: {e:#}")),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn run<B, S>(
-    terminal: &mut Terminal<B>,
+pub async fn run<V, S>(
+    surface: &mut V,
     client: Client,
     system: Option<String>,
     shops: Vec<shop::Shop>,
@@ -92,8 +127,8 @@ pub async fn run<B, S>(
     mut events: S,
 ) -> Result<()>
 where
-    B: Backend<Error = std::io::Error>,
-    S: futures_util::Stream<Item = Event> + Unpin,
+    V: Surface,
+    S: futures_util::Stream<Item = V::Event> + Unpin,
 {
     let mut app = App::new(
         system,
@@ -108,8 +143,8 @@ where
     } else if let Some(note) = station::unavailable_note(&app.stations, &app.shops) {
         app.note(note);
     }
-    let mut input = Input::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
+    let (booted_tx, mut booted_rx) = mpsc::unbounded_channel::<Result<Boot>>();
     let mut in_flight_task: Option<Task> = None;
     let window_id = app.window_id.clone();
     crate::windows::register(&window_id);
@@ -127,55 +162,36 @@ where
     let mut tick: u64 = 0;
 
     loop {
-        terminal
-            .draw(|f| ui::draw(f, &mut app, &input))
-            .map_err(|e| anyhow::anyhow!("draw: {e}"))?;
+        let scene = scene::build(&app);
+        surface.present(&scene)?;
         if app.should_quit {
             break;
         }
 
         tokio::select! {
             maybe_ev = events.next() => {
-                if let Some(ev) = maybe_ev {
-                    match ev {
-                        Event::Key(k) => {
-                            keys::handle_key(k, &mut app, &mut input, &client, &tx, &mut in_flight_task);
+                let intents = match maybe_ev {
+                    Some(ev) => surface.feed(ev, &scene),
+                    None => vec![Intent::Do(crate::action::Core::Quit)],
+                };
+                for intent in intents {
+                    match intent {
+                        Intent::Reload => {
+                            let booted_tx = booted_tx.clone();
+                            platform::spawn(async move {
+                                let _ = booted_tx.send(boot(None).await);
+                            });
                         }
-                        Event::Mouse(m) => keys::handle_mouse(m, &mut app),
-                        Event::Paste(text) => keys::handle_paste(&text, &mut app, &mut input),
-                        #[cfg(target_arch = "wasm32")]
-                        Event::GuestNote(note) => {
-                            crate::keys::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        Event::ReloadConfig => {
-                            match crate::boot(None).await {
-                                Ok(b) => {
-                                    let unavailable = station::unavailable_note(&b.stations, &b.shops);
-                                    app.reconfigure(
-                                        b.shops,
-                                        b.stations,
-                                        b.active_station,
-                                        b.active_shop,
-                                        b.active_origin,
-                                    );
-                                    app.note(match unavailable {
-                                        Some(n) => format!("config connected · {n}"),
-                                        None => "config connected".to_string(),
-                                    });
-                                }
-                                Err(e) => app.note(format!("config: {e:#}")),
-                            }
-                        }
-                        _ => {}
+                        intent => control::apply(intent, &mut app, &client, &tx, &mut in_flight_task),
                     }
                 }
             }
+            Some(booted) = booted_rx.recv() => reconfigure(&mut app, booted),
             Some(stream_ev) = rx.recv() => {
                 handle_stream_event(stream_ev, &mut app, &mut in_flight_task, &client, &tx);
             }
             Some(note) = guest_rx.recv() => {
-                crate::keys::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
+                crate::control::take_note(&mut app, &client, &tx, &mut in_flight_task, note);
             }
             _ = platform::sleep(std::time::Duration::from_millis(250)) => {
                 #[cfg(unix)]
@@ -189,22 +205,7 @@ where
                     }
                 }
                 if (jobs::has_due() || crate::windows::has_due()) && !app.in_flight {
-                    let _ = app.reservoir.lock().map(|mut r| r.turn_started());
-                    app.begin_assistant();
-                    app.in_flight = true;
-                    let msgs = app.api_messages();
-                    let prev_id = app.last_response_id.clone();
-                    let wire = app.wire_for_turn();
-                    let shops = app.turn_shops();
-                    let station = app.active_station.clone();
-                    let client = client.clone();
-                    let engine = app.engine.clone();
-                    let tx = tx.clone();
-                    in_flight_task = Some(platform::spawn(async move {
-                        client
-                            .stream_completion(shops, station, msgs, prev_id, wire, engine, tx)
-                            .await;
-                    }));
+                    control::begin(&mut app, &client, &tx, &mut in_flight_task);
                 }
             }
         }
@@ -216,7 +217,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_stream_event(
     stream_ev: StreamEvent,
     app: &mut App,
@@ -297,6 +297,9 @@ fn handle_stream_event(
         StreamEvent::Done => {
             app.finish_streaming();
             app.settle_wire();
+            if app.clearing {
+                crate::control::settle_cls(app);
+            }
             if app.voice_on && !app.voice_muted {
                 let tail = app.voice_buffer.trim().to_string();
                 app.voice_buffer.clear();
@@ -312,12 +315,13 @@ fn handle_stream_event(
             if let Some(t) = in_flight_task.take() {
                 drop(t);
             }
-            if !app.awaiting.is_empty() {
+            if !app.awaiting.is_empty() || !app.awaiting_images.is_empty() {
                 let pending = std::mem::take(&mut app.awaiting);
-                crate::keys::start_turn(app, client, tx, in_flight_task, pending);
+                let images = std::mem::take(&mut app.awaiting_images);
+                crate::control::start_turn(app, client, tx, in_flight_task, pending, images);
             } else if !app.guest_queue.is_empty() {
                 let note = app.guest_queue.remove(0);
-                crate::keys::start_guest_turn(app, client, tx, in_flight_task, note);
+                crate::control::start_guest_turn(app, client, tx, in_flight_task, note);
             }
         }
         StreamEvent::Error { message } => {
@@ -365,7 +369,7 @@ async fn one_shot(
     });
 
     let engine = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot")).expect("open book"),
+        crate::book::open_engine(&std::env::temp_dir().join("wryme-oneshot"), "oneshot").expect("open book"),
     ));
     let (tx, mut rx) = mpsc::unbounded_channel::<api::StreamEvent>();
     let task = platform::spawn({
@@ -415,21 +419,23 @@ async fn one_shot(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> Result<()> {
+    use clap::Parser as _;
+    let args = cli::Args::parse();
+    if args.serve {
+        return serve::stdio();
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building runtime")?;
-    rt.block_on(native_main())
+    rt.block_on(native_main(args))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn native_main() -> Result<()> {
-    use crossterm::event::EventStream;
-    use clap::Parser as _;
-
+pub fn instrument() -> sentry::ClientInitGuard {
     init_logging();
     shell_env::bootstrap();
-    let _sentry = sentry::init(sentry::ClientOptions {
+    let guard = sentry::init(sentry::ClientOptions {
         dsn: std::env::var("SENTRY_DSN")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -443,7 +449,14 @@ async fn native_main() -> Result<()> {
         ..Default::default()
     });
     tracing::info!(version = env!("WRYME_VERSION"), "wme launch");
-    let args = cli::Args::parse();
+    guard
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn native_main(args: cli::Args) -> Result<()> {
+    use crossterm::event::EventStream;
+
+    let _sentry = instrument();
 
     let boot = boot(args.station.as_deref()).await?;
 
@@ -465,14 +478,14 @@ async fn native_main() -> Result<()> {
         "wme start"
     );
 
-    let mut terminal = setup_terminal().context("entering tui")?;
+    let mut surface = term::Term::new(setup_terminal().context("entering tui")?);
     install_panic_hook();
 
     let events = crate::platform::tty::rejoin(
         EventStream::new().filter_map(|r| futures_util::future::ready(r.ok())),
     );
     let result = run(
-        &mut terminal,
+        &mut surface,
         boot.client,
         args.system,
         boot.shops,
@@ -484,7 +497,7 @@ async fn native_main() -> Result<()> {
     )
     .await;
 
-    restore_terminal(&mut terminal).ok();
+    restore_terminal(&mut surface.terminal).ok();
     result
 }
 
@@ -507,6 +520,9 @@ mod cli {
 
         #[arg(long)]
         pub system: Option<String>,
+
+        #[arg(long, hide = true)]
+        pub serve: bool,
     }
 }
 
@@ -615,7 +631,7 @@ fn init_logging() {
     else {
         return;
     };
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wme=info".into());
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "wryme=info".into());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::sync::Mutex::new(file))

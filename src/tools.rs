@@ -371,7 +371,8 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|q| q.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
+            e.refresh();
             e.note_lookup();
             let hits = book::match_compartments(&e.book, &query);
             render_find(&query, &hits)
@@ -382,7 +383,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             match e.open(&topic) {
                 Ok(Some(text)) => text,
                 Ok(None) => format!("no page \"{topic}\""),
@@ -395,7 +396,8 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
+            e.refresh();
             match book::read_compartment(&e.book, &topic) {
                 Ok(Some(msgs)) if !msgs.is_empty() => book::render_compartment(&msgs),
                 Ok(_) => format!("page \"{topic}\" has no thread yet"),
@@ -404,7 +406,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
         }
         "deem" => {
             let bookmark = bookmark_from(&v);
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             match e.deem(&bookmark) {
                 Ok(out) => out,
                 Err(err) => format!("{BOOK_NAME}: {err:#}"),
@@ -416,7 +418,7 @@ async fn book_execute(engine: &Arc<Mutex<book::Engine>>, arguments: &str) -> Str
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mut e = engine.lock().unwrap();
+            let mut e = book::lock(engine);
             e.dismiss(&topic);
             format!("dropped \"{topic}\" from the preamble")
         }
@@ -468,18 +470,22 @@ fn bookmark_from(v: &serde_json::Value) -> Bookmark {
 }
 
 fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
-    v.get(key)
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    let items: Vec<String> = match v.get(key) {
+        Some(serde_json::Value::Array(a)) => a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect(),
+        Some(serde_json::Value::String(s)) => s.lines().map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    items
+        .into_iter()
+        .map(|s| s.trim().trim_start_matches(['-', '*', '•']).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
+pub const SPAWNS: bool = !cfg!(target_os = "ios");
+
 pub fn tool_defs_chat() -> Vec<serde_json::Value> {
-    vec![
+    let spawning = [
         serde_json::json!({
             "type": "function",
             "function": {
@@ -507,19 +513,22 @@ pub fn tool_defs_chat() -> Vec<serde_json::Value> {
                 "strict": true,
             },
         }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": book_name(),
-                "description": BOOK_DESCRIPTION,
-                "parameters": book_parameters(),
-                "strict": true,
-            },
-        }),
-    ]
-    .into_iter()
-    .chain(window_tool_defs_chat())
-    .collect()
+    ];
+    let book = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": book_name(),
+            "description": BOOK_DESCRIPTION,
+            "parameters": book_parameters(),
+            "strict": true,
+        },
+    });
+    spawning
+        .into_iter()
+        .filter(|_| SPAWNS)
+        .chain([book])
+        .chain(window_tool_defs_chat())
+        .collect()
 }
 
 pub fn window_tool_defs() -> Vec<serde_json::Value> {
@@ -561,7 +570,7 @@ pub fn window_tool_defs_chat() -> Vec<serde_json::Value> {
 }
 
 pub fn tool_defs() -> Vec<serde_json::Value> {
-    vec![
+    let spawning = [
         serde_json::json!({
             "type": "function",
             "name": shell_name(),
@@ -577,17 +586,20 @@ pub fn tool_defs() -> Vec<serde_json::Value> {
             "strict": true,
         }),
         serde_json::json!({ "type": "function", "name": check_name(), "description": CHECK_DESCRIPTION, "parameters": check_parameters(), "strict": true }),
-        serde_json::json!({
-            "type": "function",
-            "name": book_name(),
-            "description": BOOK_DESCRIPTION,
-            "parameters": book_parameters(),
-            "strict": true,
-        }),
-    ]
-    .into_iter()
-    .chain(window_tool_defs())
-    .collect()
+    ];
+    let book = serde_json::json!({
+        "type": "function",
+        "name": book_name(),
+        "description": BOOK_DESCRIPTION,
+        "parameters": book_parameters(),
+        "strict": true,
+    });
+    spawning
+        .into_iter()
+        .filter(|_| SPAWNS)
+        .chain([book])
+        .chain(window_tool_defs())
+        .collect()
 }
 
 #[cfg(test)]
@@ -726,7 +738,7 @@ mod tests {
     async fn book_tool_deem_births_find_open_roundtrip() {
         let dir = std::env::temp_dir().join(format!("wryme_btool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        let engine = Arc::new(Mutex::new(book::open_engine(&dir, "test").unwrap()));
 
         {
             let mut e = engine.lock().unwrap();
@@ -768,7 +780,7 @@ mod tests {
     async fn book_tool_deem_advances_watermark() {
         let dir = std::env::temp_dir().join(format!("wryme_btool2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        let engine = Arc::new(Mutex::new(book::open_engine(&dir, "test").unwrap()));
 
         {
             let mut e = engine.lock().unwrap();
@@ -823,5 +835,13 @@ mod tests {
     async fn run_shell_empty_command() {
         let out = run_shell("  ").await;
         assert!(out.contains("no command given"));
+    }
+
+    #[test]
+    fn bookmark_lists_also_take_plain_text() {
+        let v = serde_json::json!({"facts": "eggs are pricey\n- oil balloons are a joke", "plans": ["check again"], "open": 3});
+        assert_eq!(str_list(&v, "facts"), vec!["eggs are pricey", "oil balloons are a joke"]);
+        assert_eq!(str_list(&v, "plans"), vec!["check again"]);
+        assert!(str_list(&v, "open").is_empty());
     }
 }

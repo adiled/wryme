@@ -1,5 +1,6 @@
 (() => {
-  console.info("wryme connector v8");
+  console.info("wryme connector v9");
+  const TOUCH = window.matchMedia("(pointer: coarse)").matches;
   const DB = "wryme";
   const STORE = "config";
   const KEY = "dir";
@@ -164,7 +165,10 @@
 
   async function pick() {
     if (!window.showDirectoryPicker) {
-      setStatus("this browser can't connect folders");
+      const here = location.protocol + "//localhost:" + location.port + location.pathname;
+      setStatus(window.isSecureContext
+        ? "this browser can't connect folders; Chrome and Edge can"
+        : "connecting folders needs https or localhost. open " + here + " on this machine");
       return;
     }
     const opts = { id: "wryme-config", mode: "readwrite" };
@@ -188,6 +192,10 @@
     render();
     focusTerm();
   }
+
+  window.wrymePickFolder = () => {
+    pick();
+  };
 
   window.wrymeWriteFile = async (name, content) => {
     if (!dir || !granted) return false;
@@ -352,7 +360,51 @@
     if (term) term.focus();
   }
 
+  function touchKeys() {
+    const keys = document.createElement("textarea");
+    keys.id = "wryme-keys";
+    keys.setAttribute("autocapitalize", "off");
+    keys.setAttribute("autocomplete", "off");
+    keys.setAttribute("autocorrect", "off");
+    keys.setAttribute("enterkeyhint", "send");
+    keys.spellcheck = false;
+    document.body.append(keys);
+    const flush = () => {
+      const text = keys.value;
+      keys.value = "";
+      if (text && window.wrymeType) window.wrymeType(text);
+    };
+    keys.addEventListener("input", (ev) => {
+      if (!ev.isComposing) flush();
+    });
+    keys.addEventListener("compositionend", flush);
+    const term = document.getElementById("wryme-term");
+    let start = null;
+    term.addEventListener("touchstart", (ev) => {
+      const t = ev.touches[0];
+      start = t ? [t.clientX, t.clientY] : null;
+    }, { passive: true });
+    term.addEventListener("touchend", (ev) => {
+      const t = ev.changedTouches[0];
+      if (start && t && Math.hypot(t.clientX - start[0], t.clientY - start[1]) < 10) keys.focus();
+      start = null;
+    });
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const fit = () => {
+      document.documentElement.style.height = vv.height + "px";
+      window.scrollTo(0, 0);
+    };
+    vv.addEventListener("resize", fit);
+    vv.addEventListener("scroll", fit);
+    fit();
+  }
+
   function build() {
+    if (TOUCH) {
+      touchKeys();
+      return;
+    }
     wrap = document.createElement("div");
     wrap.id = "wryme-config";
     status = document.createElement("span");

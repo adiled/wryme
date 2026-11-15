@@ -4,8 +4,38 @@ use std::time::Duration;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
+use crate::control::Intent;
 use crate::platform;
+use crate::platform::web::Event;
 use crate::platform::web::backend::WebBackend;
+use crate::scene::Scene;
+use crate::term::Term;
+use crate::Surface;
+
+struct Browser {
+    term: Term<WebBackend>,
+    pick: Option<u64>,
+}
+
+impl Surface for Browser {
+    type Event = Event;
+
+    fn present(&mut self, scene: &Scene) -> Result<()> {
+        if self.pick.is_some_and(|p| p != scene.sync.pick) {
+            pick_folder();
+        }
+        self.pick = Some(scene.sync.pick);
+        self.term.present(scene)
+    }
+
+    fn feed(&mut self, ev: Event, scene: &Scene) -> Vec<Intent> {
+        match ev {
+            Event::GuestNote(note) => vec![Intent::Note(note)],
+            Event::ReloadConfig => vec![Intent::Reload],
+            ev => self.term.feed(ev, scene),
+        }
+    }
+}
 
 pub fn start() {
     console_error_panic_hook::set_once();
@@ -52,6 +82,15 @@ pub fn start() {
     );
     guest_note.forget();
 
+    let type_tx = tx.clone();
+    let typed = Closure::<dyn Fn(String)>::new(move |text: String| {
+        for ev in platform::web::typed(&text) {
+            let _ = type_tx.send(ev);
+        }
+    });
+    let _ = js_sys::Reflect::set(&js_sys::global(), &JsValue::from_str("wrymeType"), typed.as_ref());
+    typed.forget();
+
     let set_roster = Closure::<dyn Fn(String)>::new(move |roster: String| {
         crate::windows::set_roster(&roster);
     });
@@ -83,8 +122,12 @@ async fn boot_and_run(events: crate::platform::web::EventStream) -> Result<()> {
     let backend = WebBackend::new()?;
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+    let mut surface = Browser {
+        term: Term::new(terminal),
+        pick: None,
+    };
     crate::run(
-        &mut terminal,
+        &mut surface,
         boot.client,
         None,
         boot.shops,
@@ -111,6 +154,10 @@ fn call_global(name: &str) -> bool {
 
 fn log(msg: &str) {
     web_sys::console::log_1(&JsValue::from_str(msg));
+}
+
+fn pick_folder() {
+    call_global("wrymePickFolder");
 }
 
 pub fn announce_window(id: &str) {

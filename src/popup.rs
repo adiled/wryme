@@ -1,20 +1,36 @@
 use crate::app::App;
-use crate::input::Input;
-use crate::shop::{Protocol, Shop, WindowMode};
+use crate::shop::{Protocol, Shop};
+use crate::shop_edit::{self, Draft, Knob};
 use crate::station::{Brainy, Dials, Patience, Station};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
 
 #[derive(Debug, Default)]
 pub struct Popup {
     pub mode: Mode,
     pub tab: Tab,
     pub selected: usize,
-    pub scroll: usize,
-    pub name_input: Input,
-    pub dial_input: Input,
     pub dial_idx: Option<usize>,
     pub search: String,
+    pub shop: Option<Editing>,
+    pub saved_shops: Vec<Draft>,
+    pub knob: Option<Knob>,
+    pub refreshing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Editing {
+    pub draft: Draft,
+    pub base: Draft,
+    pub origin: Option<String>,
+}
+
+impl Editing {
+    fn of(draft: Draft, origin: Option<String>) -> Self {
+        Editing { base: draft.clone(), draft, origin }
+    }
+
+    pub fn changed(&self) -> bool {
+        self.draft != self.base
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -26,6 +42,19 @@ pub enum Tab {
     Help,
 }
 
+pub const TABS: [Tab; 4] = [Tab::Station, Tab::Shops, Tab::Pref, Tab::Help];
+
+impl Tab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Station => "Station",
+            Tab::Shops => "Shops",
+            Tab::Pref => "Pref",
+            Tab::Help => "Help",
+        }
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -33,6 +62,7 @@ pub enum Mode {
     Browse,
     SaveAs,
     DialEdit,
+    ShopEdit,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +79,14 @@ pub enum Row {
     PrefView,
     PrefAccent,
     PrefNametags,
+    PrefFont,
+    PrefFeelings,
+    PrefSync,
+    ShopName,
+    ShopKnob(Knob),
+    SavedShop(usize),
+    ShopUpdate,
+    ShopSaveAs,
     Blank,
 }
 
@@ -91,19 +129,46 @@ pub fn dial_metas() -> Vec<DialMeta> {
 pub fn rows(app: &App) -> Vec<Row> {
     match app.popup.tab {
         Tab::Station => station_rows(app),
-        Tab::Pref => pref_rows(),
-        Tab::Shops | Tab::Help => vec![],
+        Tab::Pref => pref_rows(app),
+        Tab::Shops => shop_rows(app),
+        Tab::Help => vec![],
     }
 }
 
-fn pref_rows() -> Vec<Row> {
-    vec![
+fn pref_rows(app: &App) -> Vec<Row> {
+    let mut rows = vec![
         Row::SectionHeader("preferences"),
         Row::PrefVoice,
         Row::PrefView,
         Row::PrefAccent,
         Row::PrefNametags,
-    ]
+        Row::PrefFeelings,
+        Row::PrefFont,
+    ];
+    if app.sync.way.is_some() {
+        rows.push(Row::PrefSync);
+    }
+    rows
+}
+
+fn shop_rows(app: &App) -> Vec<Row> {
+    let mut out = vec![Row::SectionHeader("editing shop")];
+    let editing = app.popup.shop.as_ref();
+    if editing.is_some() {
+        out.push(Row::ShopName);
+        out.extend(Knob::ALL.map(Row::ShopKnob));
+    }
+    out.push(Row::Blank);
+    out.push(Row::SectionHeader("saved shops"));
+    out.extend((0..app.popup.saved_shops.len()).map(Row::SavedShop));
+    out.push(Row::Blank);
+    if editing.is_some_and(|e| e.origin.is_some() && e.changed()) {
+        out.push(Row::ShopUpdate);
+    }
+    if editing.is_some() {
+        out.push(Row::ShopSaveAs);
+    }
+    out
 }
 
 fn station_rows(app: &App) -> Vec<Row> {
@@ -187,7 +252,7 @@ pub fn active_shop_label(app: &App) -> String {
 pub fn selectable_indices(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank | Row::ActiveStation))
+        .filter(|(_, r)| !matches!(r, Row::SectionHeader(_) | Row::Blank | Row::ActiveStation | Row::ShopName))
         .map(|(i, _)| i)
         .collect()
 }
@@ -199,9 +264,8 @@ pub fn toggle(app: &mut App) {
             app.popup.mode = Mode::Browse;
             app.popup.tab = Tab::Station;
             app.popup.selected = first_selectable(app);
-            app.popup.scroll = 0;
         }
-        Mode::Browse | Mode::SaveAs | Mode::DialEdit => {
+        Mode::Browse | Mode::SaveAs | Mode::DialEdit | Mode::ShopEdit => {
             close(app);
         }
     }
@@ -210,12 +274,25 @@ pub fn toggle(app: &mut App) {
 pub fn close(app: &mut App) {
     app.popup.mode = Mode::Closed;
     app.popup.tab = Tab::Station;
-    app.popup.name_input = Input::new();
-    app.popup.dial_input = Input::new();
     app.popup.dial_idx = None;
     app.popup.selected = 0;
-    app.popup.scroll = 0;
     app.popup.search.clear();
+}
+
+pub fn cancel_field(app: &mut App) {
+    if matches!(app.popup.mode, Mode::SaveAs | Mode::DialEdit | Mode::ShopEdit) {
+        app.popup.mode = Mode::Browse;
+        app.popup.dial_idx = None;
+        app.popup.knob = None;
+    }
+}
+
+pub fn pick(app: &mut App, row: usize) {
+    if app.popup.mode != Mode::Browse || !selectable_indices(&rows(app)).contains(&row) {
+        return;
+    }
+    app.popup.selected = row;
+    activate(app);
 }
 
 fn first_selectable(app: &App) -> usize {
@@ -248,9 +325,17 @@ pub fn adjust(app: &mut App, delta: i32) {
             }
         }
         Some(Row::PrefVoice) => toggle_voice(app),
-        Some(Row::PrefView) => crate::keys::toggle_view_mode(app),
+        Some(Row::PrefView) => toggle_view_mode(app),
         Some(Row::PrefAccent) => cycle_accent(app, delta),
         Some(Row::PrefNametags) => cycle_nametags(app, delta),
+        Some(Row::PrefFont) => cycle_typeface(app, delta),
+        Some(Row::PrefFeelings) => cycle_feelings(app, delta),
+        Some(Row::PrefSync) => sync(app),
+        Some(Row::ShopKnob(knob)) if !knob.typed() => {
+            if let Some(e) = app.popup.shop.as_mut() {
+                knob.cycle(&mut e.draft);
+            }
+        }
         _ => {}
     }
 }
@@ -283,7 +368,6 @@ fn activate_row(app: &mut App, row: Row) {
         }
         Row::SaveAsAction => {
             app.popup.mode = Mode::SaveAs;
-            app.popup.name_input = Input::new();
         }
         Row::Dial(idx) => {
             enter_dial_edit(app, idx);
@@ -292,11 +376,111 @@ fn activate_row(app: &mut App, row: Row) {
             adjust(app, 1);
         }
         Row::PrefVoice => toggle_voice(app),
-        Row::PrefView => crate::keys::toggle_view_mode(app),
+        Row::PrefView => toggle_view_mode(app),
         Row::PrefAccent => cycle_accent(app, 1),
         Row::PrefNametags => cycle_nametags(app, 1),
+        Row::PrefFont => cycle_typeface(app, 1),
+        Row::PrefFeelings => cycle_feelings(app, 1),
+        Row::PrefSync => sync(app),
+        Row::SavedShop(idx) => {
+            if let Some(d) = app.popup.saved_shops.get(idx).cloned() {
+                app.note(format!("editing shop '{}'", d.name));
+                app.popup.shop = Some(Editing::of(d.clone(), Some(d.name)));
+            }
+        }
+        Row::ShopKnob(knob) if knob.typed() => {
+            app.popup.knob = Some(knob);
+            app.popup.mode = Mode::ShopEdit;
+        }
+        Row::ShopKnob(_) => adjust(app, 1),
+        Row::ShopUpdate => commit_shop_update(app),
+        Row::ShopSaveAs => app.popup.mode = Mode::SaveAs,
         _ => {}
     }
+}
+
+fn open_shops(app: &mut App) {
+    let text = crate::config::shops_text().unwrap_or_default();
+    app.popup.saved_shops = match shop_edit::saved(&text) {
+        Ok(shops) => shops,
+        Err(e) => {
+            app.note(format!("shops.toml: {e:#}"));
+            Vec::new()
+        }
+    };
+    if app.popup.shop.is_some() {
+        return;
+    }
+    let saved = &app.popup.saved_shops;
+    let pick = saved.iter().find(|d| d.name == app.active_shop.name).or(saved.first());
+    app.popup.shop = Some(match pick {
+        Some(d) => Editing::of(d.clone(), Some(d.name.clone())),
+        None => Editing::of(Draft::blank(), None),
+    });
+}
+
+pub fn commit_shop_edit(app: &mut App, text: &str) {
+    if let (Some(knob), Some(e)) = (app.popup.knob, app.popup.shop.as_mut()) {
+        knob.set(&mut e.draft, text);
+    }
+    app.popup.mode = Mode::Browse;
+    app.popup.knob = None;
+}
+
+pub fn commit_shop_update(app: &mut App) {
+    let Some((origin, draft)) = app.popup.shop.as_ref().and_then(|e| Some((e.origin.clone()?, e.draft.clone()))) else {
+        return;
+    };
+    let text = crate::config::shops_text().unwrap_or_default();
+    match write_shops(app, shop_edit::update(&text, &origin, &draft)) {
+        Ok(()) => {
+            app.popup.shop = Some(Editing::of(draft, Some(origin.clone())));
+            app.note(format!("updated shop '{origin}'"));
+        }
+        Err(e) => app.note(format!("update failed: {e:#}")),
+    }
+}
+
+pub fn commit_shop_save_as(app: &mut App, text: &str) {
+    let name = text.trim().to_string();
+    if name.is_empty() {
+        app.note("name can't be empty");
+        return;
+    }
+    let Some(mut draft) = app.popup.shop.as_ref().map(|e| e.draft.clone()) else {
+        return;
+    };
+    draft.name = name.clone();
+    let file = crate::config::shops_text().unwrap_or_default();
+    match write_shops(app, shop_edit::add(&file, &draft)) {
+        Ok(()) => {
+            app.popup.shop = Some(Editing::of(draft, Some(name.clone())));
+            app.popup.mode = Mode::Browse;
+            app.note(format!("saved shop '{name}'"));
+        }
+        Err(e) => app.note(format!("save failed: {e:#}")),
+    }
+}
+
+fn write_shops(app: &mut App, text: anyhow::Result<String>) -> anyhow::Result<()> {
+    if !crate::config::can_write() {
+        anyhow::bail!("no config folder connected");
+    }
+    crate::config::write_shops(&text?)?;
+    open_shops(app);
+    let fresh = crate::shop::load_all()?;
+    if let Some(s) = fresh.iter().find(|s| s.name == app.active_shop.name) {
+        let was = &app.active_shop;
+        if s.url != was.url || s.key != was.key || s.protocol != was.protocol {
+            app.last_response_id = None;
+            app.forget_wire();
+        }
+        app.active_shop = s.clone();
+    }
+    app.shops = fresh;
+    app.popup.refreshing = true;
+    app.shop_check = Some((app.active_station.clone(), app.active_origin.clone()));
+    Ok(())
 }
 
 fn cycle_accent(app: &mut App, delta: i32) {
@@ -322,6 +506,50 @@ fn cycle_nametags(app: &mut App, delta: i32) {
     app.note(format!("nametags: {name}"));
 }
 
+fn sync(app: &mut App) {
+    match app.sync.way {
+        Some(crate::sync::Way::Link) => {
+            let on = app.sync.place == "off";
+            match crate::sync::link(on) {
+                Ok(()) => {
+                    app.sync.refresh();
+                    app.note(if on {
+                        "sync on: shops, stations and prefs now live in iCloud Drive › wryme"
+                    } else {
+                        "sync off: settings are local again"
+                    });
+                }
+                Err(e) => app.note(format!("error: sync {e:#}")),
+            }
+        }
+        Some(crate::sync::Way::Pick) => {
+            app.sync.pick += 1;
+            app.note("choose the folder that holds shops.toml and stations.toml");
+        }
+        None => {}
+    }
+}
+
+fn cycle_feelings(app: &mut App, delta: i32) {
+    let all = crate::config::FEELINGS;
+    let n = all.len() as i32;
+    let cur = all.iter().position(|(_, f)| *f == app.feelings).unwrap_or(0) as i32;
+    let (name, feelings) = all[(cur + delta).rem_euclid(n) as usize];
+    app.feelings = feelings;
+    let _ = crate::config::write_feelings(feelings);
+    app.note(format!("feelings: {name}"));
+}
+
+fn cycle_typeface(app: &mut App, delta: i32) {
+    let faces = crate::config::TYPEFACES;
+    let n = faces.len() as i32;
+    let cur = faces.iter().position(|(_, f)| *f == app.typeface).unwrap_or(0) as i32;
+    let (name, face) = faces[(cur + delta).rem_euclid(n) as usize];
+    app.typeface = face;
+    let _ = crate::config::write_typeface(face);
+    app.note(format!("font: {name}"));
+}
+
 pub fn toggle_voice(app: &mut App) {
     if app.voice_on {
         app.voice_on = false;
@@ -337,23 +565,18 @@ pub fn toggle_voice(app: &mut App) {
 }
 
 fn enter_dial_edit(app: &mut App, idx: usize) {
-    if let Some(meta) = dial_metas().get(idx) {
-        let cur = (meta.label)(&app.active_station.dials);
-        let mut input = Input::new();
-        input.text = cur;
-        input.end();
-        app.popup.dial_input = input;
+    if idx < dial_metas().len() {
         app.popup.dial_idx = Some(idx);
         app.popup.mode = Mode::DialEdit;
     }
 }
 
-pub fn commit_dial_edit(app: &mut App) {
+pub fn commit_dial_edit(app: &mut App, text: &str) {
     let idx = match app.popup.dial_idx {
         Some(i) => i,
         None => return,
     };
-    let text = app.popup.dial_input.text.trim().to_string();
+    let text = text.trim().to_string();
     if text.is_empty() {
         app.note("tinker value can't be empty");
         return;
@@ -372,7 +595,6 @@ pub fn commit_dial_edit(app: &mut App) {
         app.note(format!("{} = {}", meta.name, val.label()));
     }
     app.popup.mode = Mode::Browse;
-    app.popup.dial_input = Input::new();
     app.popup.dial_idx = None;
 }
 
@@ -396,8 +618,8 @@ fn parse_tinker_val(s: &str) -> Option<crate::station::TinkerVal> {
     None
 }
 
-pub fn commit_save_as(app: &mut App) {
-    let name = app.popup.name_input.text.trim().to_string();
+pub fn commit_save_as(app: &mut App, text: &str) {
+    let name = text.trim().to_string();
     if name.is_empty() {
         app.note("name can't be empty");
         return;
@@ -425,12 +647,11 @@ pub fn commit_save_as(app: &mut App) {
     app.active_origin = Some(name.clone());
     app.note(format!("saved station '{}'", name));
     app.popup.mode = Mode::Browse;
-    app.popup.name_input = Input::new();
 }
 
 pub fn commit_update(app: &mut App) {
     let Some(origin) = app.active_origin.clone() else {
-        app.note("nothing to update; this is an untitled session");
+        app.note("nothing to update; this is an untitled station");
         return;
     };
     if !crate::config::can_write() {
@@ -488,6 +709,9 @@ pub fn finish_shop_check(app: &mut App, shops: Vec<Shop>, st: Station, origin: O
         if let Some(s) = app.shops.iter_mut().find(|s| s.name == fresh.name) {
             s.models = fresh.models;
         }
+    }
+    if std::mem::take(&mut app.popup.refreshing) {
+        return;
     }
     let current = app.active_shop.name.clone();
     match crate::shop::choose(&app.shops, &app.memory, &st.model, &current) {
@@ -656,17 +880,25 @@ pub fn cycle_tinker_depth_dials(dials: &mut Dials, delta: i32) {
 }
 
 pub fn switch_tab(app: &mut App) {
-    app.popup.tab = match app.popup.tab {
-        Tab::Station => Tab::Shops,
-        Tab::Shops => Tab::Pref,
-        Tab::Pref => Tab::Help,
-        Tab::Help => Tab::Station,
-    };
+    let at = TABS.iter().position(|t| *t == app.popup.tab).unwrap_or(0);
+    enter_tab(app, TABS[(at + 1) % TABS.len()]);
+}
+
+pub fn jump_tab(app: &mut App, idx: usize) {
+    if let Some(tab) = TABS.get(idx) {
+        enter_tab(app, *tab);
+    }
+}
+
+fn enter_tab(app: &mut App, tab: Tab) {
+    if tab == Tab::Shops {
+        open_shops(app);
+    }
+    app.popup.tab = tab;
     app.popup.mode = Mode::Browse;
-    app.popup.name_input = Input::new();
-    app.popup.selected = 0;
-    app.popup.scroll = 0;
+    app.popup.dial_idx = None;
     app.popup.search.clear();
+    app.popup.selected = first_selectable(app);
 }
 
 pub fn type_search(app: &mut App, c: char) {
@@ -674,6 +906,14 @@ pub fn type_search(app: &mut App, c: char) {
         return;
     }
     app.popup.search.push(c);
+    retarget_search(app);
+}
+
+pub fn set_search(app: &mut App, text: String) {
+    if app.popup.mode != Mode::Browse || app.popup.tab != Tab::Station {
+        return;
+    }
+    app.popup.search = text;
     retarget_search(app);
 }
 
@@ -698,124 +938,17 @@ fn retarget_search(app: &mut App) {
 }
 
 pub fn open_help(app: &mut App) {
-    if app.popup.mode == Mode::Closed {
-        app.popup.mode = Mode::Browse;
-        app.popup.selected = 0;
-    }
-    app.popup.tab = Tab::Help;
-    app.popup.mode = Mode::Browse;
-    app.popup.name_input = Input::new();
-    app.popup.scroll = 0;
-    app.popup.search.clear();
+    enter_tab(app, Tab::Help);
 }
 
-pub fn scroll(app: &mut App, delta: i32) {
-    let r = if delta > 0 {
-        app.popup.scroll.saturating_add(delta as usize)
-    } else {
-        app.popup.scroll.saturating_sub((-delta) as usize)
+pub(crate) fn toggle_view_mode(app: &mut App) {
+    app.view_mode = match app.view_mode {
+        crate::app::ViewMode::Page => crate::app::ViewMode::Scroll,
+        crate::app::ViewMode::Scroll => crate::app::ViewMode::Page,
     };
-    app.popup.scroll = r;
+    app.note(match app.view_mode {
+        crate::app::ViewMode::Page => "view: page",
+        crate::app::ViewMode::Scroll => "view: scroll",
+    });
 }
 
-pub fn help_rows() -> Vec<(String, String)> {
-    vec![
-        ("Enter".into(), "send input".into()),
-        ("Esc".into(), "stop a streaming reply / clear note".into()),
-        ("Ctrl-C".into(), "quit immediately".into()),
-        ("Ctrl-T".into(), "toggle page / scroll view".into()),
-        ("Ctrl-V".into(), "read replies aloud on / off".into()),
-        ("PgUp / PgDn".into(), "page or scroll up / down".into()),
-        ("← / →".into(), "move the input cursor".into()),
-        ("Home / End".into(), "jump to input start / end".into()),
-        (
-            "Backspace / Delete".into(),
-            "delete before / after cursor".into(),
-        ),
-        ("Ctrl-A / Ctrl-E".into(), "jump to input start / end".into()),
-        ("Ctrl-U".into(), "kill to start of line".into()),
-        ("Ctrl-K".into(), "kill to end of line".into()),
-        ("Ctrl-W".into(), "kill previous word".into()),
-        ("Ctrl-S".into(), "open / close this popup".into()),
-        ("Tab / F1".into(), "switch Station / Shops / Pref / Help tab".into()),
-        ("Mouse wheel".into(), "scroll in page / scroll view".into()),
-        ("".into(), "".into()),
-        ("In the Station tab:".into(), "".into()),
-        ("↑ / ↓".into(), "move between selectable rows".into()),
-        ("← / →".into(), "adjust model / dials (also Enter)".into()),
-        ("Enter".into(), "load station / update / save-as".into()),
-        ("PgUp / PgDn".into(), "scroll the popup body".into()),
-        ("Esc".into(), "close popup".into()),
-        ("".into(), "".into()),
-        ("In the Help tab:".into(), "".into()),
-        ("Esc / Tab".into(), "leave Help back to Station".into()),
-        ("F1".into(), "open Help tab from anywhere".into()),
-    ]
-}
-
-pub fn shops_lines(app: &App) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    for (i, s) in app.shops.iter().enumerate() {
-        let active = s.name == app.active_shop.name;
-        let tag = if active { "▶ " } else { "  " };
-        let name_style = if active {
-            Style::default().fg(app.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.accent)
-        };
-        out.push(Line::from(vec![
-            Span::styled(format!("{tag}{}", s.name), name_style),
-            Span::styled(
-                format!("   {}/{}", protocol_label(s.protocol), window_label(s.window)),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-        let url = if s.url.is_empty() {
-            "local (no network)".to_string()
-        } else {
-            s.url.clone()
-        };
-        out.push(Line::from(Span::styled(
-            format!("    url     {url}"),
-            Style::default().fg(Color::DarkGray),
-        )));
-        out.push(Line::from(Span::styled(
-            format!("    models  {}", s.models.join(", ")),
-            Style::default().fg(Color::DarkGray),
-        )));
-        let key = if s.key.is_empty() {
-            "(none)"
-        } else {
-            "(set)"
-        };
-        out.push(Line::from(Span::styled(
-            format!("    key     {key}"),
-            Style::default().fg(Color::DarkGray),
-        )));
-        if i + 1 < app.shops.len() {
-            out.push(Line::from(""));
-        }
-    }
-    if app.shops.is_empty() {
-        out.push(Line::from(Span::styled(
-            "  no shops configured",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    out
-}
-
-fn protocol_label(p: Protocol) -> &'static str {
-    match p {
-        Protocol::Demo => "demo",
-        Protocol::ChatCompletions => "chat",
-        Protocol::Responses => "responses",
-    }
-}
-
-fn window_label(w: WindowMode) -> &'static str {
-    match w {
-        WindowMode::Full => "full",
-        WindowMode::Warm => "warm",
-    }
-}

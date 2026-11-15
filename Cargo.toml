@@ -8,7 +8,7 @@ repository = "https://github.com/adiled/wryme"
 homepage = "https://github.com/adiled/wryme"
 documentation = "https://github.com/adiled/wryme#readme"
 readme = "README.md"
-exclude = ["dist/", "desktop/", "target/", "web/", "hive/", "spec/"]
+exclude = ["dist/", "desktop/", "target/", "web/", "apple/", "hive/", "spec/"]
 keywords = ["tui", "terminal", "chat", "ai", "agent"]
 categories = ["command-line-interface"]
 
@@ -17,7 +17,7 @@ name = "wryme"
 path = "src/lib.rs"
 
 [workspace]
-members = ["web"]
+members = ["web", "apple"]
 
 [[bin]]
 name = "wme"
@@ -35,6 +35,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+toml_edit = "0.22"
 futures-util = "0.3"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
@@ -104,6 +105,10 @@ web-sys = { version = "0.3", features = [
     "Performance",
     "CssStyleDeclaration",
     "DomTokenList",
+    "MediaQueryList",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
 ] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 console_error_panic_hook = "0.1"

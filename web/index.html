@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
   <title>wryme</title>
   <link data-trunk rel="rust" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types" />
   <link data-trunk rel="copy-file" href="app.js" />
@@ -74,6 +74,19 @@
       font-variant-ligatures: none;
       font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
     }
+    #wryme-keys {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      border: 0;
+      opacity: 0;
+      resize: none;
+      font-size: 16px;
+      caret-color: transparent;
+    }
     #wryme-config {
       position: fixed;
       bottom: 26px;
@@ -134,6 +147,6 @@
 <body>
   <div id="wryme-term" tabindex="0"></div>
   <div id="wryme-measure">MMMMMMMMMMMMMMMMMMMM</div>
-  <script src="app.js?v=8" defer></script>
+  <script src="app.js?v=9" defer></script>
 </body>
 </html>

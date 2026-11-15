@@ -61,6 +61,10 @@ and away you go.
 Edit the file `~/.config/wryme/shops.toml` and put one block in it for the
 AI service you have an account with:
 
+Or do it inside wryme: settings (Ctrl-S) › Shops. Edit a shop's url, key,
+protocol and models there, then update it or save it as a new shop. A key
+written as `$NAME` is read from that environment variable.
+
 💡 Default protocol is [open-responses](https://www.openresponses.org/), and chat-completions AKA OpenAI-Compat is also supported.
 
 **Open AI itself**

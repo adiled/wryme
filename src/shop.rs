@@ -126,6 +126,15 @@ pub fn load_all() -> Result<Vec<Shop>> {
             out.push(def.resolve());
         }
     }
+    if crate::sync::AWAY
+        && let Some(host) = crate::config::host_pref()
+    {
+        for shop in &mut out {
+            if let Some(url) = crate::sync::reach(&shop.url, &host) {
+                shop.url = url;
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -227,12 +236,11 @@ pub async fn discover_all(shops: &mut [Shop]) {
     let mut http_builder = reqwest::Client::builder();
     #[cfg(not(target_arch = "wasm32"))]
     for var in &["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"] {
-        if let Ok(path) = std::env::var(var) {
-            if let Ok(pem) = std::fs::read(&path) {
-                if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
-                    http_builder = http_builder.add_root_certificate(cert);
-                }
-            }
+        if let Ok(path) = std::env::var(var)
+            && let Ok(pem) = std::fs::read(&path)
+            && let Ok(cert) = reqwest::Certificate::from_pem(&pem)
+        {
+            http_builder = http_builder.add_root_certificate(cert);
         }
     }
     let http = match http_builder.build() {

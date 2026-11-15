@@ -22,10 +22,15 @@ pub enum Phase {
     Writing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     Page,
     Scroll,
+}
+
+impl ViewMode {
+    pub const ALL: &[ViewMode] = &[ViewMode::Page, ViewMode::Scroll];
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +39,20 @@ pub struct ToolEvent {
     pub name: String,
     pub arguments: String,
     pub result: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Felt {
+    pub brain: Option<(f64, f64)>,
+    pub heart: Option<(f64, f64)>,
+}
+
+fn felt_now(span: &mut Option<(f64, f64)>) {
+    let now = crate::platform::unix_secs();
+    match span {
+        Some((_, end)) => *end = now,
+        None => *span = Some((now, now)),
+    }
 }
 
 #[derive(Debug)]
@@ -51,6 +70,7 @@ pub struct Message {
     pub current_tool: Option<String>,
     pub turn_id: u64,
     pub tool_events: Vec<ToolEvent>,
+    pub felt: Felt,
 }
 
 fn now_hhmm() -> String {
@@ -65,13 +85,10 @@ pub struct App {
     pub in_flight: bool,
     pub status: String,
     pub awaiting: String,
+    pub awaiting_images: Vec<String>,
+    pub clearing: bool,
     pub should_quit: bool,
-    pub current_page: usize,
-    pub scroll_row: usize,
-    pub page_base: usize,
-    pub wheel_accum: i32,
     pub view_mode: ViewMode,
-    pub last_viewport_h: usize,
     pub last_response_id: Option<String>,
     pub wire: Option<Vec<serde_json::Value>>,
     wire_upto: usize,
@@ -85,6 +102,9 @@ pub struct App {
     pub voice_buffer: String,
     pub accent: ratatui::style::Color,
     pub nametags: crate::config::NametagMode,
+    pub typeface: crate::config::Typeface,
+    pub feelings: crate::config::Feelings,
+    pub sync: crate::sync::Sync,
     pub shops: Vec<Shop>,
     pub stations: Vec<Station>,
     pub active_station: Station,
@@ -96,8 +116,6 @@ pub struct App {
     pub popup: Popup,
     pub engine: Arc<Mutex<book::Engine>>,
     pub reservoir: Arc<Mutex<Reservoir>>,
-    pub selection: Option<crate::select::Selection>,
-    pub screen: crate::select::Screen,
     turn_counter: u64,
     last_stream_was_brain: bool,
     last_stream_was_heart: bool,
@@ -150,21 +168,21 @@ impl App {
         active_shop: Shop,
         active_origin: Option<String>,
     ) -> Self {
+        crate::sync::publish();
+        let window_id = crate::windows::mint();
+        let engine = book::open_engine(&book_dir(), &window_id).expect("open book");
         Self {
             messages: Vec::new(),
             system,
-            window_id: crate::windows::mint(),
+            window_id,
             guest_queue: Vec::new(),
             in_flight: false,
             status: String::new(),
             awaiting: String::new(),
+            awaiting_images: Vec::new(),
+            clearing: false,
             should_quit: false,
-            current_page: 0,
-            scroll_row: 0,
-            page_base: 0,
-            wheel_accum: 0,
             view_mode: ViewMode::Page,
-            last_viewport_h: 0,
             last_response_id: None,
             wire: Some(Vec::new()),
             wire_upto: 0,
@@ -178,6 +196,9 @@ impl App {
             voice_buffer: String::new(),
             accent: crate::config::accent_pref(),
             nametags: crate::config::nametags_pref(),
+            typeface: crate::config::typeface_pref(),
+            feelings: crate::config::feelings_pref(),
+            sync: crate::sync::Sync::now(),
             shops,
             stations,
             active_station,
@@ -187,12 +208,8 @@ impl App {
             shop_check: None,
             shop_check_task: None,
             popup: Popup::default(),
-            engine: Arc::new(Mutex::new(
-                book::open_engine(&book_dir()).expect("open book"),
-            )),
+            engine: Arc::new(Mutex::new(engine)),
             reservoir: Arc::new(Mutex::new(Reservoir::load())),
-            selection: None,
-            screen: Vec::new(),
             turn_counter: 0,
             last_stream_was_brain: false,
             last_stream_was_heart: false,
@@ -227,8 +244,15 @@ impl App {
         self.active_origin = active_origin;
         self.accent = crate::config::accent_pref();
         self.nametags = crate::config::nametags_pref();
+        self.typeface = crate::config::typeface_pref();
+        self.feelings = crate::config::feelings_pref();
+        self.sync.refresh();
         self.last_response_id = None;
         self.forget_wire();
+    }
+
+    pub fn turn(&self) -> u64 {
+        self.turn_counter
     }
 
     pub fn note(&mut self, msg: impl Into<String>) {
@@ -328,12 +352,13 @@ impl App {
             current_tool: None,
             turn_id: 0,
             tool_events: Vec::new(),
+            felt: Felt::default(),
         });
         if let Some(last) = self.messages.last()
             && last.role == Role::User
-            && let Ok(mut e) = self.engine.lock()
         {
-            e.record_turn("user", &last.content);
+            let text = last.content.clone();
+            self.record("user", &text);
         }
     }
 
@@ -347,9 +372,7 @@ impl App {
             crate::windows::answer(&from, &reply_to, &text);
             format!("[from wryme#{from} re #{reply_to}]")
         };
-        if let Ok(mut e) = self.engine.lock() {
-            e.record_turn("user", &format!("{stamp} {text}"));
-        }
+        self.record("user", &format!("{stamp} {text}"));
         self.messages.push(Message {
             role: Role::User,
             content: text,
@@ -364,6 +387,7 @@ impl App {
             current_tool: None,
             turn_id: 0,
             tool_events: Vec::new(),
+            felt: Felt::default(),
         });
     }
 
@@ -389,6 +413,7 @@ impl App {
             current_tool: None,
             turn_id,
             tool_events: Vec::new(),
+            felt: Felt::default(),
         }
     }
 
@@ -440,6 +465,7 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.turn_id == tid)
         {
             m.brain.push_str(delta);
+            felt_now(&mut m.felt.brain);
         }
         if let Some(m) = self.streaming_assistant() {
             m.phase = Phase::Thinking;
@@ -458,6 +484,7 @@ impl App {
             .find(|m| m.role == Role::Assistant && m.turn_id == tid)
         {
             m.heart.push_str(delta);
+            felt_now(&mut m.felt.heart);
         }
         if let Some(m) = self.streaming_assistant() {
             m.phase = Phase::Thinking;
@@ -520,10 +547,8 @@ impl App {
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            if !joined.is_empty()
-                && let Ok(mut e) = self.engine.lock()
-            {
-                e.record_turn("assistant", &joined);
+            if !joined.is_empty() && !self.clearing {
+                self.record("assistant", &joined);
             }
 
             let user_text = self
@@ -575,6 +600,18 @@ impl App {
         }
     }
 
+    pub fn clear_screen(&mut self) -> Option<String> {
+        self.messages.clear();
+        self.wire = Some(Vec::new());
+        self.wire_upto = 0;
+        self.wire_pending = None;
+        self.last_response_id = None;
+        self.usage_ctx = 0;
+        self.usage_cached = 0;
+        self.usage_out = 0;
+        crate::book::lock(&self.engine).reopen_last()
+    }
+
     pub fn forget_wire(&mut self) {
         self.wire = None;
         self.wire_pending = None;
@@ -617,15 +654,26 @@ impl App {
         }
     }
 
+    fn record(&mut self, role: &str, content: &str) {
+        let trouble = {
+            let mut e = crate::book::lock(&self.engine);
+            e.record_turn(role, content);
+            e.take_trouble()
+        };
+        if let Some(why) = trouble {
+            self.note(format!("save failed: the book couldn't keep this turn ({why})"));
+        }
+    }
+
     pub fn api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if let Some(sys) = &self.system {
             out.push(system_message(sys.clone()));
         }
-        if let Ok(engine) = self.engine.lock() {
-            for preamble in engine.preamble() {
-                out.push(system_message(preamble));
-            }
+        {
+            let mut engine = crate::book::lock(&self.engine);
+            engine.refresh();
+            out.extend(engine.preamble().into_iter().map(system_message));
         }
         let mut last_asst_turn: Option<u64> = None;
         for m in &self.messages {
@@ -687,9 +735,7 @@ impl App {
                 }
             }
         }
-        if let Ok(mut engine) = self.engine.lock()
-            && let Some(prod) = engine.take_prod()
-        {
+        if let Some(prod) = crate::book::lock(&self.engine).take_prod() {
             out.push(system_message(prod));
         }
         out
@@ -713,7 +759,7 @@ mod tests {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("wryme_app_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        app.engine = Arc::new(Mutex::new(book::open_engine(&dir).unwrap()));
+        app.engine = Arc::new(Mutex::new(book::open_engine(&dir, "test").unwrap()));
         app
     }
 

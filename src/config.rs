@@ -42,7 +42,8 @@ pub const ACCENTS: &[(&str, ratatui::style::Color)] = &[
     ("lightmagenta", ratatui::style::Color::LightMagenta),
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NametagMode {
     Standout,
     Inlined,
@@ -136,6 +137,91 @@ pub fn write_nametags(mode: NametagMode) -> Result<()> {
     write_pref("nametags", mode.name())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Typeface {
+    System,
+    Serif,
+    Rounded,
+    Mono,
+}
+
+pub const TYPEFACES: &[(&str, Typeface)] = &[
+    ("system", Typeface::System),
+    ("serif", Typeface::Serif),
+    ("rounded", Typeface::Rounded),
+    ("mono", Typeface::Mono),
+];
+
+impl Typeface {
+    pub fn name(self) -> &'static str {
+        TYPEFACES
+            .iter()
+            .find(|(_, t)| *t == self)
+            .map_or("system", |(n, _)| *n)
+    }
+}
+
+pub fn typeface_pref() -> Typeface {
+    let name = prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("font")?.as_str().map(String::from));
+    TYPEFACES
+        .iter()
+        .find(|(n, _)| Some(*n) == name.as_deref())
+        .map_or(Typeface::System, |(_, t)| *t)
+}
+
+pub fn write_typeface(face: Typeface) -> Result<()> {
+    write_pref("font", face.name())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feelings {
+    Hidden,
+    Hint,
+    Latest,
+    Full,
+}
+
+pub const FEELINGS: &[(&str, Feelings)] = &[
+    ("hidden", Feelings::Hidden),
+    ("hint", Feelings::Hint),
+    ("latest", Feelings::Latest),
+    ("full", Feelings::Full),
+];
+
+impl Feelings {
+    pub fn name(self) -> &'static str {
+        FEELINGS.iter().find(|(_, f)| *f == self).map_or("full", |(n, _)| *n)
+    }
+}
+
+pub fn feelings_pref() -> Feelings {
+    let name = prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("feelings")?.as_str().map(String::from));
+    FEELINGS
+        .iter()
+        .find(|(n, _)| Some(*n) == name.as_deref())
+        .map_or(Feelings::Full, |(_, f)| *f)
+}
+
+pub fn write_feelings(feelings: Feelings) -> Result<()> {
+    write_pref("feelings", feelings.name())
+}
+
+pub fn host_pref() -> Option<String> {
+    prefs_text()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("host")?.as_str().map(String::from))
+        .filter(|h| !h.is_empty())
+}
+
+pub fn write_host(name: &str) -> Result<()> {
+    write_pref("host", name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +240,22 @@ mod tests {
         let after: serde_json::Value =
             serde_json::from_str(&merged_prefs(Some("not json"), "nametags", "inlined")).unwrap();
         assert_eq!(after, serde_json::json!({ "nametags": "inlined" }));
+    }
+
+    #[test]
+    fn feelings_names_round_trip() {
+        for (name, feelings) in FEELINGS {
+            assert_eq!(feelings.name(), *name);
+        }
+        assert_eq!(FEELINGS[0], ("hidden", Feelings::Hidden));
+    }
+
+    #[test]
+    fn typeface_names_match_the_wire() {
+        for (name, face) in TYPEFACES {
+            assert_eq!(face.name(), *name);
+            assert_eq!(serde_json::to_value(face).unwrap(), *name);
+        }
     }
 
     #[test]
@@ -189,6 +291,9 @@ mod imp {
     use std::path::PathBuf;
 
     fn dir() -> Option<PathBuf> {
+        if let Some(shared) = super::shared_dir() {
+            return Some(shared);
+        }
         std::env::var("HOME").ok().map(|h| {
             PathBuf::from(h)
                 .join(".config")
@@ -211,6 +316,21 @@ mod imp {
         read_or_seed("shops.toml", super::DEFAULT_SHOPS)
     }
 
+    pub fn shops_place() -> String {
+        let Some(dir) = dir() else {
+            return "shops.toml".into();
+        };
+        if super::shared_dir().is_some() {
+            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return format!("shops.toml in the {name} folder");
+        }
+        let file = dir.join("shops.toml").display().to_string();
+        match std::env::var("HOME") {
+            Ok(home) if file.starts_with(&home) => file.replacen(&home, "~", 1),
+            _ => file,
+        }
+    }
+
     pub fn stations_text() -> Option<String> {
         read_or_seed("stations.toml", super::DEFAULT_STATIONS)
     }
@@ -221,6 +341,11 @@ mod imp {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    }
+
+    pub fn write_shops(text: &str) -> Result<()> {
+        let path = dir().context("no $HOME")?.join("shops.toml");
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 
@@ -294,8 +419,18 @@ mod imp {
         SHOPS.with(|c| c.borrow().clone())
     }
 
+    pub fn shops_place() -> String {
+        "shops.toml in the connected folder".into()
+    }
+
     pub fn stations_text() -> Option<String> {
         STATIONS.with(|c| c.borrow().clone())
+    }
+
+    pub fn write_shops(text: &str) -> Result<()> {
+        SHOPS.with(|c| *c.borrow_mut() = Some(text.to_string()));
+        call_global("wrymeWriteFile", &[JsValue::from_str("shops.toml"), JsValue::from_str(text)]);
+        Ok(())
     }
 
     pub fn write_stations(text: &str) -> Result<()> {
@@ -312,8 +447,23 @@ mod imp {
     }
 }
 
+static SHARED: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+pub fn share_dir(path: std::path::PathBuf) {
+    *SHARED.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+}
+
+pub fn shared_dir() -> Option<std::path::PathBuf> {
+    let set = SHARED.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    set.or_else(|| std::env::var_os("WRYME_CONFIG_DIR").map(std::path::PathBuf::from))
+}
+
 pub fn shops_text() -> Option<String> {
     imp::shops_text()
+}
+
+pub fn shops_place() -> String {
+    imp::shops_place()
 }
 
 pub fn stations_text() -> Option<String> {
@@ -322,6 +472,10 @@ pub fn stations_text() -> Option<String> {
 
 pub fn write_stations(text: &str) -> Result<()> {
     imp::write_stations(text)
+}
+
+pub fn write_shops(text: &str) -> Result<()> {
+    imp::write_shops(text)
 }
 
 pub fn prefs_text() -> Option<String> {
